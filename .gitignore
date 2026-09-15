@@ -1,0 +1,67 @@
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor/project settings
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Office/LibreOffice lock and backup files
+.~lock.*#
+~$*
+*.bak
+*.odt
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local databases, dumps, and generated data
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.sql
+*.backup
+*.bak
+*.csv
+*.tsv
+data/
+backups/
+dumps/
+
+# Neo4j local files
+neo4j/data/
+neo4j/logs/
+neo4j/import/
+neo4j/plugins/
+
+# PostgreSQL local files
+postgres/data/
+pgdata/
