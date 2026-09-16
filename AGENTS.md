@@ -41,3 +41,9 @@ Do not modify the database unless the user explicitly asks for it.
 Read-only database checks are allowed when requested.
 
 For local PostgreSQL access, prefer the project `.env` settings. Do not commit `.env`.
+
+## Language
+
+Write code, comments, commit messages, README content, and project documentation in English.
+
+Talk to the user in Swedish unless the user asks for another language.

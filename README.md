@@ -1,23 +1,23 @@
 # AI2_VG
 
-Detta projekt modellerar simulerade datakällor från ett software engineering-team.
+This project models simulated data sources from a software engineering team.
 
-Syftet är att bevara källmaterial i PostgreSQL inför senare import till en grafdatabas. SQL-lagret ska hålla originaldata, stabila ID:n, tider, versioner och källhänvisningar. Grafdatabasen är sedan tänkt att användas för att hitta samband mellan personer, behov, diskussioner, beslut, ärenden, dokumentation och implementation.
+The purpose is to preserve source material in PostgreSQL before later importing it into a graph database. The SQL layer stores original data, stable IDs, timestamps, versions, and source references. The graph database is intended to find connections between people, needs, discussions, decisions, issues, documentation, and implementation.
 
-## Datakällor
+## Data Sources
 
-Projektet utgår från sex typer av källor:
+The project uses six source types:
 
 - Mail
-- Slack/projektchatt
-- Teams/mötestranskript
-- Ärenden/tickets
-- Krav och teknisk dokumentation
-- PR:er, kodgranskningar och kodändringar
+- Slack/project chat
+- Teams/meeting transcripts
+- Issues/tickets
+- Requirements and technical documentation
+- Pull requests, code reviews, and code changes
 
-## SQL-tabeller
+## SQL Tables
 
-Databasschemat består av nio tabeller:
+The database schema contains nine tables:
 
 - `mail_messages`
 - `slack_messages`
@@ -29,17 +29,17 @@ Databasschemat består av nio tabeller:
 - `pr_versions`
 - `pr_reviews`
 
-## JSONB-fält
+## JSONB Fields
 
-Vissa fält sparas som `JSONB` eftersom de naturligt är listor eller strukturer:
+Some fields are stored as `JSONB` because they naturally contain lists or structured values:
 
-- mailmottagare
-- mötesdeltagare
-- kodändringar i PR:er
+- mail recipients
+- meeting participants
+- code changes in pull requests
 
-Det gör att källmaterialet kan bevaras utan onödig uppdelning i fler SQL-tabeller.
+This keeps the source material structured without splitting it into unnecessary extra SQL tables.
 
-## Projektstruktur
+## Project Structure
 
 ```text
 docs/
@@ -48,19 +48,24 @@ draft/
   plan_initial.PNG
   plan_initial2.PNG
 scripts/
+  install_deps.ps1
+  run_viewer.ps1
   setup_postgres_schema.py
+viewer/
+  app.py
+AGENTS.md
 README.md
 requirements.txt
 ```
 
-## Databas
+## Database
 
-Projektet använder PostgreSQL.
+The project uses PostgreSQL.
 
-Schemat finns i:
+The schema is defined in:
 
 ```text
 scripts/setup_postgres_schema.py
 ```
 
-Lokala databasinställningar ska ligga i `.env`. Den filen ska inte commitas till repo.
+Local database settings should be placed in `.env`. That file must not be committed to the repository.
