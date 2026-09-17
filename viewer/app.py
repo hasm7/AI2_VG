@@ -57,6 +57,7 @@ PAGE = """
     .import-box button { border: 0; border-radius: 6px; background: #047857; color: white; padding: 8px 10px; cursor: pointer; }
     .import-box input { border: 1px solid #a7f3d0; border-radius: 6px; padding: 7px 8px; min-width: 170px; }
     .import-box p { margin: 8px 0 0; font-size: 13px; color: #065f46; }
+    .import-graph { margin: 0 0 10px; font-family: Consolas, monospace; font-size: 13px; color: #064e3b; }
     .error { background: #fef2f2; border-color: #fecaca; }
     .error p { color: #991b1b; }
     .panel { background: white; border: 1px solid #e5e7eb; border-radius: 6px; margin: 14px 0; }
@@ -104,12 +105,24 @@ PAGE = """
 
       {% if active_source == 'mail' %}
         <div class="import-box {{ 'error' if import_error else '' }}">
+          <div class="import-graph">
+            (:Person)-[:SENT_MAIL]-&gt;(:MailMessage)-[:MAIL_RECIPIENT {recipient_type}]-&gt;(:Person)
+          </div>
           <form method="post" action="/import/mail">
-            <input name="neo4j_uri" value="{{ neo4j_uri }}" aria-label="Neo4j URI">
-            <input name="neo4j_database" value="{{ neo4j_database }}" aria-label="Neo4j database">
-            <input name="neo4j_user" value="{{ neo4j_user }}" aria-label="Neo4j user">
-            <input name="neo4j_password" type="password" placeholder="Neo4j password" aria-label="Neo4j password">
-            <button type="submit">Importera Mail</button>
+            <button type="submit">Importera alla mail</button>
+          </form>
+          {% if import_result %}<p>{{ import_result }}</p>{% endif %}
+          {% if import_error %}<p>{{ import_error }}</p>{% endif %}
+        </div>
+      {% endif %}
+
+      {% if active_source == 'slack' %}
+        <div class="import-box {{ 'error' if import_error else '' }}">
+          <div class="import-graph">
+            (:Person)-[:SENT_SLACK_MESSAGE]-&gt;(:SlackMessage)-[:SLACK_THREAD_REPLY_TO]-&gt;(:SlackMessage)
+          </div>
+          <form method="post" action="/import/slack">
+            <button type="submit">Importera alla Slack-meddelanden</button>
           </form>
           {% if import_result %}<p>{{ import_result }}</p>{% endif %}
           {% if import_error %}<p>{{ import_error }}</p>{% endif %}
@@ -217,11 +230,34 @@ def load_all_mail_rows():
             """)
 
 
+def load_all_slack_rows():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT *
+                FROM slack_messages
+                ORDER BY sent_at, source_instance, workspace_id, channel_id, message_id, version_number
+            """)
+
+
 def ensure_mail_graph_schema(tx):
     tx.run("""
         CREATE CONSTRAINT mail_message_key IF NOT EXISTS
         FOR (m:MailMessage)
         REQUIRE (m.source_instance, m.message_id) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+def ensure_slack_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT slack_message_key IF NOT EXISTS
+        FOR (m:SlackMessage)
+        REQUIRE (m.source_instance, m.workspace_id, m.channel_id, m.message_id, m.version_number) IS UNIQUE
     """)
     tx.run("""
         CREATE CONSTRAINT person_key IF NOT EXISTS
@@ -240,6 +276,8 @@ def import_mail_row(tx, row):
             message_id: $message_id
         })
         SET m.sender_address = $sender_address,
+            m.name = $message_id,
+            m.display_name = $message_id,
             m.sender_name = $sender_name,
             m.recipients_raw = $recipients_raw,
             m.subject = $subject,
@@ -270,7 +308,7 @@ def import_mail_row(tx, row):
             MERGE (p:Person {person_key: $person_key})
             SET p.name = coalesce($name, p.name),
                 p.email = coalesce($email, p.email)
-            MERGE (p)-[:SENT]->(m)
+            MERGE (p)-[:SENT_MAIL]->(m)
         """, {
             "source_instance": row["source_instance"],
             "message_id": row["message_id"],
@@ -293,7 +331,7 @@ def import_mail_row(tx, row):
             MERGE (p:Person {person_key: $person_key})
             SET p.name = coalesce($name, p.name),
                 p.email = coalesce($email, p.email)
-            MERGE (m)-[r:SENT_TO]->(p)
+            MERGE (m)-[r:MAIL_RECIPIENT]->(p)
             SET r.recipient_type = $recipient_type
         """, {
             "source_instance": row["source_instance"],
@@ -326,6 +364,120 @@ def import_mail_to_neo4j(uri, user, password, database):
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
     return f"Importerade {len(rows)} mailrader. Grafen innehåller nu {counts}."
+
+
+def import_slack_row(tx, row):
+    tx.run("""
+        MERGE (m:SlackMessage {
+            source_instance: $source_instance,
+            workspace_id: $workspace_id,
+            channel_id: $channel_id,
+            message_id: $message_id,
+            version_number: $version_number
+        })
+        SET m.channel_name = $channel_name,
+            m.display_name = $display_name,
+            m.name = $display_name,
+            m.author_source_id = $author_source_id,
+            m.author_name = $author_name,
+            m.author_email = $author_email,
+            m.body = $body,
+            m.sent_at = $sent_at,
+            m.version_at = $version_at,
+            m.thread_root_id = $thread_root_id,
+            m.source_url = $source_url
+    """, {
+        "source_instance": row["source_instance"],
+        "workspace_id": row["workspace_id"],
+        "channel_id": row["channel_id"],
+        "message_id": row["message_id"],
+        "version_number": row["version_number"],
+        "channel_name": row["channel_name"],
+        "display_name": row["message_id"],
+        "author_source_id": row["author_source_id"],
+        "author_name": row["author_name"],
+        "author_email": row["author_email"],
+        "body": row["body"],
+        "sent_at": row["sent_at"].isoformat(),
+        "version_at": row["version_at"].isoformat(),
+        "thread_root_id": row["thread_root_id"],
+        "source_url": row["source_url"],
+    })
+
+    author_key = person_key(row["author_name"], row["author_email"])
+    if author_key:
+        tx.run("""
+            MATCH (m:SlackMessage {
+                source_instance: $source_instance,
+                workspace_id: $workspace_id,
+                channel_id: $channel_id,
+                message_id: $message_id,
+                version_number: $version_number
+            })
+            MERGE (p:Person {person_key: $person_key})
+            SET p.name = coalesce($name, p.name),
+                p.email = coalesce($email, p.email),
+                p.source_id = coalesce($source_id, p.source_id)
+            MERGE (p)-[:SENT_SLACK_MESSAGE]->(m)
+        """, {
+            "source_instance": row["source_instance"],
+            "workspace_id": row["workspace_id"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "version_number": row["version_number"],
+            "person_key": author_key,
+            "name": row["author_name"],
+            "email": row["author_email"],
+            "source_id": row["author_source_id"],
+        })
+
+    if row["thread_root_id"] and row["thread_root_id"] != row["message_id"]:
+        tx.run("""
+            MATCH (reply:SlackMessage {
+                source_instance: $source_instance,
+                workspace_id: $workspace_id,
+                channel_id: $channel_id,
+                message_id: $message_id,
+                version_number: $version_number
+            })
+            MATCH (root:SlackMessage {
+                source_instance: $source_instance,
+                workspace_id: $workspace_id,
+                channel_id: $channel_id,
+                message_id: $thread_root_id
+            })
+            MERGE (reply)-[:SLACK_THREAD_REPLY_TO]->(root)
+        """, {
+            "source_instance": row["source_instance"],
+            "workspace_id": row["workspace_id"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "version_number": row["version_number"],
+            "thread_root_id": row["thread_root_id"],
+        })
+
+
+def import_slack_to_neo4j(uri, user, password, database):
+    rows = load_all_slack_rows()
+    if not password:
+        raise RuntimeError("Neo4j password is required.")
+
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        driver.verify_connectivity()
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_slack_graph_schema)
+            for row in rows:
+                session.execute_write(import_slack_row, row)
+
+            node_counts = session.execute_read(lambda tx: tx.run("""
+                MATCH (n)
+                WHERE n:SlackMessage OR n:Person
+                RETURN labels(n)[0] AS label, count(n) AS count
+                ORDER BY label
+            """).data())
+
+    counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
+    return f"Importerade {len(rows)} Slack-rader. Grafen innehåller nu {counts}."
 
 
 def load_mail(cur):
@@ -588,16 +740,30 @@ def index():
 
 @app.post("/import/mail")
 def import_mail():
-    uri = request.form.get("neo4j_uri") or os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
-    database = request.form.get("neo4j_database") or os.getenv("NEO4J_DATABASE", "neo4j")
-    user = request.form.get("neo4j_user") or os.getenv("NEO4J_USER", "neo4j")
-    password = request.form.get("neo4j_password") or os.getenv("NEO4J_PASSWORD", "")
+    uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "")
 
     try:
         result = import_mail_to_neo4j(uri, user, password, database)
         return redirect(url_for("index", source="mail", import_result=result))
     except Exception as error:
         return redirect(url_for("index", source="mail", import_error=str(error)))
+
+
+@app.post("/import/slack")
+def import_slack():
+    uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "")
+
+    try:
+        result = import_slack_to_neo4j(uri, user, password, database)
+        return redirect(url_for("index", source="slack", import_result=result))
+    except Exception as error:
+        return redirect(url_for("index", source="slack", import_error=str(error)))
 
 
 if __name__ == "__main__":
