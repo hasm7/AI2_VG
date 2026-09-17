@@ -129,6 +129,36 @@ PAGE = """
         </div>
       {% endif %}
 
+      {% if active_source == 'teams' %}
+        <div class="import-box {{ 'error' if import_error else '' }}">
+          <div class="import-graph">
+            (:Person)-[:PARTICIPATED_IN_MEETING]-&gt;(:TeamsMeeting)-[:HAS_TEAMS_TRANSCRIPT_SEGMENT]-&gt;(:TeamsTranscriptSegment)
+            <br>
+            (:Person)-[:SPOKE_TEAMS_TRANSCRIPT_SEGMENT]-&gt;(:TeamsTranscriptSegment)
+          </div>
+          <form method="post" action="/import/teams">
+            <button type="submit">Importera alla Teams-transkript</button>
+          </form>
+          {% if import_result %}<p>{{ import_result }}</p>{% endif %}
+          {% if import_error %}<p>{{ import_error }}</p>{% endif %}
+        </div>
+      {% endif %}
+
+      {% if active_source == 'issues' %}
+        <div class="import-box {{ 'error' if import_error else '' }}">
+          <div class="import-graph">
+            (:Person)-[:OWNS_ISSUE]-&gt;(:Issue)
+            <br>
+            (:Person)-[:COMMENTED_ON_ISSUE]-&gt;(:Issue)
+          </div>
+          <form method="post" action="/import/issues">
+            <button type="submit">Importera alla ärenden</button>
+          </form>
+          {% if import_result %}<p>{{ import_result }}</p>{% endif %}
+          {% if import_error %}<p>{{ import_error }}</p>{% endif %}
+        </div>
+      {% endif %}
+
       {% if view_mode == 'table' %}
         {% if table_rows %}
           <div class="table-wrap">
@@ -240,6 +270,26 @@ def load_all_slack_rows():
             """)
 
 
+def load_all_teams_meetings():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT *
+                FROM teams_meetings
+                ORDER BY started_at, source_instance, meeting_id
+            """)
+
+
+def load_all_teams_segments():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT *
+                FROM teams_transcript_segments
+                ORDER BY source_instance, meeting_id, sequence_number
+            """)
+
+
 def ensure_mail_graph_schema(tx):
     tx.run("""
         CREATE CONSTRAINT mail_message_key IF NOT EXISTS
@@ -258,6 +308,24 @@ def ensure_slack_graph_schema(tx):
         CREATE CONSTRAINT slack_message_key IF NOT EXISTS
         FOR (m:SlackMessage)
         REQUIRE (m.source_instance, m.workspace_id, m.channel_id, m.message_id, m.version_number) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+def ensure_teams_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT teams_meeting_key IF NOT EXISTS
+        FOR (m:TeamsMeeting)
+        REQUIRE (m.source_instance, m.meeting_id) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT transcript_segment_key IF NOT EXISTS
+        FOR (s:TeamsTranscriptSegment)
+        REQUIRE (s.source_instance, s.meeting_id, s.segment_id) IS UNIQUE
     """)
     tx.run("""
         CREATE CONSTRAINT person_key IF NOT EXISTS
@@ -478,6 +546,344 @@ def import_slack_to_neo4j(uri, user, password, database):
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
     return f"Importerade {len(rows)} Slack-rader. Grafen innehåller nu {counts}."
+
+
+def import_teams_meeting_row(tx, row):
+    participants = row.get("participants") or []
+    participants_raw = json.dumps(participants, ensure_ascii=False)
+
+    tx.run("""
+        MERGE (m:TeamsMeeting {
+            source_instance: $source_instance,
+            meeting_id: $meeting_id
+        })
+        SET m.name = $meeting_id,
+            m.display_name = $meeting_id,
+            m.title = $title,
+            m.started_at = $started_at,
+            m.ended_at = $ended_at,
+            m.participants_raw = $participants_raw,
+            m.source_url = $source_url
+    """, {
+        "source_instance": row["source_instance"],
+        "meeting_id": row["meeting_id"],
+        "title": row["title"],
+        "started_at": row["started_at"].isoformat(),
+        "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+        "participants_raw": participants_raw,
+        "source_url": row["source_url"],
+    })
+
+    for participant in participants:
+        name = participant.get("name")
+        email = participant.get("email") or participant.get("address")
+        source_id = participant.get("source_id") or participant.get("id")
+        key = person_key(name, email) or (f"source:{source_id}" if source_id else None)
+        if not key:
+            continue
+        tx.run("""
+            MATCH (m:TeamsMeeting {
+                source_instance: $source_instance,
+                meeting_id: $meeting_id
+            })
+            MERGE (p:Person {person_key: $person_key})
+            SET p.name = coalesce($name, p.name),
+                p.email = coalesce($email, p.email),
+                p.source_id = coalesce($source_id, p.source_id)
+            MERGE (p)-[:PARTICIPATED_IN_MEETING]->(m)
+        """, {
+            "source_instance": row["source_instance"],
+            "meeting_id": row["meeting_id"],
+            "person_key": key,
+            "name": name,
+            "email": email,
+            "source_id": source_id,
+        })
+
+
+def import_teams_segment_row(tx, row):
+    tx.run("""
+        MATCH (m:TeamsMeeting {
+            source_instance: $source_instance,
+            meeting_id: $meeting_id
+        })
+        MERGE (s:TeamsTranscriptSegment {
+            source_instance: $source_instance,
+            meeting_id: $meeting_id,
+            segment_id: $segment_id
+        })
+        SET s.name = $segment_id,
+            s.display_name = $segment_id,
+            s.sequence_number = $sequence_number,
+            s.speaker_source_id = $speaker_source_id,
+            s.speaker_name = $speaker_name,
+            s.start_offset_ms = $start_offset_ms,
+            s.end_offset_ms = $end_offset_ms,
+            s.body = $body
+        MERGE (m)-[:HAS_TEAMS_TRANSCRIPT_SEGMENT]->(s)
+    """, {
+        "source_instance": row["source_instance"],
+        "meeting_id": row["meeting_id"],
+        "segment_id": row["segment_id"],
+        "sequence_number": row["sequence_number"],
+        "speaker_source_id": row["speaker_source_id"],
+        "speaker_name": row["speaker_name"],
+        "start_offset_ms": row["start_offset_ms"],
+        "end_offset_ms": row["end_offset_ms"],
+        "body": row["body"],
+    })
+
+    key = f"source:{row['speaker_source_id']}" if row["speaker_source_id"] else person_key(row["speaker_name"], None)
+    if key:
+        tx.run("""
+            MATCH (s:TeamsTranscriptSegment {
+                source_instance: $source_instance,
+                meeting_id: $meeting_id,
+                segment_id: $segment_id
+            })
+            MATCH (m:TeamsMeeting {
+                source_instance: $source_instance,
+                meeting_id: $meeting_id
+            })
+            OPTIONAL MATCH (existing:Person {source_id: $source_id})
+            WITH s, m, existing
+            CALL {
+                WITH existing
+                WITH existing WHERE existing IS NOT NULL
+                RETURN existing AS p
+                UNION
+                WITH existing
+                WITH existing WHERE existing IS NULL
+                MERGE (created:Person {person_key: $person_key})
+                RETURN created AS p
+            }
+            SET p.name = coalesce($name, p.name),
+                p.source_id = coalesce($source_id, p.source_id)
+            MERGE (p)-[:SPOKE_TEAMS_TRANSCRIPT_SEGMENT]->(s)
+            MERGE (p)-[:PARTICIPATED_IN_MEETING]->(m)
+        """, {
+            "source_instance": row["source_instance"],
+            "meeting_id": row["meeting_id"],
+            "segment_id": row["segment_id"],
+            "person_key": key,
+            "name": row["speaker_name"],
+            "source_id": row["speaker_source_id"],
+        })
+
+
+def import_teams_to_neo4j(uri, user, password, database):
+    meetings = load_all_teams_meetings()
+    segments = load_all_teams_segments()
+    if not password:
+        raise RuntimeError("Neo4j password is required.")
+
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        driver.verify_connectivity()
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_teams_graph_schema)
+            for row in meetings:
+                session.execute_write(import_teams_meeting_row, row)
+            for row in segments:
+                session.execute_write(import_teams_segment_row, row)
+
+            node_counts = session.execute_read(lambda tx: tx.run("""
+                MATCH (n)
+                WHERE n:TeamsMeeting OR n:TeamsTranscriptSegment OR n:Person
+                RETURN labels(n)[0] AS label, count(n) AS count
+                ORDER BY label
+            """).data())
+
+    counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
+    return f"Importerade {len(meetings)} Teams-moten och {len(segments)} transkriptsegment. Grafen innehåller nu {counts}."
+
+
+def load_all_issue_rows():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT DISTINCT ON (source_instance, issue_id) *
+                FROM issue_versions
+                ORDER BY source_instance, issue_id, version_number DESC
+            """)
+
+
+def load_all_issue_comments():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT DISTINCT ON (source_instance, comment_id) *
+                FROM issue_comments
+                ORDER BY source_instance, comment_id, version_number DESC
+            """)
+
+
+def ensure_issue_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT issue_node_key IF NOT EXISTS
+        FOR (i:Issue)
+        REQUIRE (i.source_instance, i.issue_id) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+# Relationship types are inlined in Cypher, so only these fixed values are allowed.
+ISSUE_PERSON_RELATIONSHIPS = {"OWNS_ISSUE", "COMMENTED_ON_ISSUE"}
+
+
+def issue_person_key(name, source_id):
+    if source_id:
+        return f"source:{source_id}"
+    return person_key(name, None)
+
+
+def merge_issue_person(tx, row, relationship, name, source_id):
+    """Attach a person to an issue, reusing an existing Person with the same source_id."""
+    if relationship not in ISSUE_PERSON_RELATIONSHIPS:
+        raise ValueError(f"Unsupported issue relationship: {relationship}")
+
+    key = issue_person_key(name, source_id)
+    if not key:
+        return
+
+    tx.run(f"""
+        MATCH (i:Issue {{
+            source_instance: $source_instance,
+            issue_id: $issue_id
+        }})
+        OPTIONAL MATCH (existing:Person {{source_id: $source_id}})
+        WITH i, existing
+        CALL (existing) {{
+            WITH existing WHERE existing IS NOT NULL
+            RETURN existing AS p
+            UNION
+            WITH existing WHERE existing IS NULL
+            MERGE (created:Person {{person_key: $person_key}})
+            RETURN created AS p
+        }}
+        SET p.name = coalesce($name, p.name),
+            p.source_id = coalesce($source_id, p.source_id)
+        MERGE (p)-[:{relationship}]->(i)
+    """, {
+        "source_instance": row["source_instance"],
+        "issue_id": row["issue_id"],
+        "person_key": key,
+        "name": name,
+        "source_id": source_id,
+    })
+
+
+def issue_comment_entry(comment):
+    return {
+        "comment_id": comment["comment_id"],
+        "version_number": comment["version_number"],
+        "author_name": comment["author_name"],
+        "author_source_id": comment["author_source_id"],
+        "body": comment["body"],
+        "created_at": comment["created_at"].isoformat(),
+        "reply_to_comment_id": comment["reply_to_comment_id"],
+        "source_url": comment["source_url"],
+    }
+
+
+def import_issue_row(tx, row, comments):
+    """Import one issue. Comments are stored on the Issue node instead of separate nodes."""
+    comments_raw = json.dumps([issue_comment_entry(comment) for comment in comments], ensure_ascii=False)
+
+    tx.run("""
+        MERGE (i:Issue {
+            source_instance: $source_instance,
+            issue_id: $issue_id
+        })
+        SET i.name = $issue_key,
+            i.display_name = $issue_key,
+            i.issue_key = $issue_key,
+            i.issue_type = $issue_type,
+            i.title = $title,
+            i.description = $description,
+            i.acceptance_criteria = $acceptance_criteria,
+            i.status = $status,
+            i.priority = $priority,
+            i.creator_name = $creator_name,
+            i.creator_source_id = $creator_source_id,
+            i.assignee_name = $assignee_name,
+            i.assignee_source_id = $assignee_source_id,
+            i.created_at = $created_at,
+            i.version_at = $version_at,
+            i.version_number = $version_number,
+            i.comment_count = $comment_count,
+            i.comments_raw = $comments_raw,
+            i.source_url = $source_url
+    """, {
+        "source_instance": row["source_instance"],
+        "issue_id": row["issue_id"],
+        "issue_key": row["issue_key"],
+        "issue_type": row["issue_type"],
+        "title": row["title"],
+        "description": row["description"],
+        "acceptance_criteria": row["acceptance_criteria"],
+        "status": row["status"],
+        "priority": row["priority"],
+        "creator_name": row["creator_name"],
+        "creator_source_id": row["creator_source_id"],
+        "assignee_name": row["assignee_name"],
+        "assignee_source_id": row["assignee_source_id"],
+        "created_at": row["created_at"].isoformat(),
+        "version_at": row["version_at"].isoformat(),
+        "version_number": row["version_number"],
+        "comment_count": len(comments),
+        "comments_raw": comments_raw,
+        "source_url": row["source_url"],
+    })
+
+    owner_name = row["assignee_name"] or row["creator_name"]
+    owner_source_id = row["assignee_source_id"] or row["creator_source_id"]
+    merge_issue_person(tx, row, "OWNS_ISSUE", owner_name, owner_source_id)
+
+    authors = {}
+    for comment in comments:
+        key = issue_person_key(comment["author_name"], comment["author_source_id"])
+        if not key:
+            continue
+        authors.setdefault(key, (comment["author_name"], comment["author_source_id"]))
+
+    for name, source_id in authors.values():
+        merge_issue_person(tx, row, "COMMENTED_ON_ISSUE", name, source_id)
+
+
+def import_issues_to_neo4j(uri, user, password, database):
+    issues = load_all_issue_rows()
+    comments = load_all_issue_comments()
+    if not password:
+        raise RuntimeError("Neo4j password is required.")
+
+    comments_by_issue = {}
+    for comment in comments:
+        key = (comment["source_instance"], comment["issue_id"])
+        comments_by_issue.setdefault(key, []).append(comment)
+    for issue_comments in comments_by_issue.values():
+        issue_comments.sort(key=lambda comment: (comment["created_at"], comment["comment_id"]))
+
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        driver.verify_connectivity()
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_issue_graph_schema)
+            for row in issues:
+                key = (row["source_instance"], row["issue_id"])
+                session.execute_write(import_issue_row, row, comments_by_issue.get(key, []))
+
+            node_counts = session.execute_read(lambda tx: tx.run("""
+                MATCH (n)
+                WHERE n:Issue OR n:Person
+                RETURN labels(n)[0] AS label, count(n) AS count
+                ORDER BY label
+            """).data())
+
+    counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
+    return f"Importerade {len(issues)} arenden och {len(comments)} kommentarer. Grafen innehåller nu {counts}."
 
 
 def load_mail(cur):
@@ -764,6 +1170,34 @@ def import_slack():
         return redirect(url_for("index", source="slack", import_result=result))
     except Exception as error:
         return redirect(url_for("index", source="slack", import_error=str(error)))
+
+
+@app.post("/import/teams")
+def import_teams():
+    uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "")
+
+    try:
+        result = import_teams_to_neo4j(uri, user, password, database)
+        return redirect(url_for("index", source="teams", import_result=result))
+    except Exception as error:
+        return redirect(url_for("index", source="teams", import_error=str(error)))
+
+
+@app.post("/import/issues")
+def import_issues():
+    uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "")
+
+    try:
+        result = import_issues_to_neo4j(uri, user, password, database)
+        return redirect(url_for("index", source="issues", import_result=result))
+    except Exception as error:
+        return redirect(url_for("index", source="issues", import_error=str(error)))
 
 
 if __name__ == "__main__":
