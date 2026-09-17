@@ -5,7 +5,8 @@ from decimal import Decimal
 
 import psycopg
 from dotenv import load_dotenv
-from flask import Flask, abort, render_template_string, request
+from flask import Flask, abort, redirect, render_template_string, request, url_for
+from neo4j import GraphDatabase
 from psycopg.rows import dict_row
 
 
@@ -51,6 +52,13 @@ PAGE = """
     .tabs { margin: 0 0 14px; }
     .tabs a { display: inline-block; text-decoration: none; color: #374151; border: 1px solid #d1d5db; padding: 7px 10px; border-radius: 6px; margin-right: 6px; background: white; font-size: 14px; }
     .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+    .import-box { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 6px; padding: 12px 14px; margin: 0 0 14px; }
+    .import-box form { margin: 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .import-box button { border: 0; border-radius: 6px; background: #047857; color: white; padding: 8px 10px; cursor: pointer; }
+    .import-box input { border: 1px solid #a7f3d0; border-radius: 6px; padding: 7px 8px; min-width: 170px; }
+    .import-box p { margin: 8px 0 0; font-size: 13px; color: #065f46; }
+    .error { background: #fef2f2; border-color: #fecaca; }
+    .error p { color: #991b1b; }
     .panel { background: white; border: 1px solid #e5e7eb; border-radius: 6px; margin: 14px 0; }
     .panel h3 { margin: 0; padding: 12px 14px; border-bottom: 1px solid #e5e7eb; font-size: 15px; }
     .field { border-bottom: 1px solid #e5e7eb; padding: 12px 14px; }
@@ -93,6 +101,20 @@ PAGE = """
         <a class="{{ 'active' if view_mode == 'detail' else '' }}" href="/?source={{ active_source }}&row={{ active_index }}&view=detail">JSON/detaljvy</a>
         <a class="{{ 'active' if view_mode == 'table' else '' }}" href="/?source={{ active_source }}&row={{ active_index }}&view=table">Tabellvy</a>
       </div>
+
+      {% if active_source == 'mail' %}
+        <div class="import-box {{ 'error' if import_error else '' }}">
+          <form method="post" action="/import/mail">
+            <input name="neo4j_uri" value="{{ neo4j_uri }}" aria-label="Neo4j URI">
+            <input name="neo4j_database" value="{{ neo4j_database }}" aria-label="Neo4j database">
+            <input name="neo4j_user" value="{{ neo4j_user }}" aria-label="Neo4j user">
+            <input name="neo4j_password" type="password" placeholder="Neo4j password" aria-label="Neo4j password">
+            <button type="submit">Importera Mail</button>
+          </form>
+          {% if import_result %}<p>{{ import_result }}</p>{% endif %}
+          {% if import_error %}<p>{{ import_error }}</p>{% endif %}
+        </div>
+      {% endif %}
 
       {% if view_mode == 'table' %}
         {% if table_rows %}
@@ -150,6 +172,14 @@ def database_url() -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
 
+def neo4j_defaults() -> dict:
+    return {
+        "uri": os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687"),
+        "database": os.getenv("NEO4J_DATABASE", "neo4j"),
+        "user": os.getenv("NEO4J_USER", "neo4j"),
+    }
+
+
 def format_value(value):
     if value is None:
         return ""
@@ -167,6 +197,135 @@ def pick(row, fields):
 def query_all(cur, sql, params=()):
     cur.execute(sql, params)
     return cur.fetchall()
+
+
+def person_key(name, email):
+    if email:
+        return f"email:{email.strip().lower()}"
+    if name:
+        return f"name:{name.strip().lower()}"
+    return None
+
+
+def load_all_mail_rows():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT *
+                FROM mail_messages
+                ORDER BY sent_at, source_instance, message_id
+            """)
+
+
+def ensure_mail_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT mail_message_key IF NOT EXISTS
+        FOR (m:MailMessage)
+        REQUIRE (m.source_instance, m.message_id) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+def import_mail_row(tx, row):
+    recipients = row.get("recipients") or []
+    recipients_raw = json.dumps(recipients, ensure_ascii=False)
+
+    tx.run("""
+        MERGE (m:MailMessage {
+            source_instance: $source_instance,
+            message_id: $message_id
+        })
+        SET m.sender_address = $sender_address,
+            m.sender_name = $sender_name,
+            m.recipients_raw = $recipients_raw,
+            m.subject = $subject,
+            m.body = $body,
+            m.sent_at = $sent_at,
+            m.in_reply_to_id = $in_reply_to_id,
+            m.source_url = $source_url
+    """, {
+        "source_instance": row["source_instance"],
+        "message_id": row["message_id"],
+        "sender_address": row["sender_address"],
+        "sender_name": row["sender_name"],
+        "recipients_raw": recipients_raw,
+        "subject": row["subject"],
+        "body": row["body"],
+        "sent_at": row["sent_at"].isoformat(),
+        "in_reply_to_id": row["in_reply_to_id"],
+        "source_url": row["source_url"],
+    })
+
+    sender_key = person_key(row["sender_name"], row["sender_address"])
+    if sender_key:
+        tx.run("""
+            MATCH (m:MailMessage {
+                source_instance: $source_instance,
+                message_id: $message_id
+            })
+            MERGE (p:Person {person_key: $person_key})
+            SET p.name = coalesce($name, p.name),
+                p.email = coalesce($email, p.email)
+            MERGE (p)-[:SENT]->(m)
+        """, {
+            "source_instance": row["source_instance"],
+            "message_id": row["message_id"],
+            "person_key": sender_key,
+            "name": row["sender_name"],
+            "email": row["sender_address"],
+        })
+
+    for recipient in recipients:
+        name = recipient.get("name")
+        email = recipient.get("address")
+        key = person_key(name, email)
+        if not key:
+            continue
+        tx.run("""
+            MATCH (m:MailMessage {
+                source_instance: $source_instance,
+                message_id: $message_id
+            })
+            MERGE (p:Person {person_key: $person_key})
+            SET p.name = coalesce($name, p.name),
+                p.email = coalesce($email, p.email)
+            MERGE (m)-[r:SENT_TO]->(p)
+            SET r.recipient_type = $recipient_type
+        """, {
+            "source_instance": row["source_instance"],
+            "message_id": row["message_id"],
+            "person_key": key,
+            "name": name,
+            "email": email,
+            "recipient_type": recipient.get("type"),
+        })
+
+
+def import_mail_to_neo4j(uri, user, password, database):
+    rows = load_all_mail_rows()
+    if not password:
+        raise RuntimeError("Neo4j password is required.")
+
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        driver.verify_connectivity()
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_mail_graph_schema)
+            for row in rows:
+                session.execute_write(import_mail_row, row)
+
+            node_counts = session.execute_read(lambda tx: tx.run("""
+                MATCH (n)
+                WHERE n:MailMessage OR n:Person
+                RETURN labels(n)[0] AS label, count(n) AS count
+                ORDER BY label
+            """).data())
+
+    counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
+    return f"Importerade {len(rows)} mailrader. Grafen innehåller nu {counts}."
 
 
 def load_mail(cur):
@@ -407,6 +566,7 @@ def index():
     for row in rows:
         display_rows.append({"title": format_value(row.get("title")) or "(untitled)", "subtitle": format_value(row.get("subtitle"))})
 
+    defaults = neo4j_defaults()
     return render_template_string(
         PAGE,
         sources=SOURCES,
@@ -418,7 +578,26 @@ def index():
         table_rows=table_rows,
         max_rows=MAX_ROWS,
         view_mode=view_mode,
+        import_result=request.args.get("import_result", ""),
+        import_error=request.args.get("import_error", ""),
+        neo4j_uri=defaults["uri"],
+        neo4j_database=defaults["database"],
+        neo4j_user=defaults["user"],
     )
+
+
+@app.post("/import/mail")
+def import_mail():
+    uri = request.form.get("neo4j_uri") or os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = request.form.get("neo4j_database") or os.getenv("NEO4J_DATABASE", "neo4j")
+    user = request.form.get("neo4j_user") or os.getenv("NEO4J_USER", "neo4j")
+    password = request.form.get("neo4j_password") or os.getenv("NEO4J_PASSWORD", "")
+
+    try:
+        result = import_mail_to_neo4j(uri, user, password, database)
+        return redirect(url_for("index", source="mail", import_result=result))
+    except Exception as error:
+        return redirect(url_for("index", source="mail", import_error=str(error)))
 
 
 if __name__ == "__main__":

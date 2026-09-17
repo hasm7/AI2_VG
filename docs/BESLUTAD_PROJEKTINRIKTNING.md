@@ -22,6 +22,7 @@ SQL bevarar källmaterialet inför grafimporten. Käll-ID:n, tider, versioner oc
 
 Nedan anges tabellindelningen och vad varje rad representerar. Exakta kolumner och datatyper är ännu inte fastställda.
 
+
 ### 1. Mail
 
 Mailtrådar mellan kunden, den produktansvariga och teamet.
@@ -32,6 +33,7 @@ Här finns behov, förtydliganden och besked som kommunicerats mellan parterna.
 
 En rad innehåller ett mail med avsändare, mottagare, ämne, text, tid och svarshänvisning. Mottagarna sparas som en strukturerad lista.
 
+
 ### 2. Slack – projektchatt
 
 Teamets löpande kommunikation i kanaler, meddelanden och svarstrådar.
@@ -41,6 +43,7 @@ Här finns frågor, diskussioner och informella överenskommelser under arbetets
 **Tabell: `slack_messages`**
 
 En rad innehåller ett meddelande med avsändare, kanal, text, tid och trådhänvisning. Tidigare meddelandeversioner bevaras vid redigering.
+
 
 ### 3. Teams – mötestranskript
 
@@ -56,6 +59,7 @@ En rad innehåller mötets grunduppgifter: ID, titel, tid och tillgängliga delt
 
 En rad innehåller ett yttrande med mötes-ID, talare, text, tidsangivelser och ordning i samtalet.
 
+
 ### 4. Ärenden/tickets
 
 Arbetsuppgifter och buggar med ansvarig, kommentarer och ändringshistorik.
@@ -70,6 +74,7 @@ En rad innehåller en ärendeversion med beskrivning, acceptanskriterier, status
 
 En rad innehåller en kommentar med ärende-ID, författare, text och tid.
 
+
 ### 5. Krav och teknisk dokumentation
 
 Dokument som beskriver vad produkten ska klara och hur lösningen är tänkt att fungera.
@@ -79,6 +84,7 @@ Tidigare versioner sparas så att det går att följa hur kraven och den teknisk
 **Tabell: `document_versions`**
 
 En rad innehåller en dokumentversion med dokument-ID, titel, innehåll, författare, version och tidpunkt.
+
 
 ### 6. PR:er, kodgranskningar och kodändringar
 
