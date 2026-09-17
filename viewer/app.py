@@ -159,6 +159,19 @@ PAGE = """
         </div>
       {% endif %}
 
+      {% if active_source == 'documents' %}
+        <div class="import-box {{ 'error' if import_error else '' }}">
+          <div class="import-graph">
+            (:Person)-[:AUTHORED_DOCUMENT]-&gt;(:Document)
+          </div>
+          <form method="post" action="/import/documents">
+            <button type="submit">Importera alla dokument</button>
+          </form>
+          {% if import_result %}<p>{{ import_result }}</p>{% endif %}
+          {% if import_error %}<p>{{ import_error }}</p>{% endif %}
+        </div>
+      {% endif %}
+
       {% if view_mode == 'table' %}
         {% if table_rows %}
           <div class="table-wrap">
@@ -886,6 +899,145 @@ def import_issues_to_neo4j(uri, user, password, database):
     return f"Importerade {len(issues)} arenden och {len(comments)} kommentarer. Grafen innehåller nu {counts}."
 
 
+def load_all_document_rows():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT *
+                FROM document_versions
+                ORDER BY source_instance, document_id, version_number
+            """)
+
+
+def ensure_document_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT document_node_key IF NOT EXISTS
+        FOR (d:Document)
+        REQUIRE (d.source_instance, d.document_id) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+def document_version_entry(row):
+    return {
+        "version_number": row["version_number"],
+        "document_type": row["document_type"],
+        "title": row["title"],
+        "body": row["body"],
+        "content_format": row["content_format"],
+        "author_name": row["author_name"],
+        "author_source_id": row["author_source_id"],
+        "version_at": row["version_at"].isoformat(),
+        "change_summary": row["change_summary"],
+        "source_url": row["source_url"],
+    }
+
+
+def import_document_row(tx, latest, earlier_versions):
+    """Import one document. Earlier versions are stored on the Document node."""
+    versions_raw = json.dumps([document_version_entry(row) for row in earlier_versions], ensure_ascii=False)
+
+    tx.run("""
+        MERGE (d:Document {
+            source_instance: $source_instance,
+            document_id: $document_id
+        })
+        SET d.name = $document_id,
+            d.display_name = $document_id,
+            d.document_type = $document_type,
+            d.title = $title,
+            d.body = $body,
+            d.content_format = $content_format,
+            d.author_name = $author_name,
+            d.author_source_id = $author_source_id,
+            d.created_at = $created_at,
+            d.version_at = $version_at,
+            d.version_number = $version_number,
+            d.change_summary = $change_summary,
+            d.versions_raw = $versions_raw,
+            d.source_url = $source_url
+    """, {
+        "source_instance": latest["source_instance"],
+        "document_id": latest["document_id"],
+        "document_type": latest["document_type"],
+        "title": latest["title"],
+        "body": latest["body"],
+        "content_format": latest["content_format"],
+        "author_name": latest["author_name"],
+        "author_source_id": latest["author_source_id"],
+        "created_at": latest["created_at"].isoformat(),
+        "version_at": latest["version_at"].isoformat(),
+        "version_number": latest["version_number"],
+        "change_summary": latest["change_summary"],
+        "versions_raw": versions_raw,
+        "source_url": latest["source_url"],
+    })
+
+    author_source_id = latest["author_source_id"]
+    key = f"source:{author_source_id}" if author_source_id else person_key(latest["author_name"], None)
+    if not key:
+        return
+
+    tx.run("""
+        MATCH (d:Document {
+            source_instance: $source_instance,
+            document_id: $document_id
+        })
+        OPTIONAL MATCH (existing:Person {source_id: $source_id})
+        WITH d, existing
+        CALL (existing) {
+            WITH existing WHERE existing IS NOT NULL
+            RETURN existing AS p
+            UNION
+            WITH existing WHERE existing IS NULL
+            MERGE (created:Person {person_key: $person_key})
+            RETURN created AS p
+        }
+        SET p.name = coalesce($name, p.name),
+            p.source_id = coalesce($source_id, p.source_id)
+        MERGE (p)-[:AUTHORED_DOCUMENT]->(d)
+    """, {
+        "source_instance": latest["source_instance"],
+        "document_id": latest["document_id"],
+        "person_key": key,
+        "name": latest["author_name"],
+        "source_id": author_source_id,
+    })
+
+
+def import_documents_to_neo4j(uri, user, password, database):
+    rows = load_all_document_rows()
+    if not password:
+        raise RuntimeError("Neo4j password is required.")
+
+    versions_by_document = {}
+    for row in rows:
+        key = (row["source_instance"], row["document_id"])
+        versions_by_document.setdefault(key, []).append(row)
+
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        driver.verify_connectivity()
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_document_graph_schema)
+            for versions in versions_by_document.values():
+                versions.sort(key=lambda row: row["version_number"])
+                session.execute_write(import_document_row, versions[-1], versions[:-1])
+
+            node_counts = session.execute_read(lambda tx: tx.run("""
+                MATCH (n)
+                WHERE n:Document OR n:Person
+                RETURN labels(n)[0] AS label, count(n) AS count
+                ORDER BY label
+            """).data())
+
+    counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
+    return f"Importerade {len(versions_by_document)} dokument och {len(rows)} versioner. Grafen innehåller nu {counts}."
+
+
 def load_mail(cur):
     return query_all(cur, """
         SELECT *, COALESCE(subject, message_id) AS title, sender_name AS subtitle
@@ -1198,6 +1350,20 @@ def import_issues():
         return redirect(url_for("index", source="issues", import_result=result))
     except Exception as error:
         return redirect(url_for("index", source="issues", import_error=str(error)))
+
+
+@app.post("/import/documents")
+def import_documents():
+    uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "")
+
+    try:
+        result = import_documents_to_neo4j(uri, user, password, database)
+        return redirect(url_for("index", source="documents", import_result=result))
+    except Exception as error:
+        return redirect(url_for("index", source="documents", import_error=str(error)))
 
 
 if __name__ == "__main__":
