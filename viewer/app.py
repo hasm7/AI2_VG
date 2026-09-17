@@ -172,6 +172,21 @@ PAGE = """
         </div>
       {% endif %}
 
+      {% if active_source == 'prs' %}
+        <div class="import-box {{ 'error' if import_error else '' }}">
+          <div class="import-graph">
+            (:Person)-[:AUTHORED_PR]-&gt;(:PullRequest)
+            <br>
+            (:Person)-[:REVIEWED_PR]-&gt;(:PullRequest)
+          </div>
+          <form method="post" action="/import/prs">
+            <button type="submit">Importera alla PR:er</button>
+          </form>
+          {% if import_result %}<p>{{ import_result }}</p>{% endif %}
+          {% if import_error %}<p>{{ import_error }}</p>{% endif %}
+        </div>
+      {% endif %}
+
       {% if view_mode == 'table' %}
         {% if table_rows %}
           <div class="table-wrap">
@@ -1038,6 +1053,205 @@ def import_documents_to_neo4j(uri, user, password, database):
     return f"Importerade {len(versions_by_document)} dokument och {len(rows)} versioner. Grafen innehåller nu {counts}."
 
 
+def load_all_pr_rows():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT *
+                FROM pr_versions
+                ORDER BY source_instance, repository, pr_number, version_number
+            """)
+
+
+def load_all_pr_reviews():
+    with psycopg.connect(database_url(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            return query_all(cur, """
+                SELECT DISTINCT ON (source_instance, repository, pr_number, source_id) *
+                FROM pr_reviews
+                ORDER BY source_instance, repository, pr_number, source_id, version_number DESC
+            """)
+
+
+def ensure_pr_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT pull_request_key IF NOT EXISTS
+        FOR (pr:PullRequest)
+        REQUIRE (pr.source_instance, pr.repository, pr.pr_number) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+# Relationship types are inlined in Cypher, so only these fixed values are allowed.
+PR_PERSON_RELATIONSHIPS = {"AUTHORED_PR", "REVIEWED_PR"}
+
+
+def pr_person_key(name, source_id):
+    if source_id:
+        return f"source:{source_id}"
+    return person_key(name, None)
+
+
+def merge_pr_person(tx, row, relationship, name, source_id):
+    """Attach a person to a pull request, reusing an existing Person with the same source_id."""
+    if relationship not in PR_PERSON_RELATIONSHIPS:
+        raise ValueError(f"Unsupported pull request relationship: {relationship}")
+
+    key = pr_person_key(name, source_id)
+    if not key:
+        return
+
+    tx.run(f"""
+        MATCH (pr:PullRequest {{
+            source_instance: $source_instance,
+            repository: $repository,
+            pr_number: $pr_number
+        }})
+        OPTIONAL MATCH (existing:Person {{source_id: $source_id}})
+        WITH pr, existing
+        CALL (existing) {{
+            WITH existing WHERE existing IS NOT NULL
+            RETURN existing AS p
+            UNION
+            WITH existing WHERE existing IS NULL
+            MERGE (created:Person {{person_key: $person_key}})
+            RETURN created AS p
+        }}
+        SET p.name = coalesce($name, p.name),
+            p.source_id = coalesce($source_id, p.source_id)
+        MERGE (p)-[:{relationship}]->(pr)
+    """, {
+        "source_instance": row["source_instance"],
+        "repository": row["repository"],
+        "pr_number": row["pr_number"],
+        "person_key": key,
+        "name": name,
+        "source_id": source_id,
+    })
+
+
+def pr_review_entry(review):
+    return {
+        "source_id": review["source_id"],
+        "version_number": review["version_number"],
+        "pr_version_number": review["pr_version_number"],
+        "entry_type": review["entry_type"],
+        "author_name": review["author_name"],
+        "author_source_id": review["author_source_id"],
+        "body": review["body"],
+        "created_at": review["created_at"].isoformat(),
+        "version_at": review["version_at"].isoformat(),
+        "reviewed_commit": review["reviewed_commit"],
+        "reply_to_source_id": review["reply_to_source_id"],
+        "review_group_id": review["review_group_id"],
+        "file_path": review["file_path"],
+        "line_number": review["line_number"],
+        "diff_side": review["diff_side"],
+        "source_url": review["source_url"],
+    }
+
+
+def import_pr_row(tx, latest, reviews):
+    """Import one pull request. Reviews are stored on the PullRequest node."""
+    reviews_raw = json.dumps([pr_review_entry(review) for review in reviews], ensure_ascii=False)
+    code_changes_raw = json.dumps(latest["code_changes"] or [], ensure_ascii=False)
+    display_name = f'{latest["repository"]}#{latest["pr_number"]}'
+
+    tx.run("""
+        MERGE (pr:PullRequest {
+            source_instance: $source_instance,
+            repository: $repository,
+            pr_number: $pr_number
+        })
+        SET pr.name = $display_name,
+            pr.display_name = $display_name,
+            pr.title = $title,
+            pr.description = $description,
+            pr.author_name = $author_name,
+            pr.author_source_id = $author_source_id,
+            pr.state = $state,
+            pr.created_at = $created_at,
+            pr.version_at = $version_at,
+            pr.version_number = $version_number,
+            pr.base_commit = $base_commit,
+            pr.head_commit = $head_commit,
+            pr.code_changes_raw = $code_changes_raw,
+            pr.reviews_raw = $reviews_raw,
+            pr.source_url = $source_url
+    """, {
+        "source_instance": latest["source_instance"],
+        "repository": latest["repository"],
+        "pr_number": latest["pr_number"],
+        "display_name": display_name,
+        "title": latest["title"],
+        "description": latest["description"],
+        "author_name": latest["author_name"],
+        "author_source_id": latest["author_source_id"],
+        "state": latest["state"],
+        "created_at": latest["created_at"].isoformat(),
+        "version_at": latest["version_at"].isoformat(),
+        "version_number": latest["version_number"],
+        "base_commit": latest["base_commit"],
+        "head_commit": latest["head_commit"],
+        "code_changes_raw": code_changes_raw,
+        "reviews_raw": reviews_raw,
+        "source_url": latest["source_url"],
+    })
+
+    merge_pr_person(tx, latest, "AUTHORED_PR", latest["author_name"], latest["author_source_id"])
+
+    reviewers = {}
+    for review in reviews:
+        key = pr_person_key(review["author_name"], review["author_source_id"])
+        if not key:
+            continue
+        reviewers.setdefault(key, (review["author_name"], review["author_source_id"]))
+
+    for name, source_id in reviewers.values():
+        merge_pr_person(tx, latest, "REVIEWED_PR", name, source_id)
+
+
+def import_prs_to_neo4j(uri, user, password, database):
+    rows = load_all_pr_rows()
+    reviews = load_all_pr_reviews()
+    if not password:
+        raise RuntimeError("Neo4j password is required.")
+
+    versions_by_pr = {}
+    for row in rows:
+        key = (row["source_instance"], row["repository"], row["pr_number"])
+        versions_by_pr.setdefault(key, []).append(row)
+
+    reviews_by_pr = {}
+    for review in reviews:
+        key = (review["source_instance"], review["repository"], review["pr_number"])
+        reviews_by_pr.setdefault(key, []).append(review)
+    for pr_reviews in reviews_by_pr.values():
+        pr_reviews.sort(key=lambda review: (review["created_at"], review["source_id"]))
+
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        driver.verify_connectivity()
+        with driver.session(database=database) as session:
+            session.execute_write(ensure_pr_graph_schema)
+            for key, versions in versions_by_pr.items():
+                versions.sort(key=lambda row: row["version_number"])
+                session.execute_write(import_pr_row, versions[-1], reviews_by_pr.get(key, []))
+
+            node_counts = session.execute_read(lambda tx: tx.run("""
+                MATCH (n)
+                WHERE n:PullRequest OR n:Person
+                RETURN labels(n)[0] AS label, count(n) AS count
+                ORDER BY label
+            """).data())
+
+    counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
+    return f"Importerade {len(versions_by_pr)} PR:er och {len(reviews)} granskningar. Grafen innehåller nu {counts}."
+
+
 def load_mail(cur):
     return query_all(cur, """
         SELECT *, COALESCE(subject, message_id) AS title, sender_name AS subtitle
@@ -1364,6 +1578,20 @@ def import_documents():
         return redirect(url_for("index", source="documents", import_result=result))
     except Exception as error:
         return redirect(url_for("index", source="documents", import_error=str(error)))
+
+
+@app.post("/import/prs")
+def import_prs():
+    uri = os.getenv("NEO4J_URI", "neo4j://127.0.0.1:7687")
+    database = os.getenv("NEO4J_DATABASE", "neo4j")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "")
+
+    try:
+        result = import_prs_to_neo4j(uri, user, password, database)
+        return redirect(url_for("index", source="prs", import_result=result))
+    except Exception as error:
+        return redirect(url_for("index", source="prs", import_error=str(error)))
 
 
 if __name__ == "__main__":
