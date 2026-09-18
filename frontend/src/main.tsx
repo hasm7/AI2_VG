@@ -16,13 +16,27 @@ type GraphRelationship = {
   source: string;
   target: string;
   label: string;
+  sourceType: DataSource;
   properties: Record<string, string>;
 };
+
+type DataSource = "Mail" | "Slack" | "Teams" | "Issues" | "Docs" | "PRs";
+
+type GraphResponse = {
+  nodes: GraphNode[];
+  relationships: GraphRelationship[];
+  error?: string;
+};
+
+type Neo4jStatus = "checking" | "connected" | "disconnected";
 
 type Selection = {
   title: string;
   rows: Array<[string, string]>;
 } | null;
+
+const dataSources: Array<DataSource | "All"> = ["All", "Mail", "Slack", "Teams", "Issues", "Docs", "PRs"];
+const graphApiUrl = "/api/graph";
 
 const nodes: GraphNode[] = [
   {
@@ -157,17 +171,17 @@ const nodes: GraphNode[] = [
 ];
 
 const relationships: GraphRelationship[] = [
-  { id: "rel-authored-document", source: "person-anna", target: "doc-001", label: "AUTHORED_DOCUMENT", properties: {} },
-  { id: "rel-authored-pr", source: "person-erik", target: "pr-42", label: "AUTHORED_PR", properties: {} },
-  { id: "rel-commented-issue", source: "person-erik", target: "issue-auth-17", label: "COMMENTED_ON_ISSUE", properties: {} },
-  { id: "rel-has-transcript", source: "meeting-001", target: "segment-001", label: "HAS_TEAMS_TRANSCRIPT_SEGMENT", properties: {} },
-  { id: "rel-mail-recipient", source: "mail-001", target: "person-product-owner", label: "MAIL_RECIPIENT", properties: { recipient_type: "to" } },
-  { id: "rel-owns-issue", source: "person-erik", target: "issue-auth-17", label: "OWNS_ISSUE", properties: {} },
-  { id: "rel-participated-meeting", source: "person-anna", target: "meeting-001", label: "PARTICIPATED_IN_MEETING", properties: {} },
-  { id: "rel-reviewed-pr", source: "person-anna", target: "pr-42", label: "REVIEWED_PR", properties: {} },
-  { id: "rel-sent-mail", source: "person-customer", target: "mail-001", label: "SENT_MAIL", properties: {} },
-  { id: "rel-sent-slack", source: "person-anna", target: "slack-001", label: "SENT_SLACK_MESSAGE", properties: {} },
-  { id: "rel-spoke-segment", source: "person-anna", target: "segment-001", label: "SPOKE_TEAMS_TRANSCRIPT_SEGMENT", properties: {} },
+  { id: "rel-authored-document", source: "person-anna", target: "doc-001", label: "AUTHORED_DOCUMENT", sourceType: "Docs", properties: {} },
+  { id: "rel-authored-pr", source: "person-erik", target: "pr-42", label: "AUTHORED_PR", sourceType: "PRs", properties: {} },
+  { id: "rel-commented-issue", source: "person-erik", target: "issue-auth-17", label: "COMMENTED_ON_ISSUE", sourceType: "Issues", properties: {} },
+  { id: "rel-has-transcript", source: "meeting-001", target: "segment-001", label: "HAS_TEAMS_TRANSCRIPT_SEGMENT", sourceType: "Teams", properties: {} },
+  { id: "rel-mail-recipient", source: "mail-001", target: "person-product-owner", label: "MAIL_RECIPIENT", sourceType: "Mail", properties: { recipient_type: "to" } },
+  { id: "rel-owns-issue", source: "person-erik", target: "issue-auth-17", label: "OWNS_ISSUE", sourceType: "Issues", properties: {} },
+  { id: "rel-participated-meeting", source: "person-anna", target: "meeting-001", label: "PARTICIPATED_IN_MEETING", sourceType: "Teams", properties: {} },
+  { id: "rel-reviewed-pr", source: "person-anna", target: "pr-42", label: "REVIEWED_PR", sourceType: "PRs", properties: {} },
+  { id: "rel-sent-mail", source: "person-customer", target: "mail-001", label: "SENT_MAIL", sourceType: "Mail", properties: {} },
+  { id: "rel-sent-slack", source: "person-anna", target: "slack-001", label: "SENT_SLACK_MESSAGE", sourceType: "Slack", properties: {} },
+  { id: "rel-spoke-segment", source: "person-anna", target: "segment-001", label: "SPOKE_TEAMS_TRANSCRIPT_SEGMENT", sourceType: "Teams", properties: {} },
 ];
 
 function propertyRows(properties: Record<string, string | number>) {
@@ -177,12 +191,23 @@ function propertyRows(properties: Record<string, string | number>) {
 function GraphView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<Core | null>(null);
+  const isMotionPausedRef = useRef(false);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isMotionPaused, setIsMotionPaused] = useState(false);
+  const [areLabelsVisible, setAreLabelsVisible] = useState(true);
+  const [isNeighborMode, setIsNeighborMode] = useState(false);
+  const [activeSource, setActiveSource] = useState<DataSource | "All">("All");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [graphNodes, setGraphNodes] = useState<GraphNode[]>(nodes);
+  const [graphRelationships, setGraphRelationships] = useState<GraphRelationship[]>(relationships);
+  const [graphError, setGraphError] = useState("");
+  const [isGraphLoading, setIsGraphLoading] = useState(false);
+  const [neo4jStatus, setNeo4jStatus] = useState<Neo4jStatus>("checking");
 
   const elements = useMemo(
     () => [
-      ...nodes.map((node) => ({
+      ...graphNodes.map((node) => ({
         data: {
           id: node.id,
           label: node.label,
@@ -191,17 +216,18 @@ function GraphView() {
           summary: node.summary ?? "",
         },
       })),
-      ...relationships.map((relationship) => ({
+      ...graphRelationships.map((relationship) => ({
         data: {
           id: relationship.id,
           source: relationship.source,
           target: relationship.target,
           label: relationship.label,
+          sourceType: relationship.sourceType,
           properties: relationship.properties,
         },
       })),
     ],
-    [],
+    [graphNodes, graphRelationships],
   );
 
   useEffect(() => {
@@ -295,8 +321,8 @@ function GraphView() {
             "target-arrow-shape": "triangle",
             label: "data(label)",
             "text-background-color": "#ffffff",
-            "text-background-opacity": 0.85,
-            "text-background-padding": "2px",
+            "text-background-opacity": 1,
+            "text-background-padding": "4px",
             "text-rotation": "autorotate",
             width: 2,
           },
@@ -316,6 +342,18 @@ function GraphView() {
             width: 4,
           },
         },
+        {
+          selector: ".hidden",
+          style: {
+            display: "none",
+          },
+        },
+        {
+          selector: ".labels-hidden",
+          style: {
+            label: "",
+          },
+        },
       ],
       layout: {
         name: "cose",
@@ -329,6 +367,7 @@ function GraphView() {
 
     graph.on("tap", "node", (event: EventObject) => {
       const data = event.target.data();
+      setSelectedNodeId(data.id);
       setSelection({
         title: data.label,
         rows: [
@@ -342,6 +381,7 @@ function GraphView() {
 
     graph.on("tap", "edge", (event: EventObject) => {
       const data = event.target.data();
+      setSelectedNodeId(null);
       setSelection({
         title: data.label,
         rows: [
@@ -355,13 +395,65 @@ function GraphView() {
 
     graph.on("tap", (event: EventObject) => {
       if (event.target === graph) {
+        setSelectedNodeId(null);
         setSelection(null);
       }
     });
 
     graphRef.current = graph;
 
+    let animationFrame = 0;
+    let basePositions: Record<string, { x: number; y: number }> = {};
+
+    const startFloating = () => {
+      basePositions = {};
+      graph.nodes().forEach((node) => {
+        basePositions[node.id()] = { ...node.position() };
+      });
+
+      const startedAt = performance.now();
+
+      const floatGraph = (now: number) => {
+        const elapsed = (now - startedAt) / 1000;
+
+        if (!isMotionPausedRef.current) {
+          graph.batch(() => {
+            graph.nodes().forEach((node, index) => {
+              if (node.grabbed()) {
+                basePositions[node.id()] = { ...node.position() };
+                return;
+              }
+
+              const base = basePositions[node.id()];
+              if (!base) {
+                return;
+              }
+
+              const phase = index * 0.73;
+              node.position({
+                x: base.x + Math.sin(elapsed * 0.28 + phase) * 23,
+                y: base.y + Math.cos(elapsed * 0.22 + phase) * 19,
+              });
+            });
+          });
+        }
+
+        animationFrame = window.requestAnimationFrame(floatGraph);
+      };
+
+      animationFrame = window.requestAnimationFrame(floatGraph);
+    };
+
+    graph.ready(() => {
+      window.setTimeout(startFloating, 120);
+    });
+
+    graph.on("free", "node", (event: EventObject) => {
+      basePositions[event.target.id()] = { ...event.target.position() };
+    });
+
     return () => {
+      window.cancelAnimationFrame(animationFrame);
       graph.destroy();
       graphRef.current = null;
     };
@@ -376,20 +468,195 @@ function GraphView() {
     return () => window.clearTimeout(resizeTimer);
   }, [isExpanded]);
 
+  useEffect(() => {
+    isMotionPausedRef.current = isMotionPaused;
+  }, [isMotionPaused]);
+
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph) {
+      return;
+    }
+
+    graph.elements().toggleClass("labels-hidden", !areLabelsVisible);
+  }, [areLabelsVisible, elements]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadGraph() {
+      setIsGraphLoading(true);
+      setGraphError("");
+      setNeo4jStatus("checking");
+      setIsNeighborMode(false);
+      setSelectedNodeId(null);
+      setSelection(null);
+
+      try {
+        const response = await fetch(`${graphApiUrl}?source=${encodeURIComponent(activeSource)}`, {
+          signal: controller.signal,
+        });
+        const data = (await response.json()) as GraphResponse;
+
+        if (!response.ok) {
+          throw new Error(data.error || "Could not load graph data.");
+        }
+
+        setGraphNodes(data.nodes);
+        setGraphRelationships(data.relationships);
+        setNeo4jStatus("connected");
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+
+        setNeo4jStatus("disconnected");
+        setGraphError(error instanceof Error ? error.message : "Could not load graph data.");
+      } finally {
+        setIsGraphLoading(false);
+      }
+    }
+
+    loadGraph();
+
+    return () => controller.abort();
+  }, [activeSource]);
+
+  const fitGraph = () => {
+    graphRef.current?.fit(undefined, 42);
+  };
+
+  const centerSelected = () => {
+    const graph = graphRef.current;
+    if (!graph || !selectedNodeId) {
+      return;
+    }
+
+    const selectedNode = graph.getElementById(selectedNodeId);
+    if (selectedNode.empty()) {
+      return;
+    }
+
+    graph.animate({
+      center: { eles: selectedNode },
+      zoom: Math.max(graph.zoom(), 1.15),
+      duration: 260,
+    });
+  };
+
+  const showNeighbors = () => {
+    const graph = graphRef.current;
+    if (!graph) {
+      return;
+    }
+
+    if (isNeighborMode) {
+      graph.elements().removeClass("hidden");
+      graph.fit(undefined, 42);
+      setIsNeighborMode(false);
+      return;
+    }
+
+    if (!selectedNodeId) {
+      return;
+    }
+
+    const selectedNode = graph.getElementById(selectedNodeId);
+    if (selectedNode.empty()) {
+      return;
+    }
+
+    const visibleElements = selectedNode.closedNeighborhood();
+    graph.elements().addClass("hidden");
+    visibleElements.removeClass("hidden");
+    graph.fit(visibleElements, 42);
+    setIsNeighborMode(true);
+  };
+
+  const filterBySource = (source: DataSource | "All") => {
+    setActiveSource(source);
+  };
+
   return (
     <section
       className={`context-box${isExpanded ? " context-box-expanded" : ""}`}
       aria-label="Neo4j graph visualization"
     >
+      <div className="source-filters" aria-label="Data source filters">
+        {dataSources.map((source) => (
+          <button
+            className={`source-filter-button${activeSource === source ? " source-filter-button-active" : ""}`}
+            type="button"
+            key={source}
+            onClick={() => filterBySource(source)}
+          >
+            {source === "All" ? "Full graph" : source}
+          </button>
+        ))}
+      </div>
+      <div className="graph-actions">
+        <button
+          className="graph-action-button"
+          type="button"
+          aria-label="Fit graph to screen"
+          onClick={fitGraph}
+        >
+          Fit
+        </button>
+        <button
+          className="graph-action-button"
+          type="button"
+          disabled={!selectedNodeId}
+          onClick={centerSelected}
+        >
+          Center
+        </button>
+        <button
+          className="graph-action-button"
+          type="button"
+          disabled={!selectedNodeId && !isNeighborMode}
+          onClick={showNeighbors}
+        >
+          {isNeighborMode ? "All" : "Neighbors"}
+        </button>
+        <button className="graph-action-button" type="button" onClick={() => setAreLabelsVisible((current) => !current)}>
+          {areLabelsVisible ? "Hide labels" : "Show labels"}
+        </button>
+        <button className="graph-action-button" type="button" onClick={() => setIsMotionPaused((current) => !current)}>
+          {isMotionPaused ? "Motion on" : "Pause"}
+        </button>
+        <button
+          className="graph-action-button"
+          type="button"
+          aria-label={isExpanded ? "Minimize graph" : "Expand graph"}
+          onClick={() => setIsExpanded((current) => !current)}
+        >
+          {isExpanded ? "Close" : "Expand"}
+        </button>
+      </div>
       <button
-        className="graph-expand-button"
+        className="viewer-button"
         type="button"
-        aria-label={isExpanded ? "Minimize graph" : "Expand graph"}
-        onClick={() => setIsExpanded((current) => !current)}
+        onClick={() => window.open("http://127.0.0.1:5000/", "_blank", "noopener,noreferrer")}
       >
-        {isExpanded ? "Close" : "Expand"}
+        Open SQL Viewer
       </button>
+      <div className={`neo4j-status neo4j-status-${neo4jStatus}`} aria-live="polite">
+        <span className="neo4j-status-dot" />
+        <span>
+          {neo4jStatus === "connected"
+            ? "Connected to Neo4j"
+            : neo4jStatus === "checking"
+              ? "Checking Neo4j"
+              : "Neo4j disconnected"}
+        </span>
+      </div>
       <div className="graph-canvas" ref={containerRef} />
+      {(isGraphLoading || graphError) ? (
+        <div className={`graph-status${graphError ? " graph-status-error" : ""}`}>
+          {graphError || "Loading graph..."}
+        </div>
+      ) : null}
       {selection ? (
         <aside className="selection-panel">
           <strong>{selection.title}</strong>
