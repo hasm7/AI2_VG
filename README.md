@@ -69,3 +69,13 @@ scripts/setup_postgres_schema.py
 ```
 
 Local database settings should be placed in `.env`. That file must not be committed to the repository.
+
+## Frontend
+
+The frontend lives in `frontend/`. To set it up:
+
+```text
+npm install
+npm run dev      # local development
+npm run build    # production build
+```
