@@ -20,6 +20,10 @@ dist/
 build/
 *.egg-info/
 
+# JavaScript / frontend
+node_modules/
+*.tsbuildinfo
+
 # Virtual environments
 .venv/
 venv/
