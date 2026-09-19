@@ -119,6 +119,48 @@ main {
   max-width: calc(100% - 20px);
 }
 
+.graph-legend {
+  position: absolute;
+  top: 44px;
+  left: 10px;
+  z-index: 2;
+  display: grid;
+  gap: 5px;
+  max-width: min(220px, calc(100% - 20px));
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 8px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+
+.graph-legend-item {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #1f2937;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.graph-legend-item span:last-child {
+  overflow-wrap: anywhere;
+}
+
+.graph-legend-marker {
+  display: block;
+  width: 11px;
+  height: 11px;
+  border: 2px solid;
+  border-radius: 999px;
+  background: transparent;
+  box-sizing: border-box;
+}
+
 .graph-action-button {
   position: relative;
   isolation: isolate;
@@ -392,18 +434,84 @@ main {
   overflow: hidden;
 }
 
-.message-input,
+.build-graph-layers {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+.center-tabs-inner {
+  padding-left: 0;
+}
+
+.center-tabs-inner .center-tab {
+  min-width: 110px;
+  height: 24px;
+  font-size: 11px;
+}
+
+.build-graph-layers .center-tab-panel {
+  overflow: auto;
+}
+
+.ai-chat-input,
+.ai-chat-output,
 .center-notes {
   width: 100%;
   border: 1px solid #c9c9c9;
   border-radius: 4px;
-  padding: 0 12px;
+  padding: 10px 12px;
   box-sizing: border-box;
   font: inherit;
 }
 
-.message-input {
-  height: 40px;
+.ai-chat {
+  display: grid;
+  grid-template-rows: minmax(130px, 0.8fr) auto minmax(180px, 1.2fr);
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.ai-chat-field {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 6px;
+  min-height: 0;
+  color: #234270;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ai-chat-input,
+.ai-chat-output {
+  min-height: 0;
+  resize: none;
+}
+
+.ai-chat-output {
+  background: #f8fafc;
+}
+
+.ai-send-button {
+  justify-self: start;
+  height: 30px;
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(219, 234, 254, 0.72));
+  color: #123f91;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 14px;
+  cursor: pointer;
+}
+
+.ai-send-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .center-notes {
@@ -552,4 +660,203 @@ main {
     padding-right: 16px;
     padding-left: 16px;
   }
+}
+
+.reference-panel {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.reference-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.reference-run-button {
+  height: 30px;
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(219, 234, 254, 0.72));
+  color: #123f91;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.reference-run-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* The button carries the needs-re-run signal so it is visible where it is acted on. */
+.reference-run-button-stale {
+  border-color: rgba(217, 119, 6, 0.55);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(254, 243, 199, 0.85));
+  color: #92400e;
+}
+
+.reference-status {
+  display: grid;
+  gap: 2px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.reference-stale {
+  color: #92400e;
+  font-weight: 700;
+}
+
+.reference-error {
+  margin: 0;
+  color: #b91c1c;
+  font-size: 12px;
+}
+
+.reference-success {
+  margin: 0;
+  color: #15803d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reference-counts {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #234270;
+}
+
+.reference-count strong {
+  color: #123f91;
+}
+
+.reference-table-wrapper {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.reference-empty {
+  margin: 0;
+  padding: 12px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.reference-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.reference-table th,
+.reference-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
+}
+
+.reference-table th {
+  position: sticky;
+  top: 0;
+  background: #eef2ff;
+  color: #234270;
+  font-weight: 700;
+}
+
+.reference-table code {
+  background: #e0e7ff;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
+}
+
+.knowledge-panel {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.knowledge-build-button {
+  height: 30px;
+  border: 1px solid rgba(126, 34, 206, 0.32);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(237, 233, 254, 0.85));
+  color: #5b21b6;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.knowledge-build-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.knowledge-build-button-stale {
+  border-color: rgba(217, 119, 6, 0.55);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(254, 243, 199, 0.85));
+  color: #92400e;
+}
+
+.knowledge-topics {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.knowledge-topic {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.knowledge-topic h3 {
+  margin: 0;
+  font-size: 13px;
+  color: #123f91;
+}
+
+.knowledge-topic p {
+  margin: 0;
+  font-size: 12px;
+  color: #334155;
+}
+
+.knowledge-topic-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #5b21b6;
+  background: #ede9fe;
+  border-radius: 999px;
+  padding: 2px 8px;
+  margin-left: 6px;
+}
+
+.knowledge-topic .reference-table td {
+  white-space: normal;
 }

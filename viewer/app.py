@@ -1,6 +1,6 @@
-import json
+﻿import json
 import os
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 
 import psycopg
@@ -279,12 +279,31 @@ PERSON_OUTGOING_RELATIONSHIPS = [
     "SENT_SLACK_MESSAGE",
     "PARTICIPATED_IN_MEETING",
     "SPOKE_TEAMS_TRANSCRIPT_SEGMENT",
+    "CREATED_ISSUE",
     "OWNS_ISSUE",
     "COMMENTED_ON_ISSUE",
+    "CHANGED_ISSUE_VERSION",
+    "WROTE_ISSUE_COMMENT",
     "AUTHORED_DOCUMENT",
+    "AUTHORED_DOCUMENT_VERSION",
     "AUTHORED_PR",
     "REVIEWED_PR",
+    "WROTE_PR_REVIEW",
 ]
+
+
+# Bookkeeping for the derived reference layer. The extraction pass in
+# backend/reference_extraction.py compares last_import_at with
+# last_extraction_at to tell the UI when a re-run is needed. This node holds no
+# data and is excluded from the graph API.
+PIPELINE_STATE_ID = "singleton"
+
+
+def record_import_timestamp(tx):
+    tx.run("""
+        MERGE (s:PipelineState {id: $id})
+        SET s.last_import_at = $value
+    """, {"id": PIPELINE_STATE_ID, "value": datetime.now(timezone.utc).isoformat()})
 
 
 def format_person_merges(merges):
@@ -315,7 +334,8 @@ def write_person_nodes(tx, person_nodes):
             p.source_ids = person.source_ids,
             p.names = person.names,
             p.identity_confidence = person.identity_confidence,
-            p.identity_ambiguous = person.identity_ambiguous
+            p.identity_ambiguous = person.identity_ambiguous,
+            p.actor_type = person.actor_type
     """, {"people": person_nodes})
 
 
@@ -553,6 +573,7 @@ def import_mail_to_neo4j(uri, user, password, database):
             for row in rows:
                 session.execute_write(import_mail_row, row, registry)
 
+            session.execute_write(record_import_timestamp)
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
                 WHERE n:MailMessage OR n:Person
@@ -668,6 +689,7 @@ def import_slack_to_neo4j(uri, user, password, database):
             for row in rows:
                 session.execute_write(import_slack_row, row, registry)
 
+            session.execute_write(record_import_timestamp)
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
                 WHERE n:SlackMessage OR n:Person
@@ -802,6 +824,7 @@ def import_teams_to_neo4j(uri, user, password, database):
             for row in segments:
                 session.execute_write(import_teams_segment_row, row, registry)
 
+            session.execute_write(record_import_timestamp)
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
                 WHERE n:TeamsMeeting OR n:TeamsTranscriptSegment OR n:Person
@@ -835,9 +858,9 @@ def load_all_issue_comments():
     with psycopg.connect(database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             return query_all(cur, """
-                SELECT DISTINCT ON (source_instance, comment_id) *
+                SELECT *
                 FROM issue_comments
-                ORDER BY source_instance, comment_id, version_number DESC
+                ORDER BY source_instance, issue_id, comment_id, version_number
             """)
 
 
@@ -852,10 +875,20 @@ def ensure_issue_graph_schema(tx):
         FOR (p:Person)
         REQUIRE p.person_key IS UNIQUE
     """)
+    tx.run("""
+        CREATE CONSTRAINT issue_version_key IF NOT EXISTS
+        FOR (v:IssueVersion)
+        REQUIRE (v.source_instance, v.issue_id, v.version_number) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT issue_comment_key IF NOT EXISTS
+        FOR (c:IssueComment)
+        REQUIRE (c.source_instance, c.comment_id) IS UNIQUE
+    """)
 
 
 # Relationship types are inlined in Cypher, so only these fixed values are allowed.
-ISSUE_PERSON_RELATIONSHIPS = {"OWNS_ISSUE", "COMMENTED_ON_ISSUE"}
+ISSUE_PERSON_RELATIONSHIPS = {"CREATED_ISSUE", "OWNS_ISSUE", "COMMENTED_ON_ISSUE"}
 
 
 def merge_issue_person(tx, row, relationship, key):
@@ -895,6 +928,95 @@ def issue_version_entry(row):
     }
 
 
+def import_issue_version_node(tx, issue_key, version, registry):
+    display_name = f'{issue_key} v{version["version_number"]}'
+    tx.run("""
+        MATCH (i:Issue {
+            source_instance: $source_instance,
+            issue_id: $issue_id
+        })
+        MERGE (v:IssueVersion {
+            source_instance: $source_instance,
+            issue_id: $issue_id,
+            version_number: $version_number
+        })
+        SET v.name = $display_name,
+            v.display_name = $display_name,
+            v.issue_type = $issue_type,
+            v.title = $title,
+            v.description = $description,
+            v.acceptance_criteria = $acceptance_criteria,
+            v.status = $status,
+            v.priority = $priority,
+            v.assignee_source_id = $assignee_source_id,
+            v.assignee_name = $assignee_name,
+            v.changed_by_id = $changed_by_id,
+            v.changed_by_name = $changed_by_name,
+            v.version_at = $version_at,
+            v.source_url = $source_url
+        MERGE (i)-[:HAS_ISSUE_VERSION]->(v)
+    """, {
+        "source_instance": version["source_instance"],
+        "issue_id": version["issue_id"],
+        "version_number": version["version_number"],
+        "display_name": display_name,
+        "issue_type": version["issue_type"],
+        "title": version["title"],
+        "description": version["description"],
+        "acceptance_criteria": version["acceptance_criteria"],
+        "status": version["status"],
+        "priority": version["priority"],
+        "assignee_source_id": version["assignee_source_id"],
+        "assignee_name": version["assignee_name"],
+        "changed_by_id": version["changed_by_id"],
+        "changed_by_name": version["changed_by_name"],
+        "version_at": version["version_at"].isoformat(),
+        "source_url": version["source_url"],
+    })
+
+    changer_key = registry.resolve_person_key(
+        source_id=version["changed_by_id"],
+        name=version["changed_by_name"],
+    )
+    if changer_key:
+        tx.run("""
+            MATCH (v:IssueVersion {
+                source_instance: $source_instance,
+                issue_id: $issue_id,
+                version_number: $version_number
+            })
+            MATCH (p:Person {person_key: $person_key})
+            MERGE (p)-[:CHANGED_ISSUE_VERSION]->(v)
+        """, {
+            "source_instance": version["source_instance"],
+            "issue_id": version["issue_id"],
+            "version_number": version["version_number"],
+            "person_key": changer_key,
+        })
+
+
+def import_issue_version_chain(tx, versions):
+    for previous, current in zip(versions, versions[1:]):
+        tx.run("""
+            MATCH (previous:IssueVersion {
+                source_instance: $source_instance,
+                issue_id: $issue_id,
+                version_number: $previous_version_number
+            })
+            MATCH (current:IssueVersion {
+                source_instance: $source_instance,
+                issue_id: $issue_id,
+                version_number: $current_version_number
+            })
+            MERGE (previous)-[:NEXT_ISSUE_VERSION]->(current)
+        """, {
+            "source_instance": previous["source_instance"],
+            "issue_id": previous["issue_id"],
+            "previous_version_number": previous["version_number"],
+            "current_version_number": current["version_number"],
+        })
+
+
 def issue_comment_entry(comment):
     return {
         "comment_id": comment["comment_id"],
@@ -908,13 +1030,83 @@ def issue_comment_entry(comment):
     }
 
 
-def import_issue_row(tx, row, versions, comments, registry):
-    """Import one issue.
+def import_issue_comment_node(tx, comment, version_count, registry):
+    tx.run("""
+        MATCH (i:Issue {
+            source_instance: $source_instance,
+            issue_id: $issue_id
+        })
+        MERGE (c:IssueComment {
+            source_instance: $source_instance,
+            comment_id: $comment_id
+        })
+        SET c.name = $comment_id,
+            c.display_name = $comment_id,
+            c.issue_id = $issue_id,
+            c.author_source_id = $author_source_id,
+            c.author_name = $author_name,
+            c.body = $body,
+            c.created_at = $created_at,
+            c.version_at = $version_at,
+            c.version_number = $version_number,
+            c.version_count = $version_count,
+            c.reply_to_comment_id = $reply_to_comment_id,
+            c.source_url = $source_url
+        MERGE (i)-[:HAS_ISSUE_COMMENT]->(c)
+    """, {
+        "source_instance": comment["source_instance"],
+        "comment_id": comment["comment_id"],
+        "issue_id": comment["issue_id"],
+        "author_source_id": comment["author_source_id"],
+        "author_name": comment["author_name"],
+        "body": comment["body"],
+        "created_at": comment["created_at"].isoformat(),
+        "version_at": comment["version_at"].isoformat(),
+        "version_number": comment["version_number"],
+        "version_count": version_count,
+        "reply_to_comment_id": comment["reply_to_comment_id"],
+        "source_url": comment["source_url"],
+    })
 
-    The node keeps the latest version as its main state. Version history and
-    comments are stored as JSON on the Issue node instead of separate nodes.
-    """
-    comments_raw = json.dumps([issue_comment_entry(comment) for comment in comments], ensure_ascii=False)
+    author_key = registry.resolve_person_key(
+        source_id=comment["author_source_id"],
+        name=comment["author_name"],
+    )
+    if author_key:
+        tx.run("""
+            MATCH (c:IssueComment {
+                source_instance: $source_instance,
+                comment_id: $comment_id
+            })
+            MATCH (p:Person {person_key: $person_key})
+            MERGE (p)-[:WROTE_ISSUE_COMMENT]->(c)
+        """, {
+            "source_instance": comment["source_instance"],
+            "comment_id": comment["comment_id"],
+            "person_key": author_key,
+        })
+
+    if comment["reply_to_comment_id"]:
+        tx.run("""
+            MATCH (c:IssueComment {
+                source_instance: $source_instance,
+                comment_id: $comment_id
+            })
+            MATCH (parent:IssueComment {
+                source_instance: $source_instance,
+                comment_id: $reply_to_comment_id
+            })
+            MERGE (c)-[:REPLY_TO_ISSUE_COMMENT]->(parent)
+        """, {
+            "source_instance": comment["source_instance"],
+            "comment_id": comment["comment_id"],
+            "reply_to_comment_id": comment["reply_to_comment_id"],
+        })
+
+
+def import_issue_row(tx, row, versions, comments, latest_comments, registry):
+    """Import one issue with additive retrieval-unit nodes."""
+    comments_raw = json.dumps([issue_comment_entry(comment) for comment in latest_comments], ensure_ascii=False)
     versions_raw = json.dumps([issue_version_entry(version) for version in versions], ensure_ascii=False)
 
     tx.run("""
@@ -962,10 +1154,18 @@ def import_issue_row(tx, row, versions, comments, registry):
         "version_number": row["version_number"],
         "version_count": len(versions),
         "versions_raw": versions_raw,
-        "comment_count": len(comments),
+        "comment_count": len(latest_comments),
         "comments_raw": comments_raw,
         "source_url": row["source_url"],
     })
+
+    # The creator comes from the issues table and is a different role from the
+    # assignee, so it gets its own relationship rather than sharing OWNS_ISSUE.
+    creator_key = registry.resolve_person_key(
+        source_id=row["creator_source_id"],
+        name=row["creator_name"],
+    )
+    merge_issue_person(tx, row, "CREATED_ISSUE", creator_key)
 
     owner_name = row["assignee_name"] or row["creator_name"]
     owner_source_id = row["assignee_source_id"] or row["creator_source_id"]
@@ -973,7 +1173,7 @@ def import_issue_row(tx, row, versions, comments, registry):
     merge_issue_person(tx, row, "OWNS_ISSUE", owner_key)
 
     author_keys = []
-    for comment in comments:
+    for comment in latest_comments:
         key = registry.resolve_person_key(
             source_id=comment["author_source_id"],
             name=comment["author_name"],
@@ -983,6 +1183,17 @@ def import_issue_row(tx, row, versions, comments, registry):
 
     for key in author_keys:
         merge_issue_person(tx, row, "COMMENTED_ON_ISSUE", key)
+
+    for version in versions:
+        import_issue_version_node(tx, row["issue_key"], version, registry)
+    import_issue_version_chain(tx, versions)
+
+    comments_by_id = {}
+    for comment in comments:
+        comments_by_id.setdefault(comment["comment_id"], []).append(comment)
+    for comment_versions in comments_by_id.values():
+        comment_versions.sort(key=lambda item: item["version_number"])
+        import_issue_comment_node(tx, comment_versions[-1], len(comment_versions), registry)
 
 
 def import_issues_to_neo4j(uri, user, password, database):
@@ -1000,12 +1211,22 @@ def import_issues_to_neo4j(uri, user, password, database):
     for issue_versions in versions_by_issue.values():
         issue_versions.sort(key=lambda row: row["version_number"])
 
-    comments_by_issue = {}
+    latest_comments_by_issue = {}
+    all_comments_by_issue = {}
+    comments_by_id = {}
     for comment in comments:
         key = (comment["source_instance"], comment["issue_id"])
-        comments_by_issue.setdefault(key, []).append(comment)
-    for issue_comments in comments_by_issue.values():
+        all_comments_by_issue.setdefault(key, []).append(comment)
+        comments_by_id.setdefault((comment["source_instance"], comment["comment_id"]), []).append(comment)
+    for comment_versions in comments_by_id.values():
+        comment_versions.sort(key=lambda item: item["version_number"])
+        latest = comment_versions[-1]
+        key = (latest["source_instance"], latest["issue_id"])
+        latest_comments_by_issue.setdefault(key, []).append(latest)
+    for issue_comments in latest_comments_by_issue.values():
         issue_comments.sort(key=lambda comment: (comment["created_at"], comment["comment_id"]))
+    for issue_comments in all_comments_by_issue.values():
+        issue_comments.sort(key=lambda comment: (comment["created_at"], comment["comment_id"], comment["version_number"]))
 
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         driver.verify_connectivity()
@@ -1017,13 +1238,15 @@ def import_issues_to_neo4j(uri, user, password, database):
                     import_issue_row,
                     issue_versions[-1],
                     issue_versions,
-                    comments_by_issue.get(key, []),
+                    all_comments_by_issue.get(key, []),
+                    latest_comments_by_issue.get(key, []),
                     registry,
                 )
 
+            session.execute_write(record_import_timestamp)
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
-                WHERE n:Issue OR n:Person
+                WHERE n:Issue OR n:IssueVersion OR n:IssueComment OR n:Person
                 RETURN labels(n)[0] AS label, count(n) AS count
                 ORDER BY label
             """).data())
@@ -1053,6 +1276,11 @@ def ensure_document_graph_schema(tx):
         FOR (p:Person)
         REQUIRE p.person_key IS UNIQUE
     """)
+    tx.run("""
+        CREATE CONSTRAINT document_version_key IF NOT EXISTS
+        FOR (v:DocumentVersion)
+        REQUIRE (v.source_instance, v.document_id, v.version_number) IS UNIQUE
+    """)
 
 
 def document_version_entry(row):
@@ -1071,7 +1299,7 @@ def document_version_entry(row):
 
 
 def import_document_row(tx, latest, earlier_versions, registry):
-    """Import one document. Earlier versions are stored on the Document node."""
+    """Import one document and all document-version retrieval units."""
     versions_raw = json.dumps([document_version_entry(row) for row in earlier_versions], ensure_ascii=False)
 
     tx.run("""
@@ -1130,6 +1358,95 @@ def import_document_row(tx, latest, earlier_versions, registry):
         "person_key": key,
     })
 
+    for version in earlier_versions + [latest]:
+        import_document_version_node(tx, version, registry)
+    import_document_version_chain(tx, earlier_versions + [latest])
+
+
+def import_document_version_node(tx, version, registry):
+    display_name = f'{version["document_id"]} v{version["version_number"]}'
+    tx.run("""
+        MATCH (d:Document {
+            source_instance: $source_instance,
+            document_id: $document_id
+        })
+        MERGE (v:DocumentVersion {
+            source_instance: $source_instance,
+            document_id: $document_id,
+            version_number: $version_number
+        })
+        SET v.name = $display_name,
+            v.display_name = $display_name,
+            v.document_type = $document_type,
+            v.title = $title,
+            v.body = $body,
+            v.content_format = $content_format,
+            v.author_source_id = $author_source_id,
+            v.author_name = $author_name,
+            v.created_at = $created_at,
+            v.version_at = $version_at,
+            v.change_summary = $change_summary,
+            v.source_url = $source_url
+        MERGE (d)-[:HAS_DOCUMENT_VERSION]->(v)
+    """, {
+        "source_instance": version["source_instance"],
+        "document_id": version["document_id"],
+        "version_number": version["version_number"],
+        "display_name": display_name,
+        "document_type": version["document_type"],
+        "title": version["title"],
+        "body": version["body"],
+        "content_format": version["content_format"],
+        "author_source_id": version["author_source_id"],
+        "author_name": version["author_name"],
+        "created_at": version["created_at"].isoformat(),
+        "version_at": version["version_at"].isoformat(),
+        "change_summary": version["change_summary"],
+        "source_url": version["source_url"],
+    })
+
+    key = registry.resolve_person_key(
+        source_id=version["author_source_id"],
+        name=version["author_name"],
+    )
+    if key:
+        tx.run("""
+            MATCH (v:DocumentVersion {
+                source_instance: $source_instance,
+                document_id: $document_id,
+                version_number: $version_number
+            })
+            MATCH (p:Person {person_key: $person_key})
+            MERGE (p)-[:AUTHORED_DOCUMENT_VERSION]->(v)
+        """, {
+            "source_instance": version["source_instance"],
+            "document_id": version["document_id"],
+            "version_number": version["version_number"],
+            "person_key": key,
+        })
+
+
+def import_document_version_chain(tx, versions):
+    for previous, current in zip(versions, versions[1:]):
+        tx.run("""
+            MATCH (previous:DocumentVersion {
+                source_instance: $source_instance,
+                document_id: $document_id,
+                version_number: $previous_version_number
+            })
+            MATCH (current:DocumentVersion {
+                source_instance: $source_instance,
+                document_id: $document_id,
+                version_number: $current_version_number
+            })
+            MERGE (previous)-[:NEXT_DOCUMENT_VERSION]->(current)
+        """, {
+            "source_instance": previous["source_instance"],
+            "document_id": previous["document_id"],
+            "previous_version_number": previous["version_number"],
+            "current_version_number": current["version_number"],
+        })
+
 
 def import_documents_to_neo4j(uri, user, password, database):
     rows = load_all_document_rows()
@@ -1152,9 +1469,10 @@ def import_documents_to_neo4j(uri, user, password, database):
                 versions.sort(key=lambda row: row["version_number"])
                 session.execute_write(import_document_row, versions[-1], versions[:-1], registry)
 
+            session.execute_write(record_import_timestamp)
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
-                WHERE n:Document OR n:Person
+                WHERE n:Document OR n:DocumentVersion OR n:Person
                 RETURN labels(n)[0] AS label, count(n) AS count
                 ORDER BY label
             """).data())
@@ -1177,9 +1495,9 @@ def load_all_pr_reviews():
     with psycopg.connect(database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             return query_all(cur, """
-                SELECT DISTINCT ON (source_instance, repository, pr_number, source_id) *
+                SELECT *
                 FROM pr_reviews
-                ORDER BY source_instance, repository, pr_number, source_id, version_number DESC
+                ORDER BY source_instance, repository, pr_number, source_id, version_number
             """)
 
 
@@ -1193,6 +1511,16 @@ def ensure_pr_graph_schema(tx):
         CREATE CONSTRAINT person_key IF NOT EXISTS
         FOR (p:Person)
         REQUIRE p.person_key IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT pull_request_review_key IF NOT EXISTS
+        FOR (r:PullRequestReview)
+        REQUIRE (r.source_instance, r.repository, r.pr_number, r.source_id) IS UNIQUE
+    """)
+    tx.run("""
+        CREATE CONSTRAINT code_change_key IF NOT EXISTS
+        FOR (c:CodeChange)
+        REQUIRE (c.source_instance, c.repository, c.pr_number, c.version_number, c.file_path) IS UNIQUE
     """)
 
 
@@ -1245,9 +1573,9 @@ def pr_review_entry(review):
     }
 
 
-def import_pr_row(tx, latest, reviews, registry):
-    """Import one pull request. Reviews are stored on the PullRequest node."""
-    reviews_raw = json.dumps([pr_review_entry(review) for review in reviews], ensure_ascii=False)
+def import_pr_row(tx, latest, versions, reviews, latest_reviews, registry):
+    """Import one pull request with additive review and code-change nodes."""
+    reviews_raw = json.dumps([pr_review_entry(review) for review in latest_reviews], ensure_ascii=False)
     code_changes_raw = json.dumps(latest["code_changes"] or [], ensure_ascii=False)
     display_name = f'{latest["repository"]}#{latest["pr_number"]}'
 
@@ -1299,7 +1627,7 @@ def import_pr_row(tx, latest, reviews, registry):
     merge_pr_person(tx, latest, "AUTHORED_PR", author_key)
 
     reviewer_keys = []
-    for review in reviews:
+    for review in latest_reviews:
         key = registry.resolve_person_key(
             source_id=review["author_source_id"],
             name=review["author_name"],
@@ -1309,6 +1637,159 @@ def import_pr_row(tx, latest, reviews, registry):
 
     for key in reviewer_keys:
         merge_pr_person(tx, latest, "REVIEWED_PR", key)
+
+    reviews_by_id = {}
+    for review in reviews:
+        reviews_by_id.setdefault(review["source_id"], []).append(review)
+    for review_versions in reviews_by_id.values():
+        review_versions.sort(key=lambda item: item["version_number"])
+        import_pr_review_node(tx, review_versions[-1], len(review_versions), registry)
+
+    for version in versions:
+        import_code_change_nodes(tx, version)
+
+
+def import_pr_review_node(tx, review, version_count, registry):
+    display_name = f'{review["repository"]}#{review["pr_number"]} {review["source_id"]}'
+    tx.run("""
+        MATCH (pr:PullRequest {
+            source_instance: $source_instance,
+            repository: $repository,
+            pr_number: $pr_number
+        })
+        MERGE (r:PullRequestReview {
+            source_instance: $source_instance,
+            repository: $repository,
+            pr_number: $pr_number,
+            source_id: $source_id
+        })
+        SET r.name = $display_name,
+            r.display_name = $display_name,
+            r.entry_type = $entry_type,
+            r.version_number = $version_number,
+            r.version_count = $version_count,
+            r.pr_version_number = $pr_version_number,
+            r.reviewed_commit = $reviewed_commit,
+            r.author_source_id = $author_source_id,
+            r.author_name = $author_name,
+            r.body = $body,
+            r.created_at = $created_at,
+            r.version_at = $version_at,
+            r.reply_to_source_id = $reply_to_source_id,
+            r.review_group_id = $review_group_id,
+            r.file_path = $file_path,
+            r.line_number = $line_number,
+            r.diff_side = $diff_side,
+            r.source_url = $source_url
+        MERGE (pr)-[:HAS_PR_REVIEW]->(r)
+    """, {
+        "source_instance": review["source_instance"],
+        "repository": review["repository"],
+        "pr_number": review["pr_number"],
+        "source_id": review["source_id"],
+        "display_name": display_name,
+        "entry_type": review["entry_type"],
+        "version_number": review["version_number"],
+        "version_count": version_count,
+        "pr_version_number": review["pr_version_number"],
+        "reviewed_commit": review["reviewed_commit"],
+        "author_source_id": review["author_source_id"],
+        "author_name": review["author_name"],
+        "body": review["body"],
+        "created_at": review["created_at"].isoformat(),
+        "version_at": review["version_at"].isoformat(),
+        "reply_to_source_id": review["reply_to_source_id"],
+        "review_group_id": review["review_group_id"],
+        "file_path": review["file_path"],
+        "line_number": review["line_number"],
+        "diff_side": review["diff_side"],
+        "source_url": review["source_url"],
+    })
+
+    author_key = registry.resolve_person_key(
+        source_id=review["author_source_id"],
+        name=review["author_name"],
+    )
+    if author_key:
+        tx.run("""
+            MATCH (r:PullRequestReview {
+                source_instance: $source_instance,
+                repository: $repository,
+                pr_number: $pr_number,
+                source_id: $source_id
+            })
+            MATCH (p:Person {person_key: $person_key})
+            MERGE (p)-[:WROTE_PR_REVIEW]->(r)
+        """, {
+            "source_instance": review["source_instance"],
+            "repository": review["repository"],
+            "pr_number": review["pr_number"],
+            "source_id": review["source_id"],
+            "person_key": author_key,
+        })
+
+    if review["reply_to_source_id"]:
+        tx.run("""
+            MATCH (r:PullRequestReview {
+                source_instance: $source_instance,
+                repository: $repository,
+                pr_number: $pr_number,
+                source_id: $source_id
+            })
+            MATCH (parent:PullRequestReview {
+                source_instance: $source_instance,
+                repository: $repository,
+                pr_number: $pr_number,
+                source_id: $reply_to_source_id
+            })
+            MERGE (r)-[:REPLY_TO_PR_REVIEW]->(parent)
+        """, {
+            "source_instance": review["source_instance"],
+            "repository": review["repository"],
+            "pr_number": review["pr_number"],
+            "source_id": review["source_id"],
+            "reply_to_source_id": review["reply_to_source_id"],
+        })
+
+
+def import_code_change_nodes(tx, version):
+    for change in version["code_changes"] or []:
+        file_path = change.get("file_path")
+        if not file_path:
+            continue
+        display_name = f'{version["repository"]}#{version["pr_number"]} {file_path}'
+        tx.run("""
+            MATCH (pr:PullRequest {
+                source_instance: $source_instance,
+                repository: $repository,
+                pr_number: $pr_number
+            })
+            MERGE (c:CodeChange {
+                source_instance: $source_instance,
+                repository: $repository,
+                pr_number: $pr_number,
+                version_number: $version_number,
+                file_path: $file_path
+            })
+            SET c.name = $display_name,
+                c.display_name = $display_name,
+                c.change_type = $change_type,
+                c.before_summary = $before_summary,
+                c.after_summary = $after_summary,
+                c.diff = $diff
+            MERGE (pr)-[:HAS_CODE_CHANGE]->(c)
+        """, {
+            "source_instance": version["source_instance"],
+            "repository": version["repository"],
+            "pr_number": version["pr_number"],
+            "version_number": version["version_number"],
+            "file_path": file_path,
+            "display_name": display_name,
+            "change_type": change.get("change_type"),
+            "before_summary": change.get("before_summary"),
+            "after_summary": change.get("after_summary"),
+            "diff": change.get("diff"),
+        })
 
 
 def import_prs_to_neo4j(uri, user, password, database):
@@ -1325,10 +1806,25 @@ def import_prs_to_neo4j(uri, user, password, database):
         versions_by_pr.setdefault(key, []).append(row)
 
     reviews_by_pr = {}
+    latest_reviews_by_pr = {}
+    reviews_by_id = {}
     for review in reviews:
         key = (review["source_instance"], review["repository"], review["pr_number"])
         reviews_by_pr.setdefault(key, []).append(review)
+        reviews_by_id.setdefault((
+            review["source_instance"],
+            review["repository"],
+            review["pr_number"],
+            review["source_id"],
+        ), []).append(review)
+    for review_versions in reviews_by_id.values():
+        review_versions.sort(key=lambda item: item["version_number"])
+        latest = review_versions[-1]
+        key = (latest["source_instance"], latest["repository"], latest["pr_number"])
+        latest_reviews_by_pr.setdefault(key, []).append(latest)
     for pr_reviews in reviews_by_pr.values():
+        pr_reviews.sort(key=lambda review: (review["created_at"], review["source_id"], review["version_number"]))
+    for pr_reviews in latest_reviews_by_pr.values():
         pr_reviews.sort(key=lambda review: (review["created_at"], review["source_id"]))
 
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
@@ -1338,11 +1834,19 @@ def import_prs_to_neo4j(uri, user, password, database):
             merges = sync_person_nodes(session, registry)
             for key, versions in versions_by_pr.items():
                 versions.sort(key=lambda row: row["version_number"])
-                session.execute_write(import_pr_row, versions[-1], reviews_by_pr.get(key, []), registry)
+                session.execute_write(
+                    import_pr_row,
+                    versions[-1],
+                    versions,
+                    reviews_by_pr.get(key, []),
+                    latest_reviews_by_pr.get(key, []),
+                    registry,
+                )
 
+            session.execute_write(record_import_timestamp)
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
-                WHERE n:PullRequest OR n:Person
+                WHERE n:PullRequest OR n:PullRequestReview OR n:CodeChange OR n:Person
                 RETURN labels(n)[0] AS label, count(n) AS count
                 ORDER BY label
             """).data())

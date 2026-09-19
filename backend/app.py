@@ -13,6 +13,15 @@ from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, request
 from neo4j import GraphDatabase
 
+from reference_extraction import (
+    PIPELINE_STATE_LABEL,
+    load_extracted_edges,
+    needs_rerun,
+    read_pipeline_state,
+    run_extraction,
+)
+from topic_event_extraction import build_knowledge_layer, knowledge_state_payload
+
 
 load_dotenv()
 
@@ -29,9 +38,44 @@ GRAPH_SOURCE_RELATIONSHIPS = {
     "Mail": ["SENT_MAIL", "MAIL_RECIPIENT"],
     "Slack": ["SENT_SLACK_MESSAGE", "SLACK_THREAD_REPLY_TO"],
     "Teams": ["PARTICIPATED_IN_MEETING", "HAS_TEAMS_TRANSCRIPT_SEGMENT", "SPOKE_TEAMS_TRANSCRIPT_SEGMENT"],
-    "Issues": ["OWNS_ISSUE", "COMMENTED_ON_ISSUE"],
-    "Docs": ["AUTHORED_DOCUMENT"],
-    "PRs": ["AUTHORED_PR", "REVIEWED_PR"],
+    "Issues": [
+        "CREATED_ISSUE",
+        "OWNS_ISSUE",
+        "COMMENTED_ON_ISSUE",
+        "HAS_ISSUE_VERSION",
+        "NEXT_ISSUE_VERSION",
+        "CHANGED_ISSUE_VERSION",
+        "HAS_ISSUE_COMMENT",
+        "WROTE_ISSUE_COMMENT",
+        "REPLY_TO_ISSUE_COMMENT",
+    ],
+    "Docs": [
+        "AUTHORED_DOCUMENT",
+        "HAS_DOCUMENT_VERSION",
+        "NEXT_DOCUMENT_VERSION",
+        "AUTHORED_DOCUMENT_VERSION",
+    ],
+    "PRs": [
+        "AUTHORED_PR",
+        "REVIEWED_PR",
+        "HAS_PR_REVIEW",
+        "WROTE_PR_REVIEW",
+        "REPLY_TO_PR_REVIEW",
+        "HAS_CODE_CHANGE",
+    ],
+    "References": [
+        "MENTIONS_ISSUE",
+        "MENTIONS_PULL_REQUEST",
+        "MENTIONS_DOCUMENT",
+    ],
+    "Knowledge": [
+        "ABOUT_TOPIC",
+        "DERIVED_FROM",
+        "EVENT_OF_TOPIC",
+        "EVIDENCED_BY",
+        "CAUSED",
+        "ACTED_IN_EVENT",
+    ],
 }
 
 
@@ -45,7 +89,7 @@ def add_api_cors_headers(response):
         }
         origin = request.headers.get("Origin")
         response.headers["Access-Control-Allow-Origin"] = origin if origin in allowed_origins else "http://127.0.0.1:5173"
-        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
     return response
 
@@ -205,6 +249,7 @@ def load_neo4j_graph(source):
                         tx.run(
                             """
                             MATCH (n)
+                            WHERE NOT n:PipelineState
                             RETURN elementId(n) AS id,
                                    labels(n) AS labels,
                                    properties(n) AS properties
@@ -303,6 +348,83 @@ def api_graph():
         return jsonify({"error": str(error)}), 500
 
 
+def reference_state_payload(session):
+    state = session.execute_read(read_pipeline_state)
+    return {
+        "last_import_at": state["last_import_at"],
+        "last_extraction_at": state["last_extraction_at"],
+        "needs_rerun": needs_rerun(state),
+    }
+
+
+@app.route("/api/references", methods=["GET", "OPTIONS"])
+def api_references():
+    """Current derived reference edges plus the pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    uri, user, password, database = neo4j_connection_settings()
+    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+        with driver.session(database=database, default_access_mode="READ") as session:
+            payload = reference_state_payload(session)
+            edges = session.execute_read(load_extracted_edges)
+
+    counts = {}
+    for edge in edges:
+        counts[edge["relationship"]] = counts.get(edge["relationship"], 0) + 1
+
+    payload.update({"edges": edges, "total": len(edges), "counts": counts})
+    return jsonify(payload)
+
+
+@app.route("/api/references/extract", methods=["POST", "OPTIONS"])
+def api_references_extract():
+    """Run the deterministic reference extraction pass."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = run_extraction(session)
+                result.update(reference_state_payload(session))
+        return jsonify(result)
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/knowledge", methods=["GET", "OPTIONS"])
+def api_knowledge():
+    """Current Topic/Event knowledge layer plus the pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(knowledge_state_payload(session))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/knowledge/build", methods=["POST", "OPTIONS"])
+def api_knowledge_build():
+    """Run the LLM-driven Topic/Event extraction pass."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = build_knowledge_layer(session)
+        return jsonify(result)
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route("/api/neo4j/status", methods=["GET", "OPTIONS"])
 def api_neo4j_status():
     if request.method == "OPTIONS":
@@ -315,6 +437,33 @@ def api_neo4j_status():
         return jsonify({"connected": True})
     except Exception as error:
         return jsonify({"connected": False, "error": str(error)}), 503
+
+
+@app.route("/api/ai/chat", methods=["POST", "OPTIONS"])
+def api_ai_chat():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    payload = request.get_json(silent=True) or {}
+    message = str(payload.get("message", "")).strip()
+    if not message:
+        return jsonify({"error": "Message is required."}), 400
+
+    # Imported on demand so a missing chat dependency cannot stop the graph API
+    # from starting. The agent needs langgraph and openai, which the graph API
+    # does not.
+    try:
+        from langgraph_agent.agent import ask_agent
+    except ImportError as error:
+        return jsonify({
+            "error": f"Chat agent is unavailable: {error}. "
+                     "Install its dependencies with .\\scripts\\install_deps.ps1."
+        }), 503
+
+    try:
+        return jsonify({"answer": ask_agent(message)})
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
 
 
 @app.route("/api/viewer/start", methods=["POST", "OPTIONS"])

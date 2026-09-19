@@ -29,6 +29,31 @@ SOURCE_ID_IS_GLOBAL = True
 WHITESPACE = re.compile(r"\s+")
 
 
+MAILBOX_LOCAL_PARTS = {
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "do-not-reply",
+    "support",
+    "info",
+    "hello",
+    "contact",
+    "admin",
+    "team",
+    "help",
+    "sales",
+    "billing",
+    "notifications",
+    "jira",
+    "github",
+    "builds",
+    "ci",
+    "alerts",
+    "postmaster",
+    "mailer-daemon",
+}
+
+
 # One entry per person-bearing field group in the SQL schema. The queries are
 # read-only and only select the columns needed for identity resolution.
 OBSERVATION_QUERIES = [
@@ -132,6 +157,15 @@ def display_name(value):
         return None
     cleaned = WHITESPACE.sub(" ", value.strip())
     return cleaned or None
+
+
+def email_actor_type(email):
+    """Classify one email address by exact local-part match."""
+    normalised = normalise_email(email)
+    if not normalised or "@" not in normalised:
+        return "person"
+    local_part = normalised.split("@", 1)[0]
+    return "mailbox" if local_part in MAILBOX_LOCAL_PARTS else "person"
 
 
 class Observation:
@@ -240,6 +274,14 @@ class PersonCluster:
     def identity_confidence(self):
         return "strong" if self.emails or self.source_ids else "weak"
 
+    @property
+    def actor_type(self):
+        if not self.emails:
+            return "person"
+        if any(email_actor_type(email) == "person" for email in self.emails):
+            return "person"
+        return "mailbox"
+
     def node_properties(self):
         return {
             "person_key": self.person_key,
@@ -251,6 +293,7 @@ class PersonCluster:
             "names": self.names,
             "identity_confidence": self.identity_confidence,
             "identity_ambiguous": self.identity_ambiguous,
+            "actor_type": self.actor_type,
         }
 
 

@@ -2,3 +2,6 @@ psycopg[binary]>=3.2
 python-dotenv>=1.0
 Flask>=3.0
 neo4j>=5.28
+openai>=1.99
+langgraph>=0.2
+pydantic>=2

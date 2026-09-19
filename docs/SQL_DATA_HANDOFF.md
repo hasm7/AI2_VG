@@ -24,6 +24,20 @@ The most important rule is that the data must stay separated into six logical da
 - Keep cross-source references in text and IDs when useful, but do not merge the six source groups into one table.
 - JSONB array fields must contain JSON arrays, not strings containing JSON.
 
+## How SQL Relates to the Graph
+
+PostgreSQL is the source of truth. Neo4j is derived from these tables and can be rebuilt from them.
+
+The SQL schema preserves source records, stable source IDs, timestamps, version rows, and JSONB source fragments. It does not try to pre-compute the graph. Relationships such as authorship, ownership, comments, reviews, and version chains are created during import into Neo4j from the source fields documented below.
+
+Several SQL tables map to one logical source in the graph:
+
+- `issues`, `issue_versions`, and `issue_comments` become the Issues graph model.
+- `document_versions` becomes both the latest `Document` state and per-version `DocumentVersion` retrieval units.
+- `pr_versions` and `pr_reviews` become the Pull Request graph model, including `CodeChange` nodes derived from the `code_changes` JSONB array.
+
+Do not add SQL tables just to support graph traversal unless the source system itself has a distinct source record that needs preservation. Graph-only retrieval units and relationships belong in the import layer.
+
 ## Table Details
 
 ### 1. Mail: `mail_messages`
@@ -57,6 +71,8 @@ Recipient JSON example:
   {"type": "cc", "address": "team@example.com", "name": "Team"}
 ]
 ```
+
+Functional mailbox addresses are allowed source facts. The graph import recognises them by exact, case-insensitive local-part match before `@`, for example `support@example.com`, `noreply@example.com`, or `notifications@example.com`, and marks the resulting node with `actor_type = "mailbox"` instead of excluding it.
 
 ### 2. Slack / Project Chat: `slack_messages`
 
@@ -210,6 +226,17 @@ Indexes:
 - `version_number` should start at `1` and increase without gaps.
 - `version_at` should increase with `version_number`.
 
+**How the viewer presents these three tables.** The SQL viewer is source-oriented, so `issues` is not a separate menu entry. The Issues source shows all three tables together, in the same way the Teams source combines a meeting with its transcript segments:
+
+| Panel | Table |
+| --- | --- |
+| Issue (identity) | `issues` |
+| Issue latest version | `issue_versions`, highest `version_number` |
+| Version history | `issue_versions`, every row in ascending order |
+| Issue comments | `issue_comments` |
+
+The list on the left shows one entry per issue, not one per version. The table view shows one row per version joined with its comments, so a single issue appears several times there.
+
 #### `issue_comments`
 
 One row is one version of one issue comment.
@@ -360,6 +387,7 @@ Keep those links explicit in the source content where realistic:
 
 - Mention issue keys such as `AUTH-17`.
 - Mention PR numbers such as `backend-api#42`.
+- Write identifiers out explicitly in the text. The graph extracts references by matching identifier strings against the entities it already holds, so an identifier that is never written out cannot be extracted. "the session ticket" produces no edge; `AUTH-17` does.
 - Reuse person names and source IDs consistently.
 - Use realistic timestamps so the sequence of events can be reconstructed.
 - Preserve uncertainty, changed decisions, and disagreement when appropriate.
@@ -404,6 +432,7 @@ Generation rules that keep identity resolvable:
 - Give every person at least one such bridge row, otherwise their mail identity and their issue/document/PR identity stay separate.
 - Reuse the same `source_id` for the same person in every table and every `source_instance`. The importer treats a source ID as globally unique by default (`SOURCE_ID_IS_GLOBAL`).
 - Reuse the same email spelling; case and surrounding whitespace are normalised, nothing else is.
+- Use functional mailbox local parts deliberately when an address is not a human actor. The initial recognised local parts are `noreply`, `no-reply`, `donotreply`, `do-not-reply`, `support`, `info`, `hello`, `contact`, `admin`, `team`, `help`, `sales`, `billing`, `notifications`, `jira`, `github`, `builds`, `ci`, `alerts`, `postmaster`, and `mailer-daemon`.
 - Do not give two different people the same name unless both also have an email or a source ID. A name alone can only attach a name-only occurrence to one existing identity; if the name matches several identities, the occurrence is kept separate and flagged as ambiguous.
 - Fill in `speaker_source_id` in `teams_transcript_segments` when the source system would know it. A transcript speaker with only a name depends entirely on the name being unique.
 
