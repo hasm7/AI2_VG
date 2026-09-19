@@ -49,8 +49,14 @@ draft/
   plan_initial2.PNG
 scripts/
   install_deps.ps1
+  run_app.ps1
+  run_backend.ps1
   run_viewer.ps1
   setup_postgres_schema.py
+backend/
+  app.py
+frontend/
+  src/
 viewer/
   app.py
 AGENTS.md
@@ -70,12 +76,32 @@ scripts/setup_postgres_schema.py
 
 Local database settings should be placed in `.env`. That file must not be committed to the repository.
 
+## Running the Graph App
+
+The React frontend depends on the backend API, and the backend API depends on Neo4j.
+Starting only the React server opens the page, but the graph will show Neo4j as disconnected unless the backend is already running.
+
+Start the full graph app with:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\run_app.ps1
+```
+
+This starts the backend on `http://127.0.0.1:8000`, waits until it responds, and then starts the React frontend on `http://127.0.0.1:5173`.
+
+Use the frontend-only command only when the backend is already running:
+
+```powershell
+cd frontend
+npm.cmd run dev -- --host 127.0.0.1
+```
+
 ## Frontend
 
 The frontend lives in `frontend/`. To set it up:
 
 ```text
 npm install
-npm run dev      # local development
-npm run build    # production build
+npm.cmd run dev -- --host 127.0.0.1  # frontend only
+npm.cmd run build                    # production build
 ```

@@ -203,6 +203,67 @@ main {
   opacity: 0.45;
 }
 
+.graph-action-button-active {
+  border-color: rgba(37, 99, 235, 0.56);
+  background:
+    linear-gradient(180deg, rgba(219, 234, 254, 0.96), rgba(191, 219, 254, 0.72));
+}
+
+.motion-control {
+  position: relative;
+}
+
+.motion-panel {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  display: grid;
+  width: 210px;
+  gap: 10px;
+  border: 1px solid rgba(37, 99, 235, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  padding: 10px;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(16px) saturate(155%);
+}
+
+.motion-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #123f91;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.motion-toggle-button {
+  height: 22px;
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  border-radius: 999px;
+  background: rgba(239, 246, 255, 0.9);
+  color: #123f91;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.motion-slider {
+  display: grid;
+  gap: 5px;
+  color: #234270;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.motion-slider input {
+  width: 100%;
+  accent-color: #2563eb;
+}
+
 .graph-canvas {
   width: 100%;
   height: 100%;

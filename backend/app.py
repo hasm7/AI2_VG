@@ -1,7 +1,13 @@
 import json
 import os
+import subprocess
+import sys
+import time as time_module
+import urllib.error
+import urllib.request
 from datetime import date, datetime, time
 from decimal import Decimal
+from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, request
@@ -11,6 +17,13 @@ from neo4j import GraphDatabase
 load_dotenv()
 
 app = Flask(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+VIEWER_APP = PROJECT_ROOT / "viewer" / "app.py"
+VIEWER_LOG = PROJECT_ROOT / "backend" / "viewer_server.log"
+VIEWER_URL = "http://127.0.0.1:5000/"
+viewer_process: subprocess.Popen | None = None
+viewer_log_file = None
 
 GRAPH_SOURCE_RELATIONSHIPS = {
     "Mail": ["SENT_MAIL", "MAIL_RECIPIENT"],
@@ -49,6 +62,87 @@ def neo4j_connection_settings() -> tuple[str, str, str, str]:
         raise RuntimeError("NEO4J_PASSWORD is required.")
 
     return uri, user, password, database
+
+
+def is_viewer_running() -> bool:
+    global viewer_process
+
+    if viewer_process and viewer_process.poll() is None:
+        return True
+
+    viewer_process = None
+    return viewer_responds()
+
+
+def viewer_responds() -> bool:
+    try:
+        with urllib.request.urlopen(VIEWER_URL, timeout=1) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def wait_for_viewer(timeout_seconds: float = 8) -> bool:
+    deadline = time_module.monotonic() + timeout_seconds
+
+    while time_module.monotonic() < deadline:
+        if viewer_process and viewer_process.poll() is not None:
+            return False
+        if viewer_responds():
+            return True
+        time_module.sleep(0.25)
+
+    return False
+
+
+def start_viewer() -> None:
+    global viewer_log_file, viewer_process
+
+    if is_viewer_running():
+        return
+
+    if not VIEWER_APP.exists():
+        raise RuntimeError(f"SQL viewer app not found: {VIEWER_APP}")
+
+    viewer_env = os.environ.copy()
+    viewer_env.pop("WERKZEUG_RUN_MAIN", None)
+    viewer_env.pop("WERKZEUG_SERVER_FD", None)
+
+    viewer_log_file = VIEWER_LOG.open("a", encoding="utf-8")
+    viewer_process = subprocess.Popen(
+        [sys.executable, str(VIEWER_APP)],
+        cwd=PROJECT_ROOT,
+        env=viewer_env,
+        stdout=viewer_log_file,
+        stderr=viewer_log_file,
+    )
+
+    if not wait_for_viewer():
+        stop_viewer()
+        raise RuntimeError(f"SQL viewer did not start on http://127.0.0.1:5000. See {VIEWER_LOG}.")
+
+
+def stop_viewer() -> None:
+    global viewer_log_file, viewer_process
+
+    if not viewer_process:
+        if viewer_log_file:
+            viewer_log_file.close()
+            viewer_log_file = None
+        return
+
+    if viewer_process.poll() is None:
+        viewer_process.terminate()
+        try:
+            viewer_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            viewer_process.kill()
+            viewer_process.wait(timeout=3)
+
+    viewer_process = None
+    if viewer_log_file:
+        viewer_log_file.close()
+        viewer_log_file = None
 
 
 def graph_value(value):
@@ -221,6 +315,27 @@ def api_neo4j_status():
         return jsonify({"connected": True})
     except Exception as error:
         return jsonify({"connected": False, "error": str(error)}), 503
+
+
+@app.route("/api/viewer/start", methods=["POST", "OPTIONS"])
+def api_viewer_start():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        start_viewer()
+        return jsonify({"url": VIEWER_URL})
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/viewer/stop", methods=["POST", "OPTIONS"])
+def api_viewer_stop():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    stop_viewer()
+    return jsonify({"stopped": True})
 
 
 if __name__ == "__main__":

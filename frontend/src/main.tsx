@@ -35,8 +35,35 @@ type Selection = {
   rows: Array<[string, string]>;
 } | null;
 
+type ViewerStartResponse = {
+  url?: string;
+  error?: string;
+};
+
 const dataSources: Array<DataSource | "All"> = ["All", "Mail", "Slack", "Teams", "Issues", "Docs", "PRs"];
 const graphApiUrl = "/api/graph";
+
+async function readGraphResponse(response: Response): Promise<GraphResponse> {
+  const body = await response.text();
+
+  if (!body.trim()) {
+    return {
+      nodes: [],
+      relationships: [],
+      error: `Backend returned an empty response (${response.status} ${response.statusText || "Unknown status"}).`,
+    };
+  }
+
+  try {
+    return JSON.parse(body) as GraphResponse;
+  } catch {
+    return {
+      nodes: [],
+      relationships: [],
+      error: `Backend returned non-JSON response (${response.status} ${response.statusText || "Unknown status"}).`,
+    };
+  }
+}
 
 const nodes: GraphNode[] = [
   {
@@ -191,10 +218,16 @@ function propertyRows(properties: Record<string, string | number>) {
 function GraphView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<Core | null>(null);
+  const viewerWindowRef = useRef<Window | null>(null);
+  const viewerCloseTimerRef = useRef<number | null>(null);
   const isMotionPausedRef = useRef(false);
+  const motionLevelRef = useRef(1);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isMotionPaused, setIsMotionPaused] = useState(false);
+  const [isMotionMenuOpen, setIsMotionMenuOpen] = useState(false);
+  const [motionLevel, setMotionLevel] = useState(1);
+  const [spacingLevel, setSpacingLevel] = useState(1);
   const [areLabelsVisible, setAreLabelsVisible] = useState(true);
   const [isNeighborMode, setIsNeighborMode] = useState(false);
   const [activeSource, setActiveSource] = useState<DataSource | "All">("All");
@@ -203,7 +236,63 @@ function GraphView() {
   const [graphRelationships, setGraphRelationships] = useState<GraphRelationship[]>(relationships);
   const [graphError, setGraphError] = useState("");
   const [isGraphLoading, setIsGraphLoading] = useState(false);
+  const [isViewerStarting, setIsViewerStarting] = useState(false);
   const [neo4jStatus, setNeo4jStatus] = useState<Neo4jStatus>("checking");
+
+  const stopViewer = async () => {
+    await fetch("/api/viewer/stop", { method: "POST" }).catch(() => undefined);
+  };
+
+  const clearViewerCloseTimer = () => {
+    if (viewerCloseTimerRef.current !== null) {
+      window.clearInterval(viewerCloseTimerRef.current);
+      viewerCloseTimerRef.current = null;
+    }
+  };
+
+  const watchViewerWindow = (viewerWindow: Window) => {
+    clearViewerCloseTimer();
+    viewerWindowRef.current = viewerWindow;
+
+    viewerCloseTimerRef.current = window.setInterval(() => {
+      if (!viewerWindow.closed) {
+        return;
+      }
+
+      clearViewerCloseTimer();
+      viewerWindowRef.current = null;
+      void stopViewer();
+    }, 700);
+  };
+
+  const openSqlViewer = async () => {
+    if (isViewerStarting) {
+      return;
+    }
+
+    setGraphError("");
+    setIsViewerStarting(true);
+
+    try {
+      const response = await fetch("/api/viewer/start", { method: "POST" });
+      const data = (await response.json()) as ViewerStartResponse;
+
+      if (!response.ok || data.error || !data.url) {
+        throw new Error(data.error || "Could not start SQL viewer.");
+      }
+
+      const viewerWindow = window.open(data.url, "_blank");
+      if (!viewerWindow) {
+        throw new Error("The browser blocked the SQL viewer popup.");
+      }
+
+      watchViewerWindow(viewerWindow);
+    } catch (error) {
+      setGraphError(error instanceof Error ? error.message : "Could not start SQL viewer.");
+    } finally {
+      setIsViewerStarting(false);
+    }
+  };
 
   const elements = useMemo(
     () => [
@@ -228,6 +317,14 @@ function GraphView() {
       })),
     ],
     [graphNodes, graphRelationships],
+  );
+
+  const layoutSettings = useMemo(
+    () => ({
+      nodeRepulsion: 5200 + spacingLevel * 3800,
+      idealEdgeLength: 62 + spacingLevel * 34,
+    }),
+    [spacingLevel],
   );
 
   useEffect(() => {
@@ -360,8 +457,8 @@ function GraphView() {
         animate: false,
         fit: true,
         padding: 42,
-        nodeRepulsion: 9000,
-        idealEdgeLength: 96,
+        nodeRepulsion: layoutSettings.nodeRepulsion,
+        idealEdgeLength: layoutSettings.idealEdgeLength,
       },
     });
 
@@ -430,9 +527,10 @@ function GraphView() {
               }
 
               const phase = index * 0.73;
+              const motion = motionLevelRef.current;
               node.position({
-                x: base.x + Math.sin(elapsed * 0.28 + phase) * 23,
-                y: base.y + Math.cos(elapsed * 0.22 + phase) * 19,
+                x: base.x + Math.sin(elapsed * (0.14 + motion * 0.14) + phase) * (8 + motion * 15),
+                y: base.y + Math.cos(elapsed * (0.11 + motion * 0.11) + phase) * (7 + motion * 12),
               });
             });
           });
@@ -457,7 +555,7 @@ function GraphView() {
       graph.destroy();
       graphRef.current = null;
     };
-  }, [elements]);
+  }, [elements, layoutSettings]);
 
   useEffect(() => {
     const resizeTimer = window.setTimeout(() => {
@@ -471,6 +569,10 @@ function GraphView() {
   useEffect(() => {
     isMotionPausedRef.current = isMotionPaused;
   }, [isMotionPaused]);
+
+  useEffect(() => {
+    motionLevelRef.current = motionLevel;
+  }, [motionLevel]);
 
   useEffect(() => {
     const graph = graphRef.current;
@@ -496,9 +598,9 @@ function GraphView() {
         const response = await fetch(`${graphApiUrl}?source=${encodeURIComponent(activeSource)}`, {
           signal: controller.signal,
         });
-        const data = (await response.json()) as GraphResponse;
+        const data = await readGraphResponse(response);
 
-        if (!response.ok) {
+        if (!response.ok || data.error) {
           throw new Error(data.error || "Could not load graph data.");
         }
 
@@ -521,6 +623,13 @@ function GraphView() {
 
     return () => controller.abort();
   }, [activeSource]);
+
+  useEffect(() => {
+    return () => {
+      clearViewerCloseTimer();
+      void stopViewer();
+    };
+  }, []);
 
   const fitGraph = () => {
     graphRef.current?.fit(undefined, 42);
@@ -622,9 +731,49 @@ function GraphView() {
         <button className="graph-action-button" type="button" onClick={() => setAreLabelsVisible((current) => !current)}>
           {areLabelsVisible ? "Hide labels" : "Show labels"}
         </button>
-        <button className="graph-action-button" type="button" onClick={() => setIsMotionPaused((current) => !current)}>
-          {isMotionPaused ? "Motion on" : "Pause"}
-        </button>
+        <div className="motion-control">
+          <button
+            className={`graph-action-button${isMotionMenuOpen ? " graph-action-button-active" : ""}`}
+            type="button"
+            aria-expanded={isMotionMenuOpen}
+            aria-controls="motion-control-panel"
+            onClick={() => setIsMotionMenuOpen((current) => !current)}
+          >
+            Motion
+          </button>
+          {isMotionMenuOpen ? (
+            <div className="motion-panel" id="motion-control-panel">
+              <div className="motion-panel-header">
+                <span>Motion</span>
+                <button className="motion-toggle-button" type="button" onClick={() => setIsMotionPaused((current) => !current)}>
+                  {isMotionPaused ? "On" : "Pause"}
+                </button>
+              </div>
+              <label className="motion-slider">
+                <span>Distance</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  value={spacingLevel}
+                  onChange={(event) => setSpacingLevel(Number(event.target.value))}
+                />
+              </label>
+              <label className="motion-slider">
+                <span>Float</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  value={motionLevel}
+                  onChange={(event) => setMotionLevel(Number(event.target.value))}
+                />
+              </label>
+            </div>
+          ) : null}
+        </div>
         <button
           className="graph-action-button"
           type="button"
@@ -637,9 +786,10 @@ function GraphView() {
       <button
         className="viewer-button"
         type="button"
-        onClick={() => window.open("http://127.0.0.1:5000/", "_blank", "noopener,noreferrer")}
+        disabled={isViewerStarting}
+        onClick={openSqlViewer}
       >
-        Open SQL Viewer
+        {isViewerStarting ? "Starting SQL Viewer..." : "Open SQL Viewer"}
       </button>
       <div className={`neo4j-status neo4j-status-${neo4jStatus}`} aria-live="polite">
         <span className="neo4j-status-dot" />
