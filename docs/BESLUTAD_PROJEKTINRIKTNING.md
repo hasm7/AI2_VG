@@ -1,132 +1,124 @@
-# Beslutad projektinriktning
+# Decided Project Direction
 
-## Projektets sammanhang och mål
+## Project Context and Goal
 
-Projektet ska imitera informationskällor från ett software engineering-team som arbetar med en gemensam produkt.
+This project simulates source material from a software engineering team working on a shared product.
 
-Materialet ska beskriva samma projekt, personer och händelser över tid. Källorna ska bidra med olika delar av sammanhanget så att ett minnessystem kan hitta relationer mellan behov, diskussioner, beslut, arbetsuppgifter och implementation.
+The material should describe the same project, people, events, needs, decisions, issues, documents, and implementation work across time. Each source should contribute a different part of the context so that a memory system can later find relationships between requirements, discussions, decisions, tickets, documentation, and code changes.
 
-Målet är att kunna hitta kontext och samband över flera källor, exempelvis:
+The goal is to make it possible to find context and relationships across multiple sources, for example:
 
-- vem som pratade med vem inför ett beslut
-- vilka underlag som beskriver bakgrunden till ett beslut
-- vilka källor som handlar om samma händelse
-- vilka personer, ärenden och samtal som hör ihop
-- var information saknas, har förändrats eller motsäger annan information
+- who discussed a decision before it was made
+- which documents describe the background to a requirement
+- which source entries refer to the same event
+- which people, issues, meetings, and code changes belong together
+- where information is missing, changed, or contradictory
 
-## -------------------------------------------------------------------------------------------------
+## The Six Data Sources and Their Nine SQL Tables
 
-## De sex datakällorna och deras nio SQL-tabeller
+PostgreSQL preserves the original source material before graph import. Source IDs, timestamps, versions, and source references are retained so the graph layer can build relationships while keeping the original context traceable.
 
-SQL bevarar källmaterialet inför grafimporten. Käll-ID:n, tider, versioner och hänvisningar följer med så att grafen kan bygga relationerna och behålla rätt sammanhang.
-
-Nedan anges tabellindelningen och vad varje rad representerar. Exakta kolumner och datatyper är ännu inte fastställda.
-
+The full PostgreSQL schema, including columns, data types, keys, constraints, indexes, and table relationships, is documented in `docs/SQL_DATA_HANDOFF.md` and technically defined in `scripts/setup_postgres_schema.py`.
 
 ### 1. Mail
 
-Mailtrådar mellan kunden, den produktansvariga och teamet.
+Email threads between customers, product owners, and the team.
 
-Här finns behov, förtydliganden och besked som kommunicerats mellan parterna.
+This source contains needs, clarifications, and decisions communicated between parties.
 
-**Tabell: `mail_messages`**
+**Table: `mail_messages`**
 
-En rad innehåller ett mail med avsändare, mottagare, ämne, text, tid och svarshänvisning. Mottagarna sparas som en strukturerad lista.
+One row contains one email message with sender, recipients, subject, body, timestamp, and reply reference. Recipients are stored as a structured JSONB array.
 
+### 2. Slack / Project Chat
 
-### 2. Slack – projektchatt
+The team's ongoing project communication in channels, messages, and threads.
 
-Teamets löpande kommunikation i kanaler, meddelanden och svarstrådar.
+This source contains questions, discussions, informal agreements, and day-to-day coordination.
 
-Här finns frågor, diskussioner och informella överenskommelser under arbetets gång.
+**Table: `slack_messages`**
 
-**Tabell: `slack_messages`**
+One row contains one version of one Slack message with author, channel, body, timestamp, and thread reference. Earlier message versions are preserved when messages are edited.
 
-En rad innehåller ett meddelande med avsändare, kanal, text, tid och trådhänvisning. Tidigare meddelandeversioner bevaras vid redigering.
+### 3. Teams / Meeting Transcripts
 
+Meeting conversations stored as text, including speaker and timing information.
 
-### 3. Teams – mötestranskript
+This source contains spoken discussions, tradeoffs, and decisions.
 
-Mötenas samtal sparade som text, med uppgift om vem som talar och när.
+**Table: `teams_meetings`**
 
-Här finns muntliga diskussioner, avvägningar och beslut.
+One row contains meeting metadata: source instance, meeting ID, title, start/end times, participants, and source URL.
 
-**Tabell: `teams_meetings`**
+**Table: `teams_transcript_segments`**
 
-En rad innehåller mötets grunduppgifter: ID, titel, tid och tillgängliga deltagaruppgifter.
+One row contains one ordered transcript segment with meeting ID, speaker, text, offsets, and sequence number.
 
-**Tabell: `teams_transcript_segments`**
+### 4. Issues / Tickets
 
-En rad innehåller ett yttrande med mötes-ID, talare, text, tidsangivelser och ordning i samtalet.
+Work items and bugs with owner, comments, acceptance criteria, status, and history.
 
+Issues connect needs to concrete work.
 
-### 4. Ärenden/tickets
+**Table: `issue_versions`**
 
-Arbetsuppgifter och buggar med ansvarig, kommentarer och ändringshistorik.
+One row contains the currently allowed stored issue row for one issue in the live database, including description, acceptance criteria, status, owner, timestamps, and source URL.
 
-Här finns också acceptanskriterier: vad som ska vara uppfyllt för att uppgiften ska räknas som klar. Ärendena kopplar behov till konkret arbete.
+Important live database note: the table contains `version_number`, but it also has a unique constraint on `(source_instance, issue_id)`. That means the current database only allows one row per issue ID unless the schema is changed.
 
-**Tabell: `issue_versions`**
+**Table: `issue_comments`**
 
-En rad innehåller en ärendeversion med beskrivning, acceptanskriterier, status, ansvarig och tidpunkt. Samma ärende-ID följer versionerna.
+One row contains one version of one issue comment with issue ID, author, body, timestamps, optional reply reference, and source URL.
 
-**Tabell: `issue_comments`**
+### 5. Requirements and Technical Documentation
 
-En rad innehåller en kommentar med ärende-ID, författare, text och tid.
+Documents that describe what the product should do and how the solution is intended to work.
 
+Earlier document versions are preserved so changes to requirements and technical design can be followed over time.
 
-### 5. Krav och teknisk dokumentation
+**Table: `document_versions`**
 
-Dokument som beskriver vad produkten ska klara och hur lösningen är tänkt att fungera.
+One row contains one version of one document with document ID, type, title, body, author, version, timestamps, change summary, and source URL.
 
-Tidigare versioner sparas så att det går att följa hur kraven och den tekniska beskrivningen förändrats.
+### 6. Pull Requests, Code Reviews, and Code Changes
 
-**Tabell: `document_versions`**
+Pull requests with descriptions of proposed changes, review comments, review decisions, and code-change metadata.
 
-En rad innehåller en dokumentversion med dokument-ID, titel, innehåll, författare, version och tidpunkt.
+This makes it possible to compare requirements, tickets, PR descriptions, reviews, and implementation details.
 
+**Table: `pr_versions`**
 
-### 6. PR:er, kodgranskningar och kodändringar
+One row contains one version of one pull request with repository, PR number, title, description, state, commits, code changes, timestamps, and source URL. Code changes are stored as a structured JSONB array.
 
-Pull requests (PR:er) med beskrivningar av föreslagna ändringar, granskarnas kommentarer och den tillhörande koden före och efter ändringen.
+**Table: `pr_reviews`**
 
-Det gör det möjligt att jämföra vad kraven säger, vad PR:n beskriver och vad kodändringen visar.
+One row contains one version of one PR review entry, such as a comment, approval, change request, or line-specific code comment. File and line metadata are present when the entry refers to a specific code location.
 
-**Tabell: `pr_versions`**
+## Code Material Scope
 
-En rad innehåller en PR-version med PR-ID, beskrivning, status, kodversion och kod före/efter. Ändringar i flera filer sparas som en strukturerad lista.
+Code material should be limited to selected functions or files with a coherent change history. The code examples should provide enough context to compare what a PR says with what the code change actually shows.
 
-**Tabell: `pr_reviews`**
+Reviews and comments should be linkable to the PR version and commit they refer to.
 
-En rad innehåller en kommentar eller ett granskningsbeslut med författare, tid och hänvisning till granskad PR-/kodversion. Fil och kodposition anges när det gäller specifik kod.
+## Relationships and History
 
-## -------------------------------------------------------------------------------------------------
+The material should connect across sources. A need may be expressed in an email, discussed in Slack and in a meeting, documented as a requirement, tracked as an issue, and implemented in a PR.
 
-## Kodmaterialets omfattning
+The sources may contain different perspectives, changed decisions, gaps, and contradictions. Historical versions should be preserved where the database schema allows it, so development can be followed over time.
 
-Kodmaterialet avgränsas till utvalda funktioner med en sammanhängande ändringshistorik. Kodexemplen ska ge tillräckligt sammanhang för att jämföra vad en PR beskriver med vad kodändringen visar.
+## Storage and Usage
 
-Granskningar och kommentarer ska kunna kopplas till den kodversion de avser.
+The SQL layer preserves simulated source material in source-oriented form and acts as the basis for import into the graph database.
 
-## Samband och historik
+The graph database acts as a memory system. Agents use it to find context and analyze the material. Source content and traceable references should be kept with the objects and relationships extracted from the SQL layer.
 
-Materialet ska hänga ihop över källorna. Ett behov kan exempelvis uttryckas i ett mail, diskuteras i Slack och på ett möte, dokumenteras som krav och följas vidare till ett ärende och en PR.
-
-Källorna får innehålla olika perspektiv, ändrade besked, luckor och motsägelser. Tidigare versioner av krav, ärenden och PR-material ska bevaras så att utvecklingen kan följas över tid.
-
-## Lagring och användning
-
-SQL-lagret ska bevara det simulerade källmaterialet i dess grundform och fungera som underlag för import till grafdatabasen.
-
-Grafdatabasen ska fungera som minnessystem. Agenterna ska använda den för att hitta sammanhang och analysera materialet. Källinnehåll och spårbara hänvisningar ska följa med tillsammans med de objekt och relationer som extraheras, så att agenterna kan läsa underlaget bakom sambanden.
-
-Flödet är:
+The flow is:
 
 ```text
-Simulerade källor → SQL med originalmaterial → Extraktion och överföring
-→ Grafdatabas/minnessystem → Agenternas analys
+Simulated sources -> SQL original material -> Extraction and transfer
+-> Graph database / memory system -> Agent analysis
 ```
 
-## Arbetsordning
+## Work Order
 
-Minnessystemet byggs först: lagring, överföring, relationer och sökning efter relevant kontext. Djupare reasoning och det fulla multiagentsystemet kommer därefter.
+The memory system is built first: storage, transfer, relationships, and context search. Deeper reasoning and the full multi-agent system come later.
