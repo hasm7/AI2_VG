@@ -19,6 +19,7 @@ TABLES_TO_DROP = [
     "document_versions",
     "issue_comments",
     "issue_versions",
+    "issues",
     "teams_transcript_segments",
     "teams_meetings",
     "slack_messages",
@@ -91,29 +92,38 @@ CREATE TABLE teams_transcript_segments (
     CHECK (end_offset_ms IS NULL OR end_offset_ms >= start_offset_ms)
 );
 
+CREATE TABLE issues (
+    source_instance     TEXT NOT NULL,
+    issue_id            TEXT NOT NULL,
+    issue_key           TEXT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL,
+    creator_source_id   TEXT,
+    creator_name        TEXT,
+    source_url          TEXT,
+    PRIMARY KEY (source_instance, issue_id),
+    UNIQUE (source_instance, issue_key)
+);
+
 CREATE TABLE issue_versions (
     source_instance     TEXT NOT NULL,
     issue_id            TEXT NOT NULL,
     version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    issue_key           TEXT NOT NULL,
     issue_type          TEXT NOT NULL,
     title               TEXT NOT NULL,
     description         TEXT,
     acceptance_criteria TEXT,
     status              TEXT NOT NULL,
     priority            TEXT,
-    creator_source_id   TEXT,
-    creator_name        TEXT,
     assignee_source_id  TEXT,
     assignee_name       TEXT,
     changed_by_id       TEXT,
     changed_by_name     TEXT,
-    created_at          TIMESTAMPTZ NOT NULL,
     version_at          TIMESTAMPTZ NOT NULL,
     source_url          TEXT,
     PRIMARY KEY (source_instance, issue_id, version_number),
-    UNIQUE (source_instance, issue_id),
-    CHECK (version_at >= created_at)
+    UNIQUE (source_instance, issue_id, version_at),
+    FOREIGN KEY (source_instance, issue_id)
+        REFERENCES issues (source_instance, issue_id)
 );
 
 CREATE TABLE issue_comments (
@@ -130,7 +140,7 @@ CREATE TABLE issue_comments (
     source_url          TEXT,
     PRIMARY KEY (source_instance, comment_id, version_number),
     FOREIGN KEY (source_instance, issue_id)
-        REFERENCES issue_versions (source_instance, issue_id),
+        REFERENCES issues (source_instance, issue_id),
     CHECK (version_at >= created_at)
 );
 
@@ -209,6 +219,9 @@ CREATE INDEX idx_mail_reply
 
 CREATE INDEX idx_slack_thread
     ON slack_messages (source_instance, workspace_id, channel_id, thread_root_id, sent_at);
+
+CREATE INDEX idx_issue_versions_history
+    ON issue_versions (source_instance, issue_id, version_number);
 
 CREATE INDEX idx_issue_comments_issue
     ON issue_comments (source_instance, issue_id, created_at);

@@ -2,7 +2,7 @@
 
 This document describes the PostgreSQL source schema for generating or loading simulated software engineering team data.
 
-The most important rule is that the data must stay separated into six logical data sources. The database has nine tables because some sources need multiple tables, but the data should not be flattened into one generic event table.
+The most important rule is that the data must stay separated into six logical data sources. The database has ten tables because some sources need multiple tables, but the data should not be flattened into one generic event table.
 
 ## Source Groups
 
@@ -11,7 +11,7 @@ The most important rule is that the data must stay separated into six logical da
 | Mail | `mail_messages` | Email messages and reply chains. |
 | Slack / project chat | `slack_messages` | Channel messages, threads, and edited message versions. |
 | Teams / meeting transcripts | `teams_meetings`, `teams_transcript_segments` | Meeting metadata and ordered transcript segments. |
-| Issues / tickets | `issue_versions`, `issue_comments` | Ticket history, status, ownership, acceptance criteria, and comments. |
+| Issues / tickets | `issues`, `issue_versions`, `issue_comments` | Ticket identity, version history with status transitions, ownership, acceptance criteria, and comments. |
 | Requirements and technical documentation | `document_versions` | Versioned requirements and technical documents. |
 | Pull requests, code reviews, and code changes | `pr_versions`, `pr_reviews` | PR history, changed code metadata, review decisions, and code comments. |
 
@@ -20,8 +20,7 @@ The most important rule is that the data must stay separated into six logical da
 - Use stable source IDs from the simulated source system. Do not invent new IDs for the same real-world object across versions.
 - Use `source_instance` to identify the simulated source system instance, for example `gmail-main`, `slack-main`, `jira-main`, `docs-main`, or `github-main`.
 - Use ISO-like timestamp values with timezone for all `TIMESTAMPTZ` fields, for example `2026-02-14T10:30:00+01:00`.
-- Preserve versions by inserting multiple rows with the same object ID and increasing `version_number` where the current database constraints allow it.
-- Current database note: `issue_versions` contains `version_number`, but the live schema also has `UNIQUE (source_instance, issue_id)`. That means the current database only allows one row per issue ID unless the schema is changed.
+- Preserve versions by inserting multiple rows with the same object ID and increasing `version_number`.
 - Keep cross-source references in text and IDs when useful, but do not merge the six source groups into one table.
 - JSONB array fields must contain JSON arrays, not strings containing JSON.
 
@@ -141,41 +140,75 @@ Foreign key:
 
 ### 4. Issues / Tickets
 
-Issue data is split into versioned issue state and comments.
+Issue data is split into three tables: identity, versioned state, and comments. This is still **one** logical source, not three.
 
-#### `issue_versions`
+The split exists because one table was holding two different things. Issue identity does not change: AUTH-17 exists, it was created on this date, by this person. Issue state changes repeatedly: AUTH-17 was `blocked`, assigned to Erik, with these acceptance criteria, as of this timestamp. Comments belong to the identity, not to any one state, so the foreign key has something stable to point at and versions are free to multiply.
 
-One row is the current stored issue row for one issue in the live database.
+Issues are the only object in the data model with a lifecycle. Status transitions with timestamps are what make it possible to answer questions about cause and delay rather than only about current state.
 
-Current database note: the table has `version_number`, but it also has `UNIQUE (source_instance, issue_id)`. Because of that unique constraint, do not generate multiple rows for the same issue unless the schema is changed first.
+#### `issues`
+
+One row is one issue. Identity only.
 
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
 | `issue_id` | `TEXT` | Yes | Stable issue ID. Part of primary key. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
 | `issue_key` | `TEXT` | Yes | Human-readable key, for example `AUTH-17`. |
-| `issue_type` | `TEXT` | Yes | For example `story`, `bug`, `task`, or `epic`. |
-| `title` | `TEXT` | Yes | Issue title. |
-| `description` | `TEXT` | No | Issue description. |
-| `acceptance_criteria` | `TEXT` | No | Completion criteria. |
-| `status` | `TEXT` | Yes | Current status for this version. |
-| `priority` | `TEXT` | No | Priority label. |
+| `created_at` | `TIMESTAMPTZ` | Yes | Issue creation time. |
 | `creator_source_id` | `TEXT` | No | Source ID for creator. |
 | `creator_name` | `TEXT` | No | Creator display name. |
+| `source_url` | `TEXT` | No | Link back to the simulated source. |
+
+Primary key: `(source_instance, issue_id)`
+
+Unique key: `(source_instance, issue_key)`
+
+`issue_key` has its own unique constraint because it is the identifier a human writes in Slack or a commit message. Later extraction work looks issues up by that string, and it must resolve to exactly one issue.
+
+#### `issue_versions`
+
+One row is one version of one issue. State only.
+
+Multiple rows per issue are expected. This is where the lifecycle lives.
+
+| Column | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
+| `issue_id` | `TEXT` | Yes | Issue ID. Part of primary key. Must exist in `issues`. |
+| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
+| `issue_type` | `TEXT` | Yes | For example `story`, `bug`, `task`, or `epic`. Stays in the version table because a ticket can be reclassified, and that reclassification is part of its history. |
+| `title` | `TEXT` | Yes | Issue title for this version. |
+| `description` | `TEXT` | No | Issue description for this version. |
+| `acceptance_criteria` | `TEXT` | No | Completion criteria for this version. |
+| `status` | `TEXT` | Yes | Status for this version. |
+| `priority` | `TEXT` | No | Priority label for this version. |
 | `assignee_source_id` | `TEXT` | No | Source ID for assignee. |
 | `assignee_name` | `TEXT` | No | Assignee display name. |
 | `changed_by_id` | `TEXT` | No | Source ID for person who made this version change. |
 | `changed_by_name` | `TEXT` | No | Name of person who made this version change. |
-| `created_at` | `TIMESTAMPTZ` | Yes | Issue creation time. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Version time; must be greater than or equal to `created_at`. |
+| `version_at` | `TIMESTAMPTZ` | Yes | Version time. |
 | `source_url` | `TEXT` | No | Link back to the simulated source. |
 
 Primary key: `(source_instance, issue_id, version_number)`
 
-Unique key: `(source_instance, issue_id)`
+Unique key: `(source_instance, issue_id, version_at)`
 
-Important: `issue_comments` references `(source_instance, issue_id)`, so each issue ID must be unique within a source instance in the current schema.
+Two versions of the same issue cannot share a timestamp. Without that constraint, version order becomes ambiguous the moment anything sorts by time rather than by number.
+
+Foreign key:
+
+- `(source_instance, issue_id)` references `issues(source_instance, issue_id)`
+
+Indexes:
+
+- `idx_issue_versions_history` on `(source_instance, issue_id, version_number)`
+
+**Ordering rules that are not enforced by constraints.** `created_at` now lives in `issues`, and PostgreSQL cannot express a cross-table check constraint, so the old `CHECK (version_at >= created_at)` is gone from this table. The rule still holds and is now a data generation rule:
+
+- `version_at` must be greater than or equal to the issue's `created_at` in `issues`.
+- `version_number` should start at `1` and increase without gaps.
+- `version_at` should increase with `version_number`.
 
 #### `issue_comments`
 
@@ -199,7 +232,7 @@ Primary key: `(source_instance, comment_id, version_number)`
 
 Foreign key:
 
-- `(source_instance, issue_id)` references `issue_versions(source_instance, issue_id)`
+- `(source_instance, issue_id)` references `issues(source_instance, issue_id)`
 
 Indexes:
 
@@ -331,6 +364,49 @@ Keep those links explicit in the source content where realistic:
 - Use realistic timestamps so the sequence of events can be reconstructed.
 - Preserve uncertainty, changed decisions, and disagreement when appropriate.
 
+### Issue Lifecycles
+
+Issues are the only object in the data model with a lifecycle, so they carry most of the signal about cause and delay. When generating issues:
+
+- Give an issue several rows in `issue_versions`, not one. A single version wastes the table.
+- Use realistic status transitions, for example `open` to `in progress` to `blocked` to `in progress` to `done`, including the transitions that go backwards.
+- Set `changed_by_id` and `changed_by_name` per version. The person who moves a ticket to `blocked` is often not the assignee.
+- Interleave `version_at` timestamps coherently with the other sources: the Slack message that reports the blocker, the meeting where it is discussed, and the pull request that resolves it should sit around the version that records it.
+- Let `assignee_source_id`, `priority`, `title` and `issue_type` change across versions where it is realistic. Reassignment and reclassification are part of the history.
+
+## Person Identity Across Sources
+
+The graph import resolves one real person into one `Person` node by clustering every person-bearing field in this schema. The rules are documented in `docs/GRAPH_DATA_HANDOFF.md` and implemented in `viewer/person_identity.py`. What matters when generating SQL data is which fields carry the signal.
+
+| Table | Person fields | Email present? |
+| --- | --- | --- |
+| `mail_messages` | `sender_address`, `sender_name` | yes |
+| `mail_messages.recipients` (JSONB) | `address`, `name` per entry | yes |
+| `slack_messages` | `author_source_id`, `author_name`, `author_email` | yes |
+| `teams_meetings.participants` (JSONB) | `source_id`, `name`, `email` per entry | yes |
+| `teams_transcript_segments` | `speaker_source_id`, `speaker_name` | no |
+| `issues` | `creator_source_id`/`creator_name` | no |
+| `issue_versions` | `assignee_source_id`/`assignee_name`, `changed_by_id`/`changed_by_name`, once per version | no |
+| `issue_comments` | `author_source_id`, `author_name` | no |
+| `document_versions` | `author_source_id`, `author_name` | no |
+| `pr_versions` | `author_source_id`, `author_name` | no |
+| `pr_reviews` | `author_source_id`, `author_name` | no |
+
+Only mail, Slack and Teams participants carry an email address. Four of the six sources have a source ID and a name but never an email, so email alone cannot join the data.
+
+The join works through the rows that carry **both** an email and a source ID:
+
+- `slack_messages` with `author_email` and `author_source_id`
+- `teams_meetings.participants` entries with `email` and `source_id`
+
+Generation rules that keep identity resolvable:
+
+- Give every person at least one such bridge row, otherwise their mail identity and their issue/document/PR identity stay separate.
+- Reuse the same `source_id` for the same person in every table and every `source_instance`. The importer treats a source ID as globally unique by default (`SOURCE_ID_IS_GLOBAL`).
+- Reuse the same email spelling; case and surrounding whitespace are normalised, nothing else is.
+- Do not give two different people the same name unless both also have an email or a source ID. A name alone can only attach a name-only occurrence to one existing identity; if the name matches several identities, the occurrence is kept separate and flagged as ambiguous.
+- Fill in `speaker_source_id` in `teams_transcript_segments` when the source system would know it. A transcript speaker with only a name depends entirely on the name being unique.
+
 ## Full DDL
 
 The authoritative schema is defined in `scripts/setup_postgres_schema.py`. The DDL is reproduced here for handoff convenience.
@@ -400,29 +476,38 @@ CREATE TABLE teams_transcript_segments (
     CHECK (end_offset_ms IS NULL OR end_offset_ms >= start_offset_ms)
 );
 
+CREATE TABLE issues (
+    source_instance     TEXT NOT NULL,
+    issue_id            TEXT NOT NULL,
+    issue_key           TEXT NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL,
+    creator_source_id   TEXT,
+    creator_name        TEXT,
+    source_url          TEXT,
+    PRIMARY KEY (source_instance, issue_id),
+    UNIQUE (source_instance, issue_key)
+);
+
 CREATE TABLE issue_versions (
     source_instance     TEXT NOT NULL,
     issue_id            TEXT NOT NULL,
     version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    issue_key           TEXT NOT NULL,
     issue_type          TEXT NOT NULL,
     title               TEXT NOT NULL,
     description         TEXT,
     acceptance_criteria TEXT,
     status              TEXT NOT NULL,
     priority            TEXT,
-    creator_source_id   TEXT,
-    creator_name        TEXT,
     assignee_source_id  TEXT,
     assignee_name       TEXT,
     changed_by_id       TEXT,
     changed_by_name     TEXT,
-    created_at          TIMESTAMPTZ NOT NULL,
     version_at          TIMESTAMPTZ NOT NULL,
     source_url          TEXT,
     PRIMARY KEY (source_instance, issue_id, version_number),
-    UNIQUE (source_instance, issue_id),
-    CHECK (version_at >= created_at)
+    UNIQUE (source_instance, issue_id, version_at),
+    FOREIGN KEY (source_instance, issue_id)
+        REFERENCES issues (source_instance, issue_id)
 );
 
 CREATE TABLE issue_comments (
@@ -439,7 +524,7 @@ CREATE TABLE issue_comments (
     source_url          TEXT,
     PRIMARY KEY (source_instance, comment_id, version_number),
     FOREIGN KEY (source_instance, issue_id)
-        REFERENCES issue_versions (source_instance, issue_id),
+        REFERENCES issues (source_instance, issue_id),
     CHECK (version_at >= created_at)
 );
 
@@ -518,6 +603,9 @@ CREATE INDEX idx_mail_reply
 
 CREATE INDEX idx_slack_thread
     ON slack_messages (source_instance, workspace_id, channel_id, thread_root_id, sent_at);
+
+CREATE INDEX idx_issue_versions_history
+    ON issue_versions (source_instance, issue_id, version_number);
 
 CREATE INDEX idx_issue_comments_issue
     ON issue_comments (source_instance, issue_id, created_at);

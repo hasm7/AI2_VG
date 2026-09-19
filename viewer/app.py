@@ -1,4 +1,4 @@
-﻿import json
+import json
 import os
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template_string, request, url_for
 from neo4j import GraphDatabase
 from psycopg.rows import dict_row
+
+from person_identity import build_registry
 
 
 load_dotenv()
@@ -270,12 +272,114 @@ def query_all(cur, sql, params=()):
     return cur.fetchall()
 
 
-def person_key(name, email):
-    if email:
-        return f"email:{email.strip().lower()}"
-    if name:
-        return f"name:{name.strip().lower()}"
-    return None
+# Person relationships that start at the Person node. MAIL_RECIPIENT points at
+# the Person node instead and is handled separately when nodes are merged.
+PERSON_OUTGOING_RELATIONSHIPS = [
+    "SENT_MAIL",
+    "SENT_SLACK_MESSAGE",
+    "PARTICIPATED_IN_MEETING",
+    "SPOKE_TEAMS_TRANSCRIPT_SEGMENT",
+    "OWNS_ISSUE",
+    "COMMENTED_ON_ISSUE",
+    "AUTHORED_DOCUMENT",
+    "AUTHORED_PR",
+    "REVIEWED_PR",
+]
+
+
+def format_person_merges(merges):
+    """Short report of the Person nodes merged into a canonical node."""
+    if not merges:
+        return ""
+    pairs = ", ".join(f"{old} -> {new}" for old, new in merges)
+    return f" Sammanslagna personnoder: {len(merges)} ({pairs})."
+
+
+def ensure_person_graph_schema(tx):
+    tx.run("""
+        CREATE CONSTRAINT person_key IF NOT EXISTS
+        FOR (p:Person)
+        REQUIRE p.person_key IS UNIQUE
+    """)
+
+
+def write_person_nodes(tx, person_nodes):
+    """Write one Person node per resolved identity cluster."""
+    tx.run("""
+        UNWIND $people AS person
+        MERGE (p:Person {person_key: person.person_key})
+        SET p.name = person.name,
+            p.email = person.email,
+            p.source_id = person.source_id,
+            p.emails = person.emails,
+            p.source_ids = person.source_ids,
+            p.names = person.names,
+            p.identity_confidence = person.identity_confidence,
+            p.identity_ambiguous = person.identity_ambiguous
+    """, {"people": person_nodes})
+
+
+def legacy_person_nodes(tx, canonical_keys):
+    return tx.run("""
+        MATCH (p:Person)
+        WHERE NOT p.person_key IN $canonical_keys
+        RETURN p.person_key AS person_key, p.email AS email,
+               p.source_id AS source_id, p.name AS name
+        ORDER BY p.person_key
+    """, {"canonical_keys": canonical_keys}).data()
+
+
+def move_person_relationships(tx, old_key, new_key):
+    """Move every relationship of a superseded Person node to its canonical node."""
+    for relationship in PERSON_OUTGOING_RELATIONSHIPS:
+        tx.run(f"""
+            MATCH (old:Person {{person_key: $old_key}})-[r:{relationship}]->(n)
+            MATCH (new:Person {{person_key: $new_key}})
+            MERGE (new)-[:{relationship}]->(n)
+            DELETE r
+        """, {"old_key": old_key, "new_key": new_key})
+
+    tx.run("""
+        MATCH (n)-[r:MAIL_RECIPIENT]->(old:Person {person_key: $old_key})
+        MATCH (new:Person {person_key: $new_key})
+        MERGE (n)-[moved:MAIL_RECIPIENT]->(new)
+        SET moved.recipient_type = coalesce(moved.recipient_type, r.recipient_type)
+        DELETE r
+    """, {"old_key": old_key, "new_key": new_key})
+
+    tx.run("""
+        MATCH (old:Person {person_key: $old_key})
+        WHERE NOT (old)--()
+        DELETE old
+    """, {"old_key": old_key})
+
+
+def sync_person_nodes(session, registry):
+    """Write canonical Person nodes and merge superseded ones into them.
+
+    Idempotency: this is the incremental merging approach. A Person node whose
+    key was produced by an earlier import keeps its relationships; they are
+    moved to the canonical node and the old node is deleted, so a re-import does
+    not change the node count and never leaves an orphan behind.
+    """
+    person_nodes = registry.person_nodes()
+    session.execute_write(ensure_person_graph_schema)
+    session.execute_write(write_person_nodes, person_nodes)
+
+    canonical_keys = [person["person_key"] for person in person_nodes]
+    merges = []
+    for legacy in session.execute_read(legacy_person_nodes, canonical_keys):
+        new_key = registry.resolve_person_key(
+            email=legacy["email"],
+            source_id=legacy["source_id"],
+            name=legacy["name"],
+        )
+        if not new_key or new_key == legacy["person_key"]:
+            continue
+        session.execute_write(move_person_relationships, legacy["person_key"], new_key)
+        merges.append((legacy["person_key"], new_key))
+
+    return merges
 
 
 def load_all_mail_rows():
@@ -362,7 +466,7 @@ def ensure_teams_graph_schema(tx):
     """)
 
 
-def import_mail_row(tx, row):
+def import_mail_row(tx, row, registry):
     recipients = row.get("recipients") or []
     recipients_raw = json.dumps(recipients, ensure_ascii=False)
 
@@ -394,29 +498,28 @@ def import_mail_row(tx, row):
         "source_url": row["source_url"],
     })
 
-    sender_key = person_key(row["sender_name"], row["sender_address"])
+    sender_key = registry.resolve_person_key(
+        email=row["sender_address"],
+        name=row["sender_name"],
+    )
     if sender_key:
         tx.run("""
             MATCH (m:MailMessage {
                 source_instance: $source_instance,
                 message_id: $message_id
             })
-            MERGE (p:Person {person_key: $person_key})
-            SET p.name = coalesce($name, p.name),
-                p.email = coalesce($email, p.email)
+            MATCH (p:Person {person_key: $person_key})
             MERGE (p)-[:SENT_MAIL]->(m)
         """, {
             "source_instance": row["source_instance"],
             "message_id": row["message_id"],
             "person_key": sender_key,
-            "name": row["sender_name"],
-            "email": row["sender_address"],
         })
 
     for recipient in recipients:
         name = recipient.get("name")
         email = recipient.get("address")
-        key = person_key(name, email)
+        key = registry.resolve_person_key(email=email, name=name)
         if not key:
             continue
         tx.run("""
@@ -424,17 +527,13 @@ def import_mail_row(tx, row):
                 source_instance: $source_instance,
                 message_id: $message_id
             })
-            MERGE (p:Person {person_key: $person_key})
-            SET p.name = coalesce($name, p.name),
-                p.email = coalesce($email, p.email)
+            MATCH (p:Person {person_key: $person_key})
             MERGE (m)-[r:MAIL_RECIPIENT]->(p)
             SET r.recipient_type = $recipient_type
         """, {
             "source_instance": row["source_instance"],
             "message_id": row["message_id"],
             "person_key": key,
-            "name": name,
-            "email": email,
             "recipient_type": recipient.get("type"),
         })
 
@@ -444,12 +543,15 @@ def import_mail_to_neo4j(uri, user, password, database):
     if not password:
         raise RuntimeError("Neo4j password is required.")
 
+    registry = build_registry(database_url())
+
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         driver.verify_connectivity()
         with driver.session(database=database) as session:
             session.execute_write(ensure_mail_graph_schema)
+            merges = sync_person_nodes(session, registry)
             for row in rows:
-                session.execute_write(import_mail_row, row)
+                session.execute_write(import_mail_row, row, registry)
 
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
@@ -459,10 +561,10 @@ def import_mail_to_neo4j(uri, user, password, database):
             """).data())
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
-    return f"Importerade {len(rows)} mailrader. Grafen innehåller nu {counts}."
+    return f"Importerade {len(rows)} mailrader. Grafen innehåller nu {counts}.{format_person_merges(merges)}"
 
 
-def import_slack_row(tx, row):
+def import_slack_row(tx, row, registry):
     tx.run("""
         MERGE (m:SlackMessage {
             source_instance: $source_instance,
@@ -500,7 +602,11 @@ def import_slack_row(tx, row):
         "source_url": row["source_url"],
     })
 
-    author_key = person_key(row["author_name"], row["author_email"])
+    author_key = registry.resolve_person_key(
+        email=row["author_email"],
+        source_id=row["author_source_id"],
+        name=row["author_name"],
+    )
     if author_key:
         tx.run("""
             MATCH (m:SlackMessage {
@@ -510,10 +616,7 @@ def import_slack_row(tx, row):
                 message_id: $message_id,
                 version_number: $version_number
             })
-            MERGE (p:Person {person_key: $person_key})
-            SET p.name = coalesce($name, p.name),
-                p.email = coalesce($email, p.email),
-                p.source_id = coalesce($source_id, p.source_id)
+            MATCH (p:Person {person_key: $person_key})
             MERGE (p)-[:SENT_SLACK_MESSAGE]->(m)
         """, {
             "source_instance": row["source_instance"],
@@ -522,9 +625,6 @@ def import_slack_row(tx, row):
             "message_id": row["message_id"],
             "version_number": row["version_number"],
             "person_key": author_key,
-            "name": row["author_name"],
-            "email": row["author_email"],
-            "source_id": row["author_source_id"],
         })
 
     if row["thread_root_id"] and row["thread_root_id"] != row["message_id"]:
@@ -558,12 +658,15 @@ def import_slack_to_neo4j(uri, user, password, database):
     if not password:
         raise RuntimeError("Neo4j password is required.")
 
+    registry = build_registry(database_url())
+
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         driver.verify_connectivity()
         with driver.session(database=database) as session:
             session.execute_write(ensure_slack_graph_schema)
+            merges = sync_person_nodes(session, registry)
             for row in rows:
-                session.execute_write(import_slack_row, row)
+                session.execute_write(import_slack_row, row, registry)
 
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
@@ -573,10 +676,10 @@ def import_slack_to_neo4j(uri, user, password, database):
             """).data())
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
-    return f"Importerade {len(rows)} Slack-rader. Grafen innehåller nu {counts}."
+    return f"Importerade {len(rows)} Slack-rader. Grafen innehåller nu {counts}.{format_person_merges(merges)}"
 
 
-def import_teams_meeting_row(tx, row):
+def import_teams_meeting_row(tx, row, registry):
     participants = row.get("participants") or []
     participants_raw = json.dumps(participants, ensure_ascii=False)
 
@@ -606,7 +709,7 @@ def import_teams_meeting_row(tx, row):
         name = participant.get("name")
         email = participant.get("email") or participant.get("address")
         source_id = participant.get("source_id") or participant.get("id")
-        key = person_key(name, email) or (f"source:{source_id}" if source_id else None)
+        key = registry.resolve_person_key(email=email, source_id=source_id, name=name)
         if not key:
             continue
         tx.run("""
@@ -614,22 +717,16 @@ def import_teams_meeting_row(tx, row):
                 source_instance: $source_instance,
                 meeting_id: $meeting_id
             })
-            MERGE (p:Person {person_key: $person_key})
-            SET p.name = coalesce($name, p.name),
-                p.email = coalesce($email, p.email),
-                p.source_id = coalesce($source_id, p.source_id)
+            MATCH (p:Person {person_key: $person_key})
             MERGE (p)-[:PARTICIPATED_IN_MEETING]->(m)
         """, {
             "source_instance": row["source_instance"],
             "meeting_id": row["meeting_id"],
             "person_key": key,
-            "name": name,
-            "email": email,
-            "source_id": source_id,
         })
 
 
-def import_teams_segment_row(tx, row):
+def import_teams_segment_row(tx, row, registry):
     tx.run("""
         MATCH (m:TeamsMeeting {
             source_instance: $source_instance,
@@ -661,7 +758,10 @@ def import_teams_segment_row(tx, row):
         "body": row["body"],
     })
 
-    key = f"source:{row['speaker_source_id']}" if row["speaker_source_id"] else person_key(row["speaker_name"], None)
+    key = registry.resolve_person_key(
+        source_id=row["speaker_source_id"],
+        name=row["speaker_name"],
+    )
     if key:
         tx.run("""
             MATCH (s:TeamsTranscriptSegment {
@@ -673,20 +773,7 @@ def import_teams_segment_row(tx, row):
                 source_instance: $source_instance,
                 meeting_id: $meeting_id
             })
-            OPTIONAL MATCH (existing:Person {source_id: $source_id})
-            WITH s, m, existing
-            CALL {
-                WITH existing
-                WITH existing WHERE existing IS NOT NULL
-                RETURN existing AS p
-                UNION
-                WITH existing
-                WITH existing WHERE existing IS NULL
-                MERGE (created:Person {person_key: $person_key})
-                RETURN created AS p
-            }
-            SET p.name = coalesce($name, p.name),
-                p.source_id = coalesce($source_id, p.source_id)
+            MATCH (p:Person {person_key: $person_key})
             MERGE (p)-[:SPOKE_TEAMS_TRANSCRIPT_SEGMENT]->(s)
             MERGE (p)-[:PARTICIPATED_IN_MEETING]->(m)
         """, {
@@ -694,8 +781,6 @@ def import_teams_segment_row(tx, row):
             "meeting_id": row["meeting_id"],
             "segment_id": row["segment_id"],
             "person_key": key,
-            "name": row["speaker_name"],
-            "source_id": row["speaker_source_id"],
         })
 
 
@@ -705,14 +790,17 @@ def import_teams_to_neo4j(uri, user, password, database):
     if not password:
         raise RuntimeError("Neo4j password is required.")
 
+    registry = build_registry(database_url())
+
     with GraphDatabase.driver(uri, auth=(user, password)) as driver:
         driver.verify_connectivity()
         with driver.session(database=database) as session:
             session.execute_write(ensure_teams_graph_schema)
+            merges = sync_person_nodes(session, registry)
             for row in meetings:
-                session.execute_write(import_teams_meeting_row, row)
+                session.execute_write(import_teams_meeting_row, row, registry)
             for row in segments:
-                session.execute_write(import_teams_segment_row, row)
+                session.execute_write(import_teams_segment_row, row, registry)
 
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
@@ -722,16 +810,24 @@ def import_teams_to_neo4j(uri, user, password, database):
             """).data())
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
-    return f"Importerade {len(meetings)} Teams-moten och {len(segments)} transkriptsegment. Grafen innehåller nu {counts}."
+    return f"Importerade {len(meetings)} Teams-moten och {len(segments)} transkriptsegment. Grafen innehåller nu {counts}.{format_person_merges(merges)}"
 
 
 def load_all_issue_rows():
     with psycopg.connect(database_url(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             return query_all(cur, """
-                SELECT DISTINCT ON (source_instance, issue_id) *
-                FROM issue_versions
-                ORDER BY source_instance, issue_id, version_number DESC
+                SELECT v.*,
+                       i.issue_key,
+                       i.created_at,
+                       i.creator_source_id,
+                       i.creator_name,
+                       i.source_url AS issue_source_url
+                FROM issue_versions v
+                JOIN issues i
+                  ON i.source_instance = v.source_instance
+                 AND i.issue_id = v.issue_id
+                ORDER BY v.source_instance, v.issue_id, v.version_number
             """)
 
 
@@ -762,18 +858,11 @@ def ensure_issue_graph_schema(tx):
 ISSUE_PERSON_RELATIONSHIPS = {"OWNS_ISSUE", "COMMENTED_ON_ISSUE"}
 
 
-def issue_person_key(name, source_id):
-    if source_id:
-        return f"source:{source_id}"
-    return person_key(name, None)
-
-
-def merge_issue_person(tx, row, relationship, name, source_id):
-    """Attach a person to an issue, reusing an existing Person with the same source_id."""
+def merge_issue_person(tx, row, relationship, key):
+    """Attach an already resolved person to an issue."""
     if relationship not in ISSUE_PERSON_RELATIONSHIPS:
         raise ValueError(f"Unsupported issue relationship: {relationship}")
 
-    key = issue_person_key(name, source_id)
     if not key:
         return
 
@@ -782,26 +871,28 @@ def merge_issue_person(tx, row, relationship, name, source_id):
             source_instance: $source_instance,
             issue_id: $issue_id
         }})
-        OPTIONAL MATCH (existing:Person {{source_id: $source_id}})
-        WITH i, existing
-        CALL (existing) {{
-            WITH existing WHERE existing IS NOT NULL
-            RETURN existing AS p
-            UNION
-            WITH existing WHERE existing IS NULL
-            MERGE (created:Person {{person_key: $person_key}})
-            RETURN created AS p
-        }}
-        SET p.name = coalesce($name, p.name),
-            p.source_id = coalesce($source_id, p.source_id)
+        MATCH (p:Person {{person_key: $person_key}})
         MERGE (p)-[:{relationship}]->(i)
     """, {
         "source_instance": row["source_instance"],
         "issue_id": row["issue_id"],
         "person_key": key,
-        "name": name,
-        "source_id": source_id,
     })
+
+
+def issue_version_entry(row):
+    return {
+        "version_number": row["version_number"],
+        "version_at": row["version_at"].isoformat(),
+        "status": row["status"],
+        "issue_type": row["issue_type"],
+        "title": row["title"],
+        "priority": row["priority"],
+        "assignee_name": row["assignee_name"],
+        "assignee_source_id": row["assignee_source_id"],
+        "changed_by_name": row["changed_by_name"],
+        "changed_by_id": row["changed_by_id"],
+    }
 
 
 def issue_comment_entry(comment):
@@ -817,9 +908,14 @@ def issue_comment_entry(comment):
     }
 
 
-def import_issue_row(tx, row, comments):
-    """Import one issue. Comments are stored on the Issue node instead of separate nodes."""
+def import_issue_row(tx, row, versions, comments, registry):
+    """Import one issue.
+
+    The node keeps the latest version as its main state. Version history and
+    comments are stored as JSON on the Issue node instead of separate nodes.
+    """
     comments_raw = json.dumps([issue_comment_entry(comment) for comment in comments], ensure_ascii=False)
+    versions_raw = json.dumps([issue_version_entry(version) for version in versions], ensure_ascii=False)
 
     tx.run("""
         MERGE (i:Issue {
@@ -842,6 +938,8 @@ def import_issue_row(tx, row, comments):
             i.created_at = $created_at,
             i.version_at = $version_at,
             i.version_number = $version_number,
+            i.version_count = $version_count,
+            i.versions_raw = $versions_raw,
             i.comment_count = $comment_count,
             i.comments_raw = $comments_raw,
             i.source_url = $source_url
@@ -862,6 +960,8 @@ def import_issue_row(tx, row, comments):
         "created_at": row["created_at"].isoformat(),
         "version_at": row["version_at"].isoformat(),
         "version_number": row["version_number"],
+        "version_count": len(versions),
+        "versions_raw": versions_raw,
         "comment_count": len(comments),
         "comments_raw": comments_raw,
         "source_url": row["source_url"],
@@ -869,24 +969,36 @@ def import_issue_row(tx, row, comments):
 
     owner_name = row["assignee_name"] or row["creator_name"]
     owner_source_id = row["assignee_source_id"] or row["creator_source_id"]
-    merge_issue_person(tx, row, "OWNS_ISSUE", owner_name, owner_source_id)
+    owner_key = registry.resolve_person_key(source_id=owner_source_id, name=owner_name)
+    merge_issue_person(tx, row, "OWNS_ISSUE", owner_key)
 
-    authors = {}
+    author_keys = []
     for comment in comments:
-        key = issue_person_key(comment["author_name"], comment["author_source_id"])
-        if not key:
-            continue
-        authors.setdefault(key, (comment["author_name"], comment["author_source_id"]))
+        key = registry.resolve_person_key(
+            source_id=comment["author_source_id"],
+            name=comment["author_name"],
+        )
+        if key and key not in author_keys:
+            author_keys.append(key)
 
-    for name, source_id in authors.values():
-        merge_issue_person(tx, row, "COMMENTED_ON_ISSUE", name, source_id)
+    for key in author_keys:
+        merge_issue_person(tx, row, "COMMENTED_ON_ISSUE", key)
 
 
 def import_issues_to_neo4j(uri, user, password, database):
-    issues = load_all_issue_rows()
+    versions = load_all_issue_rows()
     comments = load_all_issue_comments()
     if not password:
         raise RuntimeError("Neo4j password is required.")
+
+    registry = build_registry(database_url())
+
+    versions_by_issue = {}
+    for row in versions:
+        key = (row["source_instance"], row["issue_id"])
+        versions_by_issue.setdefault(key, []).append(row)
+    for issue_versions in versions_by_issue.values():
+        issue_versions.sort(key=lambda row: row["version_number"])
 
     comments_by_issue = {}
     for comment in comments:
@@ -899,9 +1011,15 @@ def import_issues_to_neo4j(uri, user, password, database):
         driver.verify_connectivity()
         with driver.session(database=database) as session:
             session.execute_write(ensure_issue_graph_schema)
-            for row in issues:
-                key = (row["source_instance"], row["issue_id"])
-                session.execute_write(import_issue_row, row, comments_by_issue.get(key, []))
+            merges = sync_person_nodes(session, registry)
+            for key, issue_versions in versions_by_issue.items():
+                session.execute_write(
+                    import_issue_row,
+                    issue_versions[-1],
+                    issue_versions,
+                    comments_by_issue.get(key, []),
+                    registry,
+                )
 
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
@@ -911,7 +1029,7 @@ def import_issues_to_neo4j(uri, user, password, database):
             """).data())
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
-    return f"Importerade {len(issues)} arenden och {len(comments)} kommentarer. Grafen innehåller nu {counts}."
+    return f"Importerade {len(versions_by_issue)} arenden, {len(versions)} versioner och {len(comments)} kommentarer. Grafen innehåller nu {counts}.{format_person_merges(merges)}"
 
 
 def load_all_document_rows():
@@ -952,7 +1070,7 @@ def document_version_entry(row):
     }
 
 
-def import_document_row(tx, latest, earlier_versions):
+def import_document_row(tx, latest, earlier_versions, registry):
     """Import one document. Earlier versions are stored on the Document node."""
     versions_raw = json.dumps([document_version_entry(row) for row in earlier_versions], ensure_ascii=False)
 
@@ -992,8 +1110,10 @@ def import_document_row(tx, latest, earlier_versions):
         "source_url": latest["source_url"],
     })
 
-    author_source_id = latest["author_source_id"]
-    key = f"source:{author_source_id}" if author_source_id else person_key(latest["author_name"], None)
+    key = registry.resolve_person_key(
+        source_id=latest["author_source_id"],
+        name=latest["author_name"],
+    )
     if not key:
         return
 
@@ -1002,25 +1122,12 @@ def import_document_row(tx, latest, earlier_versions):
             source_instance: $source_instance,
             document_id: $document_id
         })
-        OPTIONAL MATCH (existing:Person {source_id: $source_id})
-        WITH d, existing
-        CALL (existing) {
-            WITH existing WHERE existing IS NOT NULL
-            RETURN existing AS p
-            UNION
-            WITH existing WHERE existing IS NULL
-            MERGE (created:Person {person_key: $person_key})
-            RETURN created AS p
-        }
-        SET p.name = coalesce($name, p.name),
-            p.source_id = coalesce($source_id, p.source_id)
+        MATCH (p:Person {person_key: $person_key})
         MERGE (p)-[:AUTHORED_DOCUMENT]->(d)
     """, {
         "source_instance": latest["source_instance"],
         "document_id": latest["document_id"],
         "person_key": key,
-        "name": latest["author_name"],
-        "source_id": author_source_id,
     })
 
 
@@ -1028,6 +1135,8 @@ def import_documents_to_neo4j(uri, user, password, database):
     rows = load_all_document_rows()
     if not password:
         raise RuntimeError("Neo4j password is required.")
+
+    registry = build_registry(database_url())
 
     versions_by_document = {}
     for row in rows:
@@ -1038,9 +1147,10 @@ def import_documents_to_neo4j(uri, user, password, database):
         driver.verify_connectivity()
         with driver.session(database=database) as session:
             session.execute_write(ensure_document_graph_schema)
+            merges = sync_person_nodes(session, registry)
             for versions in versions_by_document.values():
                 versions.sort(key=lambda row: row["version_number"])
-                session.execute_write(import_document_row, versions[-1], versions[:-1])
+                session.execute_write(import_document_row, versions[-1], versions[:-1], registry)
 
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
@@ -1050,7 +1160,7 @@ def import_documents_to_neo4j(uri, user, password, database):
             """).data())
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
-    return f"Importerade {len(versions_by_document)} dokument och {len(rows)} versioner. Grafen innehåller nu {counts}."
+    return f"Importerade {len(versions_by_document)} dokument och {len(rows)} versioner. Grafen innehåller nu {counts}.{format_person_merges(merges)}"
 
 
 def load_all_pr_rows():
@@ -1090,18 +1200,11 @@ def ensure_pr_graph_schema(tx):
 PR_PERSON_RELATIONSHIPS = {"AUTHORED_PR", "REVIEWED_PR"}
 
 
-def pr_person_key(name, source_id):
-    if source_id:
-        return f"source:{source_id}"
-    return person_key(name, None)
-
-
-def merge_pr_person(tx, row, relationship, name, source_id):
-    """Attach a person to a pull request, reusing an existing Person with the same source_id."""
+def merge_pr_person(tx, row, relationship, key):
+    """Attach an already resolved person to a pull request."""
     if relationship not in PR_PERSON_RELATIONSHIPS:
         raise ValueError(f"Unsupported pull request relationship: {relationship}")
 
-    key = pr_person_key(name, source_id)
     if not key:
         return
 
@@ -1111,26 +1214,13 @@ def merge_pr_person(tx, row, relationship, name, source_id):
             repository: $repository,
             pr_number: $pr_number
         }})
-        OPTIONAL MATCH (existing:Person {{source_id: $source_id}})
-        WITH pr, existing
-        CALL (existing) {{
-            WITH existing WHERE existing IS NOT NULL
-            RETURN existing AS p
-            UNION
-            WITH existing WHERE existing IS NULL
-            MERGE (created:Person {{person_key: $person_key}})
-            RETURN created AS p
-        }}
-        SET p.name = coalesce($name, p.name),
-            p.source_id = coalesce($source_id, p.source_id)
+        MATCH (p:Person {{person_key: $person_key}})
         MERGE (p)-[:{relationship}]->(pr)
     """, {
         "source_instance": row["source_instance"],
         "repository": row["repository"],
         "pr_number": row["pr_number"],
         "person_key": key,
-        "name": name,
-        "source_id": source_id,
     })
 
 
@@ -1155,7 +1245,7 @@ def pr_review_entry(review):
     }
 
 
-def import_pr_row(tx, latest, reviews):
+def import_pr_row(tx, latest, reviews, registry):
     """Import one pull request. Reviews are stored on the PullRequest node."""
     reviews_raw = json.dumps([pr_review_entry(review) for review in reviews], ensure_ascii=False)
     code_changes_raw = json.dumps(latest["code_changes"] or [], ensure_ascii=False)
@@ -1202,17 +1292,23 @@ def import_pr_row(tx, latest, reviews):
         "source_url": latest["source_url"],
     })
 
-    merge_pr_person(tx, latest, "AUTHORED_PR", latest["author_name"], latest["author_source_id"])
+    author_key = registry.resolve_person_key(
+        source_id=latest["author_source_id"],
+        name=latest["author_name"],
+    )
+    merge_pr_person(tx, latest, "AUTHORED_PR", author_key)
 
-    reviewers = {}
+    reviewer_keys = []
     for review in reviews:
-        key = pr_person_key(review["author_name"], review["author_source_id"])
-        if not key:
-            continue
-        reviewers.setdefault(key, (review["author_name"], review["author_source_id"]))
+        key = registry.resolve_person_key(
+            source_id=review["author_source_id"],
+            name=review["author_name"],
+        )
+        if key and key not in reviewer_keys:
+            reviewer_keys.append(key)
 
-    for name, source_id in reviewers.values():
-        merge_pr_person(tx, latest, "REVIEWED_PR", name, source_id)
+    for key in reviewer_keys:
+        merge_pr_person(tx, latest, "REVIEWED_PR", key)
 
 
 def import_prs_to_neo4j(uri, user, password, database):
@@ -1220,6 +1316,8 @@ def import_prs_to_neo4j(uri, user, password, database):
     reviews = load_all_pr_reviews()
     if not password:
         raise RuntimeError("Neo4j password is required.")
+
+    registry = build_registry(database_url())
 
     versions_by_pr = {}
     for row in rows:
@@ -1237,9 +1335,10 @@ def import_prs_to_neo4j(uri, user, password, database):
         driver.verify_connectivity()
         with driver.session(database=database) as session:
             session.execute_write(ensure_pr_graph_schema)
+            merges = sync_person_nodes(session, registry)
             for key, versions in versions_by_pr.items():
                 versions.sort(key=lambda row: row["version_number"])
-                session.execute_write(import_pr_row, versions[-1], reviews_by_pr.get(key, []))
+                session.execute_write(import_pr_row, versions[-1], reviews_by_pr.get(key, []), registry)
 
             node_counts = session.execute_read(lambda tx: tx.run("""
                 MATCH (n)
@@ -1249,7 +1348,7 @@ def import_prs_to_neo4j(uri, user, password, database):
             """).data())
 
     counts = ", ".join(f"{item['label']}: {item['count']}" for item in node_counts)
-    return f"Importerade {len(versions_by_pr)} PR:er och {len(reviews)} granskningar. Grafen innehåller nu {counts}."
+    return f"Importerade {len(versions_by_pr)} PR:er och {len(reviews)} granskningar. Grafen innehåller nu {counts}.{format_person_merges(merges)}"
 
 
 def load_mail(cur):
@@ -1333,14 +1432,40 @@ def table_teams(cur):
 
 def load_issues(cur):
     return query_all(cur, """
-        SELECT DISTINCT ON (source_instance, issue_id) *, issue_key AS title, title AS subtitle
-        FROM issue_versions
-        ORDER BY source_instance, issue_id, version_number DESC
+        SELECT DISTINCT ON (v.source_instance, v.issue_id)
+               v.*,
+               i.issue_key,
+               i.created_at,
+               i.creator_source_id,
+               i.creator_name,
+               i.source_url AS issue_source_url,
+               v.title AS version_title,
+               i.issue_key AS title,
+               v.title AS subtitle
+        FROM issue_versions v
+        JOIN issues i
+          ON i.source_instance = v.source_instance
+         AND i.issue_id = v.issue_id
+        ORDER BY v.source_instance, v.issue_id, v.version_number DESC
         LIMIT %s
     """, (MAX_ROWS,))
 
 
 def detail_issues(cur, row):
+    versions = query_all(cur, """
+        SELECT *
+        FROM issue_versions
+        WHERE source_instance = %s AND issue_id = %s
+        ORDER BY version_number
+        LIMIT %s
+    """, (row["source_instance"], row["issue_id"], MAX_ROWS))
+    history = "\n\n".join(
+        f'{version["version_number"]}. {format_value(version["version_at"])} - {version["status"]}'
+        f' (assignee: {version.get("assignee_name") or "-"},'
+        f' changed by: {version.get("changed_by_name") or "-"})'
+        for version in versions
+    )
+
     comments = query_all(cur, """
         SELECT *
         FROM issue_comments
@@ -1349,8 +1474,13 @@ def detail_issues(cur, row):
         LIMIT %s
     """, (row["source_instance"], row["issue_id"], MAX_ROWS))
     comment_text = "\n\n".join(f'{comment.get("author_name") or "Unknown"}: {comment["body"]}' for comment in comments)
+    identity = pick(row, ["issue_key", "created_at", "creator_name", "creator_source_id"])
+    identity["source_url"] = format_value(row.get("issue_source_url"))
+
     return [
-        {"title": "Issue latest version", "fields": pick(row, ["issue_key", "issue_type", "title", "description", "acceptance_criteria", "status", "priority", "assignee_name", "version_at", "source_url"])},
+        {"title": "Issue (identity)", "fields": identity},
+        {"title": "Issue latest version", "fields": pick(row, ["version_number", "issue_type", "version_title", "description", "acceptance_criteria", "status", "priority", "assignee_name", "changed_by_name", "version_at", "source_url"])},
+        {"title": f"Version history ({len(versions)} versions)", "fields": {"versions": history}},
         {"title": "Issue comments", "fields": {"comments": comment_text}},
     ]
 
@@ -1360,22 +1490,28 @@ def table_issues(cur):
         SELECT
             i.source_instance,
             i.issue_id,
+            iss.issue_key,
+            iss.created_at AS issue_created_at,
+            iss.creator_name,
             i.version_number,
-            i.issue_key,
+            i.version_at,
             i.issue_type,
             i.title,
             i.status,
             i.priority,
             i.assignee_name,
+            i.changed_by_name,
             i.acceptance_criteria,
             c.comment_id,
             c.author_name AS comment_author,
             c.body AS comment_body,
             c.created_at AS comment_created_at
         FROM issue_versions i
+        JOIN issues iss
+            ON iss.source_instance = i.source_instance AND iss.issue_id = i.issue_id
         LEFT JOIN issue_comments c
             ON c.source_instance = i.source_instance AND c.issue_id = i.issue_id
-        ORDER BY i.version_at DESC, c.created_at
+        ORDER BY iss.issue_key, i.version_number, c.created_at
         LIMIT %s
     """, (MAX_ROWS,))
 
