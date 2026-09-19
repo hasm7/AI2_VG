@@ -825,10 +825,40 @@ function GraphView() {
 }
 
 function App() {
+  const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes">("message");
+
   return (
     <main>
       <GraphView />
-      <input className="message-input" type="text" aria-label="Message" />
+      <section className="center-panel" aria-label="Center workspace">
+        <div className="center-tabs" role="tablist" aria-label="Center panel tabs">
+          <button
+            className={`center-tab${activeCenterTab === "message" ? " center-tab-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeCenterTab === "message"}
+            onClick={() => setActiveCenterTab("message")}
+          >
+            Communicate with AI
+          </button>
+          <button
+            className={`center-tab${activeCenterTab === "notes" ? " center-tab-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeCenterTab === "notes"}
+            onClick={() => setActiveCenterTab("notes")}
+          >
+            Build graph layers
+          </button>
+        </div>
+        <div className="center-tab-panel" role="tabpanel">
+          {activeCenterTab === "message" ? (
+            <input className="message-input" type="text" aria-label="Message" />
+          ) : (
+            <textarea className="center-notes" aria-label="Notes" />
+          )}
+        </div>
+      </section>
       <textarea className="right-text-box" aria-label="Right text box" />
     </main>
   );
