@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import cytoscape, { type Core, type EventObject } from "cytoscape";
 import "./styles.css";
@@ -96,6 +96,94 @@ type KnowledgeState = {
   token_usage?: KnowledgeTokenUsage | null;
   error?: string;
 };
+
+type EmbeddingLabelState = {
+  label: string;
+  total: number;
+  embedded: number;
+  missing: number;
+};
+
+type EmbeddingRunLabelReport = {
+  label: string;
+  embedded: number;
+  skipped_unchanged: number;
+  skipped_empty: number;
+  failed: number;
+};
+
+type EmbeddingFailure = {
+  label: string;
+  key: Record<string, string | number | null>;
+  error: string;
+};
+
+type EmbeddingTokenUsage = {
+  total_tokens: number;
+};
+
+type EmbeddingState = {
+  per_label: EmbeddingLabelState[];
+  models_in_use: string[];
+  configured_model: string;
+  configured_dimensions: number;
+  last_embedding_at: string | null;
+  last_import_at: string | null;
+  last_layer_build_at: string | null;
+  needs_rerun: boolean;
+  run_at?: string;
+  forced?: boolean;
+  model?: string;
+  dimensions?: number;
+  per_label_run?: EmbeddingRunLabelReport[];
+  embedded?: number;
+  skipped?: number;
+  skipped_unchanged?: number;
+  skipped_empty?: number;
+  failed?: number;
+  failures?: EmbeddingFailure[];
+  token_usage?: EmbeddingTokenUsage | null;
+  error?: string;
+};
+
+type GraphViewHandle = {
+  selectNodeByDisplayName: (type: string, displayName: string) => void;
+};
+
+type ChatCitation = {
+  label: string;
+  key: string;
+  display_name: string;
+  source_url?: string | null;
+};
+
+type ChatTokenUsage = Record<string, { input_tokens: number; output_tokens: number }>;
+
+type ChatToolError = { node: string; tool: string; error: string };
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  citations?: ChatCitation[];
+  droppedCitations?: string[];
+  toolErrors?: ChatToolError[];
+  error?: string;
+};
+
+type ChatSseEvent =
+  | { type: "status"; text: string }
+  | { type: "token"; text: string }
+  | { type: "sources"; citations: ChatCitation[]; dropped_citations: string[] }
+  | { type: "tool_error"; node: string; tool: string; args: Record<string, unknown>; error: string }
+  | {
+      type: "done";
+      answer: string;
+      citations?: ChatCitation[];
+      dropped_citations?: string[];
+      token_usage?: ChatTokenUsage;
+      error?: string;
+    };
 
 type Neo4jStatus = "checking" | "connected" | "disconnected";
 
@@ -378,13 +466,14 @@ function propertyRows(properties: Record<string, string | number>) {
   return Object.entries(properties).map(([key, value]) => [key, String(value)] as [string, string]);
 }
 
-function GraphView() {
+const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<Core | null>(null);
   const viewerWindowRef = useRef<Window | null>(null);
   const viewerCloseTimerRef = useRef<number | null>(null);
   const isMotionPausedRef = useRef(false);
   const motionLevelRef = useRef(1);
+  const pendingSelectionRef = useRef<{ type: string; displayName: string } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const [isMotionPaused, setIsMotionPaused] = useState(false);
@@ -925,6 +1014,53 @@ function GraphView() {
     return () => controller.abort();
   }, [activeSource]);
 
+  const trySelectPending = () => {
+    const pending = pendingSelectionRef.current;
+    if (!pending) {
+      return;
+    }
+    const match = graphNodes.find((node) => node.type === pending.type && node.label === pending.displayName);
+    if (!match) {
+      return;
+    }
+    pendingSelectionRef.current = null;
+    setSelectedNodeId(match.id);
+    setSelection({
+      title: match.label,
+      rows: [
+        ["label", match.type],
+        ["id", match.id],
+        ["summary", match.summary ?? ""],
+        ...propertyRows(match.properties),
+      ],
+    });
+    const node = graphRef.current?.getElementById(match.id);
+    if (node && !node.empty()) {
+      graphRef.current!.animate({
+        center: { eles: node },
+        zoom: Math.max(graphRef.current!.zoom(), 1.15),
+        duration: 260,
+      });
+    }
+  };
+
+  // Runs after both the graph API response and the cytoscape re-init effect
+  // (declared earlier, so it commits first) have settled for this render.
+  useEffect(() => {
+    trySelectPending();
+  }, [elements, graphNodes]);
+
+  useImperativeHandle(ref, () => ({
+    selectNodeByDisplayName(type: string, displayName: string) {
+      pendingSelectionRef.current = { type, displayName };
+      if (activeSource === "All") {
+        trySelectPending();
+      } else {
+        setActiveSource("All");
+      }
+    },
+  }));
+
   useEffect(() => {
     return () => {
       clearViewerCloseTimer();
@@ -1144,7 +1280,7 @@ function GraphView() {
       ) : null}
     </section>
   );
-}
+});
 
 function formatTimestamp(value: string | null) {
   if (!value) {
@@ -1456,8 +1592,180 @@ function KnowledgeLayerPanel() {
   );
 }
 
+const EMBEDDING_MODEL_FALLBACK = "text-embedding-3-large";
+
+function EmbeddingPanel() {
+  const [state, setState] = useState<EmbeddingState | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [justRan, setJustRan] = useState(false);
+  const [confirmingReembed, setConfirmingReembed] = useState(false);
+
+  const loadState = async () => {
+    try {
+      const response = await fetch("/api/embeddings");
+      const data = (await response.json()) as EmbeddingState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read embedding coverage.");
+      }
+      setState(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read embedding coverage.");
+    }
+  };
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  const runBuild = async (force: boolean) => {
+    setError("");
+    setIsRunning(true);
+    setJustRan(false);
+    setConfirmingReembed(false);
+
+    try {
+      const response = await fetch("/api/embeddings/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+      });
+      const data = (await response.json()) as EmbeddingState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Embedding build failed.");
+      }
+      setState(data);
+      setJustRan(true);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Embedding build failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const perLabel = state?.per_label ?? [];
+  const failures = state?.failures ?? [];
+  const mixedModels = (state?.models_in_use?.length ?? 0) > 1
+    || (state?.models_in_use?.length === 1 && state.models_in_use[0] !== state.configured_model);
+
+  return (
+    <div className="knowledge-panel embedding-panel">
+      <div className="reference-actions">
+        <button
+          className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
+          type="button"
+          disabled={isRunning}
+          onClick={() => void runBuild(false)}
+        >
+          {isRunning && !confirmingReembed ? "Building embeddings..." : "Build embeddings"}
+        </button>
+
+        {confirmingReembed ? (
+          <div className="embedding-confirm">
+            <span>Re-embed every node? This spends money proportional to corpus size.</span>
+            <button
+              className="embedding-secondary-button embedding-confirm-button"
+              type="button"
+              disabled={isRunning}
+              onClick={() => void runBuild(true)}
+            >
+              Yes, re-embed all
+            </button>
+            <button
+              className="embedding-secondary-button"
+              type="button"
+              onClick={() => setConfirmingReembed(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            className="embedding-secondary-button"
+            type="button"
+            disabled={isRunning}
+            onClick={() => setConfirmingReembed(true)}
+          >
+            Re-embed all
+          </button>
+        )}
+
+        <div className="reference-status">
+          <span>Model: <strong>{state?.configured_model ?? EMBEDDING_MODEL_FALLBACK}</strong> ({state?.configured_dimensions ?? "-"} dims)</span>
+          <span>Last embedding run: {formatTimestamp(state?.last_embedding_at ?? null)}</span>
+          <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
+          <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
+          {state?.needs_rerun ? (
+            <span className="reference-stale">Import or knowledge build happened since the last embedding run. Run it again.</span>
+          ) : null}
+          {mixedModels ? (
+            <span className="reference-stale">Mixed embedding models in the graph: {state?.models_in_use.join(", ")}.</span>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+      {justRan && !error ? (
+        <p className="reference-success">
+          {(state?.embedded ?? 0) === 0
+            ? "0 nodes embedded — everything is up to date."
+            : `Done. ${state?.embedded ?? 0} nodes embedded, ${state?.skipped ?? 0} skipped, ${state?.failed ?? 0} failed.`}
+          {state?.token_usage ? ` (${state.token_usage.total_tokens} tokens)` : ""}
+        </p>
+      ) : null}
+
+      <div className="reference-table-wrapper">
+        <table className="reference-table">
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Total nodes</th>
+              <th>Embedded</th>
+              <th>Missing</th>
+            </tr>
+          </thead>
+          <tbody>
+            {perLabel.map((row) => (
+              <tr key={row.label}>
+                <td>{row.label}</td>
+                <td>{row.total}</td>
+                <td>{row.embedded}</td>
+                <td>{row.missing}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {failures.length > 0 ? (
+        <div className="embedding-failures">
+          <h4 className="knowledge-card-title">Failures from the last run</h4>
+          <table className="reference-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Node key</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {failures.map((failure, index) => (
+                <tr key={`${failure.label}-${index}`}>
+                  <td>{failure.label}</td>
+                  <td><code>{JSON.stringify(failure.key)}</code></td>
+                  <td>{failure.error}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function BuildGraphLayersPanel() {
-  const [activeInnerTab, setActiveInnerTab] = useState<"step1" | "step2">("step1");
+  const [activeInnerTab, setActiveInnerTab] = useState<"step1" | "step2" | "step3">("step1");
 
   return (
     <div className="build-graph-layers">
@@ -1480,9 +1788,254 @@ function BuildGraphLayersPanel() {
         >
           Knowledge layer
         </button>
+        <button
+          className={`center-tab${activeInnerTab === "step3" ? " center-tab-active" : ""}`}
+          type="button"
+          role="tab"
+          aria-selected={activeInnerTab === "step3"}
+          onClick={() => setActiveInnerTab("step3")}
+        >
+          Embeddings
+        </button>
       </div>
       <div className="center-tab-panel" role="tabpanel">
-        {activeInnerTab === "step1" ? <ReferenceExtractionPanel /> : <KnowledgeLayerPanel />}
+        {activeInnerTab === "step1" ? <ReferenceExtractionPanel /> : null}
+        {activeInnerTab === "step2" ? <KnowledgeLayerPanel /> : null}
+        {activeInnerTab === "step3" ? <EmbeddingPanel /> : null}
+      </div>
+    </div>
+  );
+}
+
+function getOrCreateThreadId(): string {
+  const storageKey = "ai-chat-thread-id";
+  try {
+    const existing = window.sessionStorage.getItem(storageKey);
+    if (existing) {
+      return existing;
+    }
+    const created = crypto.randomUUID();
+    window.sessionStorage.setItem(storageKey, created);
+    return created;
+  } catch {
+    // Private browsing / blocked storage: fall back to an in-memory id for this page load.
+    return crypto.randomUUID();
+  }
+}
+
+async function* readSseEvents(response: Response): AsyncGenerator<ChatSseEvent> {
+  const body = response.body;
+  if (!body) {
+    return;
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const rawEvent = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        for (const line of rawEvent.split("\n")) {
+          if (line.startsWith("data:")) {
+            const jsonText = line.slice(5).trim();
+            if (jsonText) {
+              try {
+                yield JSON.parse(jsonText) as ChatSseEvent;
+              } catch {
+                // Ignore a malformed event rather than breaking the stream.
+              }
+            }
+          }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function ChatPanel({ graphViewRef }: { graphViewRef: React.RefObject<GraphViewHandle | null> }) {
+  const [threadId] = useState(getOrCreateThreadId);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [status, setStatus] = useState("");
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, status]);
+
+  const sendMessage = async () => {
+    const message = input.trim();
+    if (!message || isStreaming) {
+      return;
+    }
+
+    setError("");
+    setStatus("");
+    setIsStreaming(true);
+    setInput("");
+
+    const userMessageId = `u-${Date.now()}`;
+    const assistantMessageId = `a-${Date.now()}`;
+    setMessages((previous) => [
+      ...previous,
+      { id: userMessageId, role: "user", content: message },
+      { id: assistantMessageId, role: "assistant", content: "" },
+    ]);
+
+    const updateAssistant = (update: Partial<ChatMessage>) => {
+      setMessages((previous) =>
+        previous.map((entry) => (entry.id === assistantMessageId ? { ...entry, ...update } : entry)),
+      );
+    };
+
+    try {
+      const response = await fetch("/api/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, thread_id: threadId }),
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Chat request failed (${response.status}).`);
+      }
+
+      let streamedContent = "";
+      for await (const event of readSseEvents(response)) {
+        if (event.type === "status") {
+          setStatus(event.text);
+        } else if (event.type === "token") {
+          streamedContent += event.text;
+          updateAssistant({ content: streamedContent });
+        } else if (event.type === "sources") {
+          updateAssistant({ citations: event.citations, droppedCitations: event.dropped_citations });
+        } else if (event.type === "tool_error") {
+          setMessages((previous) =>
+            previous.map((entry) =>
+              entry.id === assistantMessageId
+                ? { ...entry, toolErrors: [...(entry.toolErrors ?? []), { node: event.node, tool: event.tool, error: event.error }] }
+                : entry,
+            ),
+          );
+        } else if (event.type === "done") {
+          if (event.error) {
+            updateAssistant({ error: event.error });
+            setError(event.error);
+          } else {
+            updateAssistant({
+              content: event.answer,
+              citations: event.citations ?? [],
+              droppedCitations: event.dropped_citations ?? [],
+            });
+          }
+          setStatus("");
+        }
+      }
+    } catch (streamError) {
+      const messageText = streamError instanceof Error ? streamError.message : "Chat request failed.";
+      setError(messageText);
+      updateAssistant({ error: messageText });
+      setStatus("");
+    } finally {
+      setIsStreaming(false);
+    }
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void sendMessage();
+    }
+  };
+
+  const selectCitation = (citation: ChatCitation) => {
+    graphViewRef.current?.selectNodeByDisplayName(citation.label, citation.display_name);
+  };
+
+  return (
+    <div className="chat-panel">
+      <div className="chat-messages">
+        {messages.length === 0 ? (
+          <p className="reference-empty">Ask a question about the graph, or just say hello.</p>
+        ) : (
+          messages.map((entry) => (
+            <div key={entry.id} className={`chat-message chat-message-${entry.role}`}>
+              <div className="chat-message-role">{entry.role === "user" ? "You" : "AI"}</div>
+              {entry.toolErrors && entry.toolErrors.length > 0 ? (
+                <div className="chat-tool-errors">
+                  <strong>Verktygsfel — grafen kunde inte frågas helt ut:</strong>
+                  <ul>
+                    {entry.toolErrors.map((toolError, index) => (
+                      <li key={`${toolError.tool}-${index}`}>
+                        {toolError.tool} ({toolError.node}): {toolError.error}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              <div className="chat-message-content">
+                {entry.error ? <span className="reference-error">{entry.error}</span> : entry.content}
+              </div>
+              {entry.citations && entry.citations.length > 0 ? (
+                <div className="chat-citations">
+                  {entry.citations.map((citation) => (
+                    <button
+                      key={`${citation.label}-${citation.key}`}
+                      type="button"
+                      className="chat-citation-chip"
+                      onClick={() => selectCitation(citation)}
+                      title={`${citation.label}: ${citation.display_name}`}
+                    >
+                      {citation.display_name}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {entry.droppedCitations && entry.droppedCitations.length > 0 ? (
+                <p className="chat-dropped-citations">
+                  Unresolved references (not in the retrieved context): {entry.droppedCitations.join(", ")}
+                </p>
+              ) : null}
+            </div>
+          ))
+        )}
+        {isStreaming && status ? <p className="chat-status">{status}</p> : null}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+
+      <div className="chat-input-row">
+        <textarea
+          className="ai-chat-input"
+          aria-label="Message to AI"
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Write a message... (Enter to send, Shift+Enter for a new line)"
+        />
+        <button
+          className="ai-send-button"
+          type="button"
+          disabled={!input.trim() || isStreaming}
+          onClick={() => void sendMessage()}
+        >
+          {isStreaming ? "Thinking..." : "Send"}
+        </button>
       </div>
     </div>
   );
@@ -1490,43 +2043,11 @@ function BuildGraphLayersPanel() {
 
 function App() {
   const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes">("message");
-  const [aiMessage, setAiMessage] = useState("");
-  const [aiAnswer, setAiAnswer] = useState("");
-  const [isAiLoading, setIsAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
-
-  const sendAiMessage = async () => {
-    const message = aiMessage.trim();
-    if (!message || isAiLoading) {
-      return;
-    }
-
-    setAiError("");
-    setIsAiLoading(true);
-
-    try {
-      const response = await fetch("/api/ai/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
-      });
-      const data = (await response.json()) as { answer?: string; error?: string };
-
-      if (!response.ok || data.error) {
-        throw new Error(data.error || "AI request failed.");
-      }
-
-      setAiAnswer(data.answer || "");
-    } catch (error) {
-      setAiError(error instanceof Error ? error.message : "AI request failed.");
-    } finally {
-      setIsAiLoading(false);
-    }
-  };
+  const graphViewRef = useRef<GraphViewHandle>(null);
 
   return (
     <main>
-      <GraphView />
+      <GraphView ref={graphViewRef} />
       <section className="center-panel" aria-label="Center workspace">
         <div className="center-tabs" role="tablist" aria-label="Center panel tabs">
           <button
@@ -1549,38 +2070,7 @@ function App() {
           </button>
         </div>
         <div className="center-tab-panel" role="tabpanel">
-          {activeCenterTab === "message" ? (
-            <div className="ai-chat">
-              <label className="ai-chat-field">
-                <span>Your message</span>
-                <textarea
-                  className="ai-chat-input"
-                  aria-label="Message to AI"
-                  value={aiMessage}
-                  onChange={(event) => setAiMessage(event.target.value)}
-                />
-              </label>
-              <button
-                className="ai-send-button"
-                type="button"
-                disabled={!aiMessage.trim() || isAiLoading}
-                onClick={sendAiMessage}
-              >
-                {isAiLoading ? "Thinking..." : "Send"}
-              </button>
-              <label className="ai-chat-field ai-chat-answer-field">
-                <span>AI answer</span>
-                <textarea
-                  className="ai-chat-output"
-                  aria-label="AI answer"
-                  readOnly
-                  value={aiError || aiAnswer}
-                />
-              </label>
-            </div>
-          ) : (
-            <BuildGraphLayersPanel />
-          )}
+          {activeCenterTab === "message" ? <ChatPanel graphViewRef={graphViewRef} /> : <BuildGraphLayersPanel />}
         </div>
       </section>
       <textarea className="right-text-box" aria-label="Right text box" />

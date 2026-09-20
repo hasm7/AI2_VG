@@ -28,6 +28,8 @@ The most important rule is that the data must stay separated into six logical da
 
 PostgreSQL is the source of truth. Neo4j is derived from these tables and can be rebuilt from them.
 
+For the actual current graph shape — every node label's properties and data types, existing Neo4j constraints/indexes, and every relationship type's endpoint label pairs, taken from a live introspection rather than from this document's description of intent — see `GRAPH_SCHEMA_HANDOFF.md` in the repository root.
+
 The SQL schema preserves source records, stable source IDs, timestamps, version rows, and JSONB source fragments. It does not try to pre-compute the graph. Relationships such as authorship, ownership, comments, reviews, and version chains are created during import into Neo4j from the source fields documented below.
 
 Several SQL tables map to one logical source in the graph:

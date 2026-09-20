@@ -6,6 +6,7 @@ The SQL database is the source-preserving layer. Neo4j is the relationship and m
 
 ## Related Documents and Code
 
+- Live schema snapshot for index/traversal planning (labels, properties, data types, existing constraints/indexes, relationship endpoint pairs, straight from a running Neo4j introspection): `GRAPH_SCHEMA_HANDOFF.md`
 - SQL source schema: `docs/SQL_DATA_HANDOFF.md`
 - PostgreSQL DDL: `scripts/setup_postgres_schema.py`
 - SQL-to-Neo4j import code: `viewer/app.py`

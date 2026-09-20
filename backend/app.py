@@ -10,7 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, abort, jsonify, request
+from flask import Flask, Response, abort, jsonify, request, stream_with_context
 from neo4j import GraphDatabase
 
 from reference_extraction import (
@@ -20,7 +20,8 @@ from reference_extraction import (
     read_pipeline_state,
     run_extraction,
 )
-from topic_event_extraction import build_knowledge_layer, knowledge_state_payload
+from topic_event_extraction import MissingApiKeyError, build_knowledge_layer, knowledge_state_payload
+from embedding_pass import build_embeddings, embedding_state_payload
 
 
 load_dotenv()
@@ -425,6 +426,42 @@ def api_knowledge_build():
         return jsonify({"error": str(error)}), 500
 
 
+@app.route("/api/embeddings", methods=["GET", "OPTIONS"])
+def api_embeddings():
+    """Current embedding coverage per label plus the pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(embedding_state_payload(session))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/embeddings/build", methods=["POST", "OPTIONS"])
+def api_embeddings_build():
+    """Run the embedding pass. Body: {"force": bool} (default false)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force", False))
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = build_embeddings(session, force=force)
+        return jsonify(result)
+    except MissingApiKeyError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route("/api/neo4j/status", methods=["GET", "OPTIONS"])
 def api_neo4j_status():
     if request.method == "OPTIONS":
@@ -441,29 +478,62 @@ def api_neo4j_status():
 
 @app.route("/api/ai/chat", methods=["POST", "OPTIONS"])
 def api_ai_chat():
+    """Graph RAG agent, streamed as Server-Sent Events.
+
+    Body: {"message": str, "thread_id": str}. Event payloads (one JSON
+    object per `data:` line): {"type": "status", "text": str},
+    {"type": "token", "text": str}, {"type": "sources", "citations": [...],
+    "dropped_citations": [...]}, {"type": "done", "answer": str,
+    "citations": [...], "dropped_citations": [...], "token_usage": {...}}.
+    """
     if request.method == "OPTIONS":
         return ("", 204)
 
     payload = request.get_json(silent=True) or {}
     message = str(payload.get("message", "")).strip()
+    thread_id = str(payload.get("thread_id", "")).strip()
+
     if not message:
         return jsonify({"error": "Message is required."}), 400
+    if not thread_id:
+        return jsonify({"error": "thread_id is required."}), 400
 
     # Imported on demand so a missing chat dependency cannot stop the graph API
     # from starting. The agent needs langgraph and openai, which the graph API
     # does not.
     try:
-        from langgraph_agent.agent import ask_agent
+        from langgraph_agent.agent import MissingApiKeyError, require_openai_client, stream_chat
     except ImportError as error:
         return jsonify({
             "error": f"Chat agent is unavailable: {error}. "
                      "Install its dependencies with .\\scripts\\install_deps.ps1."
         }), 503
 
+    # Checked eagerly, outside the stream, so a missing key still produces a
+    # plain 503 status rather than a 200 that turns into an error mid-stream
+    # (the SSE response's status line is fixed the moment it is returned).
     try:
-        return jsonify({"answer": ask_agent(message)})
+        require_openai_client()
+    except MissingApiKeyError as error:
+        return jsonify({"error": str(error)}), 503
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
     except Exception as error:
         return jsonify({"error": str(error)}), 500
+
+    def generate():
+        try:
+            for event in stream_chat(message, thread_id, uri, user, password, database):
+                yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+        except Exception as error:
+            yield f"data: {json.dumps({'type': 'done', 'answer': '', 'error': str(error)}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route("/api/viewer/start", methods=["POST", "OPTIONS"])
