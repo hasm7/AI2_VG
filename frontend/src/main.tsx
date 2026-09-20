@@ -458,11 +458,11 @@ function GraphView() {
     }
   };
 
-  // In the Knowledge filter, Topic is pinned to the left and Event to the
-  // right. Everything else (the source nodes cited as evidence) is seeded
-  // into a tight cluster at the center instead of being locked, so cose's
-  // own repulsion/attraction still applies within that clump rather than
-  // scattering it across the full canvas between the two pinned columns.
+  // In the Knowledge filter every position is fixed, so no force layout runs.
+  // Topic sits in a column on the left, Event in a column on the right, and
+  // the source nodes cited as evidence fill a centered grid between them.
+  // The columns are pushed outward by the grid's own width, so the two
+  // derived types stay clear of the evidence block at any node count.
   const knowledgeAnchors = useMemo(() => {
     if (activeSource !== "Knowledge") {
       return null;
@@ -481,28 +481,47 @@ function GraphView() {
       }
     });
 
-    const spacingY = 90;
+    const gridSpacingX = 190;
+    const gridSpacingY = 70;
+    const columnSpacingY = 90;
+    const columnSpacingX = 190;
+    const maxPerColumn = 12;
+    const gutter = 280;
+
     const anchors: Record<string, { x: number; y: number; locked: boolean }> = {};
 
-    const placeColumn = (items: GraphNode[], x: number) => {
-      const offset = ((items.length - 1) * spacingY) / 2;
+    const gridColumns = Math.max(1, Math.ceil(Math.sqrt(middle.length)));
+    const gridWidth = (gridColumns - 1) * gridSpacingX;
+    const gridRows = Math.max(1, Math.ceil(middle.length / gridColumns));
+    const gridOffsetY = ((gridRows - 1) * gridSpacingY) / 2;
+
+    middle.forEach((node, index) => {
+      const column = index % gridColumns;
+      const row = Math.floor(index / gridColumns);
+      anchors[node.id] = {
+        x: column * gridSpacingX - gridWidth / 2,
+        y: row * gridSpacingY - gridOffsetY,
+        locked: false,
+      };
+    });
+
+    // Long columns wrap into further columns, stepping away from the center.
+    const placeColumn = (items: GraphNode[], baseX: number, direction: number) => {
+      const perColumn = Math.min(items.length, maxPerColumn) || 1;
+      const offsetY = ((perColumn - 1) * columnSpacingY) / 2;
       items.forEach((node, index) => {
-        anchors[node.id] = { x, y: index * spacingY - offset, locked: true };
+        const column = Math.floor(index / perColumn);
+        anchors[node.id] = {
+          x: baseX + direction * column * columnSpacingX,
+          y: (index % perColumn) * columnSpacingY - offsetY,
+          locked: true,
+        };
       });
     };
 
-    placeColumn(left, -420);
-    placeColumn(right, 420);
-
-    middle.forEach((node) => {
-      let hash = 0;
-      for (let index = 0; index < node.id.length; index += 1) {
-        hash = (hash * 31 + node.id.charCodeAt(index)) >>> 0;
-      }
-      const angle = (hash % 360) * (Math.PI / 180);
-      const radius = 20 + (hash % 140);
-      anchors[node.id] = { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, locked: false };
-    });
+    const columnX = gridWidth / 2 + gutter;
+    placeColumn(left, -columnX, -1);
+    placeColumn(right, columnX, 1);
 
     return anchors;
   }, [activeSource, graphNodes]);
@@ -729,14 +748,10 @@ function GraphView() {
       ],
       layout: knowledgeAnchors
         ? {
-            name: "cose",
+            name: "preset",
             animate: false,
             fit: true,
             padding: 42,
-            randomize: false,
-            nodeRepulsion: 2600,
-            idealEdgeLength: 34,
-            componentSpacing: 20,
           }
         : {
             name: "cose",
@@ -1072,23 +1087,25 @@ function GraphView() {
           {isExpanded ? "Close" : "Expand"}
         </button>
       </div>
-      <button
-        className="viewer-button"
-        type="button"
-        disabled={isViewerStarting}
-        onClick={openSqlViewer}
-      >
-        {isViewerStarting ? "Starting SQL Viewer..." : "Open SQL Viewer"}
-      </button>
-      <div className={`neo4j-status neo4j-status-${neo4jStatus}`} aria-live="polite">
-        <span className="neo4j-status-dot" />
-        <span>
-          {neo4jStatus === "connected"
-            ? "Connected to Neo4j"
-            : neo4jStatus === "checking"
-              ? "Checking Neo4j"
-              : "Neo4j disconnected"}
-        </span>
+      <div className="graph-footer">
+        <button
+          className="viewer-button"
+          type="button"
+          disabled={isViewerStarting}
+          onClick={openSqlViewer}
+        >
+          {isViewerStarting ? "Starting SQL Viewer..." : "Open SQL Viewer"}
+        </button>
+        <div className={`neo4j-status neo4j-status-${neo4jStatus}`} aria-live="polite">
+          <span className="neo4j-status-dot" />
+          <span>
+            {neo4jStatus === "connected"
+              ? "Connected to Neo4j"
+              : neo4jStatus === "checking"
+                ? "Checking Neo4j"
+                : "Neo4j disconnected"}
+          </span>
+        </div>
       </div>
       {isLegendVisible ? (
         <div className="graph-legend" aria-label="Node labels">
@@ -1212,6 +1229,7 @@ function ReferenceExtractionPanel() {
       {justRan && !error ? <p className="reference-success">Done. {state?.total ?? 0} edges created.</p> : null}
 
       <div className="reference-counts">
+        <span className="reference-counts-label">Relationships created</span>
         {Object.keys(relationshipLabels).map((key) => (
           <span key={key} className="reference-count">
             {relationshipLabels[key]}: <strong>{state?.counts?.[key] ?? 0}</strong>
@@ -1229,11 +1247,12 @@ function ReferenceExtractionPanel() {
           <table className="reference-table">
             <thead>
               <tr>
-                <th>Source type</th>
-                <th>Source</th>
-                <th>Matched</th>
-                <th>Field</th>
-                <th>Target</th>
+                <th>Source type (Label)</th>
+                <th>Source (node name)</th>
+                <th>Field (property in source)</th>
+                <th>Matched (text in source)</th>
+                <th>Target (node name)</th>
+                <th>Relationship (type)</th>
               </tr>
             </thead>
             <tbody>
@@ -1241,9 +1260,10 @@ function ReferenceExtractionPanel() {
                 <tr key={`${edge.source_display_name}-${edge.relationship}-${edge.target_display_name}-${index}`}>
                   <td>{edge.source_label}</td>
                   <td>{edge.source_display_name}</td>
-                  <td><code>{edge.matched_text}</code></td>
                   <td>{edge.source_property}</td>
+                  <td><code>{edge.matched_text}</code></td>
                   <td>{edge.target_display_name}</td>
+                  <td>{edge.relationship}</td>
                 </tr>
               ))}
             </tbody>
@@ -1351,26 +1371,36 @@ function KnowledgeLayerPanel() {
         </div>
       ) : null}
 
+
       <div className="knowledge-topics">
         {topics.length === 0 ? (
           <p className="reference-empty">No knowledge layer yet. Press the button to build it.</p>
         ) : (
           topics.map((topic) => (
             <div className="knowledge-topic" key={topic.slug}>
-              <h3>
-                {topic.name} <span className="knowledge-topic-type">{topic.topic_type}</span>
-              </h3>
-              <p>{topic.summary}</p>
+              <div className="knowledge-topic-card">
+                <h4 className="knowledge-card-title">Topic node created</h4>
+                <p className="knowledge-table-caption">
+                  (Type is one of: requirement, defect, incident, decision, other)
+                </p>
+                <p><strong>Topic name:</strong> {topic.name}</p>
+                <p>
+                  <strong>Type:</strong> <span className="knowledge-topic-type">{topic.topic_type}</span>
+                </p>
+                <p><strong>Topic summary:</strong> {topic.summary}</p>
+              </div>
 
+              <h4 className="knowledge-card-title knowledge-section-title">Event nodes created for this topic</h4>
+              <div className="knowledge-table-scroll">
               <table className="reference-table">
                 <thead>
                   <tr>
-                    <th>Event</th>
-                    <th>Type</th>
+                    <th>Event (what happened)</th>
+                    <th>Type (what kind of event)</th>
                     <th>Occurred at</th>
                     <th>Summary</th>
-                    <th>Actors</th>
-                    <th>Evidence</th>
+                    <th>Actors (linked persons)</th>
+                    <th>Evidence (source nodes)</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1386,15 +1416,22 @@ function KnowledgeLayerPanel() {
                   ))}
                 </tbody>
               </table>
+              </div>
 
               {linksByTopic(topic.slug).length > 0 ? (
+                <>
+                <h4 className="knowledge-card-title knowledge-section-title">
+                  Relationships created between these events (CAUSED)
+                </h4>
+                <p className="knowledge-table-caption">(cause:Event)-[:CAUSED]-&gt;(effect:Event)</p>
+                <div className="knowledge-table-scroll">
                 <table className="reference-table">
                   <thead>
                     <tr>
                       <th>Cause</th>
                       <th>Effect</th>
-                      <th>Explanation</th>
-                      <th>Evidence</th>
+                      <th>Explanation (why cause led to effect)</th>
+                      <th>Evidence (source identifiers)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1408,6 +1445,8 @@ function KnowledgeLayerPanel() {
                     ))}
                   </tbody>
                 </table>
+                </div>
+                </>
               ) : null}
             </div>
           ))

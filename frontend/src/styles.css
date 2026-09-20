@@ -60,7 +60,7 @@ main {
   display: grid;
   grid-template-columns: repeat(6, max-content);
   gap: 6px;
-  max-width: calc(100% - 180px);
+  max-width: calc(100% - 340px);
 }
 
 .source-filter-button:first-child {
@@ -452,6 +452,7 @@ main {
 }
 
 .build-graph-layers .center-tab-panel {
+  border-top-left-radius: 0;
   overflow: auto;
 }
 
@@ -546,11 +547,17 @@ main {
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
 }
 
-.viewer-button {
+.graph-footer {
   position: absolute;
-  bottom: 10px;
   right: 10px;
+  bottom: 10px;
   z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer-button {
   height: 26px;
   border: 1px solid rgba(37, 99, 235, 0.28);
   border-radius: 999px;
@@ -575,10 +582,6 @@ main {
 }
 
 .neo4j-status {
-  position: absolute;
-  right: 10px;
-  bottom: 46px;
-  z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -736,6 +739,10 @@ main {
   color: #234270;
 }
 
+.reference-counts-label {
+  font-weight: 600;
+}
+
 .reference-count strong {
   color: #123f91;
 }
@@ -786,6 +793,7 @@ main {
 
 .knowledge-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto 1fr;
   gap: 10px;
   height: 100%;
@@ -795,10 +803,10 @@ main {
 
 .knowledge-build-button {
   height: 30px;
-  border: 1px solid rgba(126, 34, 206, 0.32);
+  border: 1px solid rgba(37, 99, 235, 0.32);
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(237, 233, 254, 0.85));
-  color: #5b21b6;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(219, 234, 254, 0.85));
+  color: #123f91;
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -820,18 +828,40 @@ main {
 
 .knowledge-topics {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   min-height: 0;
   overflow: auto;
 }
 
 .knowledge-topic {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.knowledge-topic-card {
+  min-width: 0;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
   background: #f8fafc;
   padding: 10px 12px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
+}
+
+.knowledge-card-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #1d4ed8;
+}
+
+.knowledge-section-title {
+  margin-top: 20px;
 }
 
 .knowledge-topic h3 {
@@ -855,6 +885,22 @@ main {
   border-radius: 999px;
   padding: 2px 8px;
   margin-left: 6px;
+}
+
+.knowledge-topic .knowledge-table-caption {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.knowledge-table-scroll {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.knowledge-topic .reference-table {
+  min-width: 1100px;
 }
 
 .knowledge-topic .reference-table td {
