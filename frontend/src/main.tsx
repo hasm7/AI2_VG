@@ -3157,6 +3157,116 @@ function ChatPanel({ graphViewRef }: { graphViewRef: React.RefObject<GraphViewHa
   );
 }
 
+function RightGraphicsPanel() {
+  return (
+    <aside className="right-graphics-panel" aria-label="Layer graphics">
+      <svg className="layer-ladder-svg" viewBox="0 0 420 360" role="img" aria-label="Graph layer map">
+        <defs>
+          <filter id="layerMapGlow" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="2.5" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+
+        <path className="layer-map-line" d="M110 76 Q88 76 88 90 V100 Q88 108 80 108 Q88 108 88 116 V126 Q88 140 110 140" />
+        <path className="layer-map-line" d="M110 148 Q88 148 88 162 V172 Q88 180 80 180 Q88 180 88 188 V198 Q88 212 110 212" />
+        <path className="layer-map-line" d="M110 222 Q88 222 88 236 V244 Q88 252 80 252 Q88 252 88 260 V270 Q88 284 110 284" />
+        <path className="layer-map-beam" pathLength={100} d="M110 76 Q88 76 88 90 V100 Q88 108 80 108 Q88 108 88 116 V126 Q88 140 110 140" />
+        <path className="layer-map-beam" pathLength={100} style={{ animationDelay: "-1.1s" }} d="M110 148 Q88 148 88 162 V172 Q88 180 80 180 Q88 180 88 188 V198 Q88 212 110 212" />
+        <path className="layer-map-beam" pathLength={100} style={{ animationDelay: "-2.2s" }} d="M110 222 Q88 222 88 236 V244 Q88 252 80 252 Q88 252 88 260 V270 Q88 284 110 284" />
+
+        <g className="layer-map-node" transform="translate(126 58)">
+          <circle className="layer-map-dot" cx="0" cy="18" r="5" />
+          <circle className="layer-map-dot layer-map-dot-secondary" cx="16" cy="10" r="4" />
+          <line className="layer-map-icon-line" x1="0" y1="18" x2="16" y2="10" />
+          <text x="40" y="22">Collaboration layer</text>
+        </g>
+
+        <g className="layer-map-node" transform="translate(126 124)">
+          <path className="layer-map-icon-line" d="M0 20 H22" />
+          <path className="layer-map-icon-line" d="M17 14 L24 20 L17 26" />
+          <circle className="layer-map-dot" cx="0" cy="20" r="4" />
+          <circle className="layer-map-dot layer-map-dot-secondary" cx="26" cy="20" r="4" />
+          <text x="40" y="24">Causal layer</text>
+        </g>
+
+        <g className="layer-map-node" transform="translate(126 202)">
+          <rect className="layer-map-icon-box" x="-2" y="6" width="24" height="20" rx="3" />
+          <path className="layer-map-icon-line" d="M4 13 H18 M4 19 H13" />
+          <text x="40" y="23">Architecture layer</text>
+        </g>
+
+        <g className="layer-map-node" transform="translate(126 268)">
+          <circle className="layer-map-icon-orbit" cx="12" cy="18" r="15" />
+          <circle className="layer-map-dot" cx="12" cy="18" r="4" />
+          <circle className="layer-map-dot layer-map-dot-secondary" cx="25" cy="12" r="3" />
+          <text x="40" y="23">Knowledge layer</text>
+        </g>
+      </svg>
+
+      <svg className="knowledge-layer-svg" viewBox="0 0 420 260" role="img" aria-label="Knowledge layer visualizer">
+        <defs>
+          <filter id="knowledgeSoftGlow" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="3.5" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          <radialGradient id="knowledgeCore" cx="42%" cy="36%" r="68%">
+            <stop offset="0%" stopColor="#fde68a" />
+            <stop offset="100%" stopColor="#fbbf24" />
+          </radialGradient>
+          <radialGradient id="knowledgeNode" cx="42%" cy="36%" r="68%">
+            <stop offset="0%" stopColor="#a5f3fc" />
+            <stop offset="100%" stopColor="#22d3ee" />
+          </radialGradient>
+          <radialGradient id="knowledgeBlueNode" cx="42%" cy="36%" r="68%">
+            <stop offset="0%" stopColor="#93c5fd" />
+            <stop offset="100%" stopColor="#3b82f6" />
+          </radialGradient>
+        </defs>
+
+        <ellipse className="knowledge-orbit knowledge-orbit-main" cx="210" cy="132" rx="194" ry="72" />
+
+        <g className="knowledge-cluster">
+          <g className="knowledge-counter">
+            <line x1="120" y1="142" x2="218" y2="62" className="knowledge-edge" />
+            <line x1="218" y1="62" x2="252" y2="34" className="knowledge-edge" />
+            <line x1="218" y1="62" x2="306" y2="104" className="knowledge-edge" />
+            <line x1="218" y1="62" x2="306" y2="142" className="knowledge-edge" />
+            <line x1="120" y1="142" x2="284" y2="186" className="knowledge-edge" />
+            <line x1="120" y1="142" x2="228" y2="228" className="knowledge-edge" />
+            <line x1="162" y1="126" x2="306" y2="104" className="knowledge-edge" />
+            <line x1="162" y1="126" x2="306" y2="142" className="knowledge-edge" />
+            <line x1="162" y1="126" x2="284" y2="186" className="knowledge-edge" />
+            <line x1="306" y1="142" x2="306" y2="104" className="knowledge-edge" />
+            <line x1="284" y1="186" x2="306" y2="142" className="knowledge-edge" />
+
+            <circle cx="306" cy="142" r="22" fill="url(#knowledgeCore)" className="knowledge-node knowledge-core-node" />
+            <circle cx="120" cy="142" r="10" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
+            <circle cx="162" cy="126" r="7" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
+            <circle cx="218" cy="62" r="8" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
+            <circle cx="252" cy="34" r="8" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
+            <circle cx="214" cy="120" r="9" fill="url(#knowledgeNode)" className="knowledge-node" />
+            <circle cx="306" cy="104" r="9" fill="url(#knowledgeNode)" className="knowledge-node" />
+            <circle cx="284" cy="186" r="9" fill="url(#knowledgeNode)" className="knowledge-node" />
+            <circle cx="228" cy="228" r="9" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
+          </g>
+        </g>
+
+        <circle cx="96" cy="126" r="4.8" fill="#f8fafc" className="knowledge-star knowledge-star-one" />
+        <circle cx="196" cy="156" r="3.6" fill="#f8fafc" className="knowledge-star knowledge-star-two" />
+        <circle cx="354" cy="114" r="3.8" fill="#f8fafc" className="knowledge-star knowledge-star-three" />
+        <circle cx="352" cy="162" r="3.6" fill="#f8fafc" className="knowledge-star knowledge-star-four" />
+      </svg>
+    </aside>
+  );
+}
+
 function App() {
   const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes">("message");
   const graphViewRef = useRef<GraphViewHandle>(null);
@@ -3189,7 +3299,7 @@ function App() {
           {activeCenterTab === "message" ? <ChatPanel graphViewRef={graphViewRef} /> : <BuildGraphLayersPanel />}
         </div>
       </section>
-      <textarea className="right-text-box" aria-label="Right text box" />
+      <RightGraphicsPanel />
     </main>
   );
 }

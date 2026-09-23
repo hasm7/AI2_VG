@@ -588,6 +588,28 @@ def load_components(tx):
     """)]
 
 
+def load_repositories(tx):
+    return [dict(row) for row in tx.run("""
+        MATCH (r:Repository)
+        OPTIONAL MATCH (r)-[:CONTAINS_MODULE]->(m:Module)
+        WITH r, count(DISTINCT m) AS module_count
+        OPTIONAL MATCH (r)<-[:PART_OF_REPOSITORY]-(c:Component)
+        WITH r, module_count, count(DISTINCT c) AS component_count
+        RETURN r.source_instance AS source_instance, r.name AS name,
+               module_count, component_count
+        ORDER BY r.name
+    """)]
+
+
+def load_modules(tx):
+    return [dict(row) for row in tx.run("""
+        MATCH (m:Module)
+        OPTIONAL MATCH (m)-[:CONTAINS_FILE]->(f:File)
+        RETURN m.repository AS repository, m.path AS path, count(f) AS file_count
+        ORDER BY m.repository, m.path
+    """)]
+
+
 def load_dependencies(tx):
     return [dict(row) for row in tx.run("""
         MATCH (from:Component)-[d:DEPENDS_ON]->(to:Component)
@@ -616,6 +638,8 @@ def load_architecture_state(session):
         return {
             "state": state,
             "counts": load_counts(tx),
+            "repositories": load_repositories(tx),
+            "modules": load_modules(tx),
             "components": load_components(tx),
             "dependencies": load_dependencies(tx),
             "files": load_files(tx),
@@ -631,6 +655,8 @@ def load_architecture_state(session):
         "needs_rerun": staleness["stale"],
         "stale_reasons": staleness["reasons"],
         "counts": result["counts"],
+        "repositories": result["repositories"],
+        "modules": result["modules"],
         "components": result["components"],
         "dependencies": result["dependencies"],
         "files": result["files"],
