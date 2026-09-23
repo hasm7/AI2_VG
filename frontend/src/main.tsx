@@ -473,6 +473,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const viewerCloseTimerRef = useRef<number | null>(null);
   const isMotionPausedRef = useRef(false);
   const motionLevelRef = useRef(1);
+  const areLabelsVisibleRef = useRef(true);
   const pendingSelectionRef = useRef<{ type: string; displayName: string } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -668,8 +669,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
 
   const layoutSettings = useMemo(
     () => ({
-      nodeRepulsion: 5200 + spacingLevel * 3800,
-      idealEdgeLength: 62 + spacingLevel * 34,
+      nodeRepulsion: 2800 + spacingLevel * 8200,
+      idealEdgeLength: 44 + spacingLevel * 78,
     }),
     [spacingLevel],
   );
@@ -846,7 +847,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
             name: "cose",
             animate: false,
             fit: true,
-            padding: 42,
+            padding: 56,
             nodeRepulsion: layoutSettings.nodeRepulsion,
             idealEdgeLength: layoutSettings.idealEdgeLength,
           },
@@ -888,6 +889,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     });
 
     graphRef.current = graph;
+    graph.elements().toggleClass("labels-hidden", !areLabelsVisibleRef.current);
 
     let animationFrame = 0;
     let basePositions: Record<string, { x: number; y: number }> = {};
@@ -933,7 +935,10 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     };
 
     graph.ready(() => {
-      window.setTimeout(startFloating, 120);
+      window.setTimeout(() => {
+        graph.fit(undefined, 56);
+        startFloating();
+      }, 120);
     });
 
     graph.on("free", "node", (event: EventObject) => {
@@ -949,8 +954,9 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
 
   useEffect(() => {
     const resizeTimer = window.setTimeout(() => {
-      graphRef.current?.resize();
-      graphRef.current?.fit(undefined, 42);
+      const graph = graphRef.current;
+      graph?.resize();
+      graph?.fit(undefined, 56);
     }, 120);
 
     return () => window.clearTimeout(resizeTimer);
@@ -963,6 +969,10 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   useEffect(() => {
     motionLevelRef.current = motionLevel;
   }, [motionLevel]);
+
+  useEffect(() => {
+    areLabelsVisibleRef.current = areLabelsVisible;
+  }, [areLabelsVisible]);
 
   useEffect(() => {
     const graph = graphRef.current;
@@ -1165,11 +1175,11 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         >
           {isNeighborMode ? "All" : "Neighbors"}
         </button>
-        <button className="graph-action-button" type="button" onClick={() => setAreLabelsVisible((current) => !current)}>
-          {areLabelsVisible ? "Hide labels" : "Show labels"}
-        </button>
         <button className="graph-action-button" type="button" onClick={() => setIsLegendVisible((current) => !current)}>
           {isLegendVisible ? "Hide legend" : "Show legend"}
+        </button>
+        <button className="graph-action-button" type="button" onClick={() => setAreLabelsVisible((current) => !current)}>
+          {areLabelsVisible ? "Hide labels" : "Show labels"}
         </button>
         <div className="motion-control">
           <button
@@ -1194,7 +1204,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
                 <input
                   type="range"
                   min="0"
-                  max="2"
+                  max="3"
                   step="0.1"
                   value={spacingLevel}
                   onChange={(event) => setSpacingLevel(Number(event.target.value))}
