@@ -17,16 +17,17 @@ From `/api/collaboration`:
 
 | Field | Current value |
 | --- | --- |
-| Expertise entries | 13 |
+| Expertise entries | 14 |
 | Persons with expertise | 4 |
 | Collaboration pairs | 7 |
 | Excluded persons | 2 |
 | `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
-| `last_layer_build_at` | `2026-09-23T17:24:01.989315+00:00` |
-| `last_architecture_build_at` | `2026-09-23T17:22:40.434771+00:00` |
-| `last_causal_build_at` | `2026-09-23T17:25:27.631397+00:00` |
-| `last_collaboration_build_at` | `2026-09-23T17:26:03.752708+00:00` |
+| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
+| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
+| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
+| `last_collaboration_build_at` | `2026-09-23T18:10:20.780808+00:00` |
 | `needs_rerun` | `false` |
+| `stale_reasons` | `[]` |
 
 Excluded persons (matches the local dataset exactly as expected):
 
@@ -35,9 +36,11 @@ Excluded persons (matches the local dataset exactly as expected):
 | Support | mailbox |
 | Anna (unresolved name-only observation) | ambiguous identity |
 
-Top expertise by topic (`Administrator session lifetime policy compliance`): Anna Lindqvist (score 33, share 0.34, rank 1), Erik Nilsson (24, 0.247, rank 2), Anna Berg (23, 0.237, rank 3), Priya Raman (17, 0.175, rank 4).
+Top expertise by topic (`Administrator session lifetime policy`): Anna Berg (score 25, share 0.275, rank 1), Anna Lindqvist (25, 0.275, rank 2), Erik Nilsson (24, 0.264, rank 3), Priya Raman (17, 0.187, rank 4).
 
 Strongest collaboration pair: Anna Lindqvist <-> Erik Nilsson, weight 8 (shared across `AUTH-19`, two PRs, two meetings, one mail thread, two events).
+
+(Exact scores, ranks, and topic naming vary slightly between rebuilds because the Knowledge layer is LLM-derived; this snapshot is from the full pipeline rebuild performed for the staleness follow-up work order.)
 
 ## Weights
 
@@ -115,11 +118,11 @@ CREATE CONSTRAINT expertise_key IF NOT EXISTS FOR (n:Expertise) REQUIRE (n.perso
 | `last_causal_build_at` | Causal layer |
 | `last_collaboration_build_at` | Collaboration layer (this layer's own timestamp) |
 
-`needs_rerun` is `true` when `last_collaboration_build_at` is missing, or when any of the four upstream timestamps is newer than it.
+Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `import`, `knowledge`, `architecture`, and `causal`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively.
 
 ## Backend API
 
-`GET /api/collaboration` returns pipeline timestamps, `needs_rerun`, `counts`, and the `expertise`, `works_with`, `excluded_persons` tables. `expertise` is sorted by subject name then rank; `works_with` by weight descending.
+`GET /api/collaboration` returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `expertise`, `works_with`, `excluded_persons` tables. `expertise` is sorted by subject name then rank; `works_with` by weight descending.
 
 `POST /api/collaboration/build` returns the same payload plus `built_at`, `deleted_relationships`, `deleted_nodes`.
 

@@ -15,13 +15,10 @@ This module reads and writes Neo4j only. It never touches PostgreSQL.
 
 import networkx as nx
 
-from reference_extraction import (
-    PIPELINE_STATE_ID,
-    PIPELINE_STATE_LABEL,
-    now_iso,
-    touch_pipeline_state,
-)
+from reference_extraction import now_iso, touch_pipeline_state
 from collaboration_layer import load_eligible_persons
+from pipeline_staleness import compute_staleness
+from pipeline_staleness import read_pipeline_state as _read_full_pipeline_state
 
 ALGORITHMS_VERSION = "graph-algorithms-v1"
 
@@ -284,42 +281,29 @@ def delete_generated_nodes(tx):
 # ---------------------------------------------------------------------------
 
 def read_pipeline_state(tx):
-    row = tx.run(f"""
-        MATCH (s:{PIPELINE_STATE_LABEL} {{id: $id}})
-        RETURN s.last_architecture_build_at AS last_architecture_build_at,
-               s.last_causal_build_at AS last_causal_build_at,
-               s.last_collaboration_build_at AS last_collaboration_build_at,
-               s.last_algorithms_run_at AS last_algorithms_run_at
-    """, {"id": PIPELINE_STATE_ID}).single()
-    if not row:
-        return {"last_architecture_build_at": None, "last_causal_build_at": None,
-                "last_collaboration_build_at": None, "last_algorithms_run_at": None}
-    return dict(row)
+    # Reads every stage's timestamp (not just this layer's own upstream) so
+    # that staleness can be computed transitively. See `pipeline_staleness.py`.
+    return _read_full_pipeline_state(tx)
 
 
-def needs_algorithms_rerun(state):
-    own = state.get("last_algorithms_run_at")
-    if not own:
-        return True
-    for key in ("last_architecture_build_at", "last_causal_build_at", "last_collaboration_build_at"):
-        upstream = state.get(key)
-        if upstream and upstream > own:
-            return True
-    return False
+# Eligibility rule duplicated from `collaboration_layer.load_eligible_persons`:
+# only these persons ever get `collab_*`/`community_id` properties written,
+# so counts and rows here must be scoped the same way.
+ELIGIBLE_PERSON_WHERE = "coalesce(p.actor_type, '') <> 'mailbox' AND coalesce(p.identity_ambiguous, false) <> true"
 
 
 def load_counts(tx):
     return {
         "communities": tx.run("MATCH (c:Community) RETURN count(c) AS c").single()["c"],
-        "persons": tx.run("MATCH (p:Person) RETURN count(p) AS c").single()["c"],
+        "persons": tx.run(f"MATCH (p:Person) WHERE {ELIGIBLE_PERSON_WHERE} RETURN count(p) AS c").single()["c"],
         "topics": tx.run("MATCH (t:Topic) RETURN count(t) AS c").single()["c"],
         "components": tx.run("MATCH (c:Component) RETURN count(c) AS c").single()["c"],
     }
 
 
 def load_person_rows(tx):
-    return [dict(row) for row in tx.run("""
-        MATCH (p:Person)
+    return [dict(row) for row in tx.run(f"""
+        MATCH (p:Person) WHERE {ELIGIBLE_PERSON_WHERE}
         RETURN p.name AS name, p.collab_weighted_degree AS collab_weighted_degree,
                p.collab_betweenness AS collab_betweenness, p.community_id AS community_id
         ORDER BY p.collab_betweenness DESC
@@ -375,12 +359,15 @@ def load_algorithms_state(session):
 
     result = session.execute_read(_read)
     state = result["state"]
+    staleness = compute_staleness(state)["algorithms"]
     return {
+        "last_layer_build_at": state["last_layer_build_at"],
         "last_architecture_build_at": state["last_architecture_build_at"],
         "last_causal_build_at": state["last_causal_build_at"],
         "last_collaboration_build_at": state["last_collaboration_build_at"],
         "last_algorithms_run_at": state["last_algorithms_run_at"],
-        "needs_rerun": needs_algorithms_rerun(state),
+        "needs_rerun": staleness["stale"],
+        "stale_reasons": staleness["reasons"],
         "counts": result["counts"],
         "persons": result["persons"],
         "communities": result["communities"],

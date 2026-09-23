@@ -19,21 +19,24 @@ From `/api/knowledge`:
 | Field | Current value |
 | --- | --- |
 | Topics | 1 |
-| Events | 11 |
-| Causal links | 5 |
-| `last_extraction_at` | `2026-09-20T11:23:27.105364+00:00` |
-| `last_layer_build_at` | `2026-09-20T13:17:21.869654+00:00` |
+| Events | 10 |
+| Causal links | 6 |
+| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
+| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
 | `needs_layer_rerun` | `false` |
+| `stale_reasons` | `[]` |
 
 Current topic:
 
 | Slug | Name | Type | Event count |
 | --- | --- | --- | ---: |
-| `administrator-session-lifetime-policy` | Administrator session lifetime policy | requirement | 11 |
+| `administrator-session-lifetime-policy` | Administrator session lifetime policy | defect | 10 |
 
 Current causal-link count:
 
-- 5 `CAUSED` relationships between `Event` nodes.
+- 6 `CAUSED` relationships between `Event` nodes.
+
+(Event/topic wording and the exact event count vary slightly between rebuilds, since the model does not propose exactly the same events every run; this snapshot is from the full pipeline rebuild performed for the staleness follow-up work order.)
 
 ## Model and Configuration
 
@@ -339,11 +342,7 @@ Relevant fields:
 | `last_extraction_at` | Reference extraction layer | Indicates deterministic references changed. |
 | `last_layer_build_at` | Knowledge layer | Indicates `Topic`/`Event` layer was rebuilt. |
 
-`needs_layer_rerun` is computed as:
-
-- `true` when `last_layer_build_at` is missing
-- `false` when `last_extraction_at` is missing
-- otherwise `last_extraction_at > last_layer_build_at`
+Staleness (`needs_layer_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's only upstream stage, per `UPSTREAM_BY_STAGE`, is `references`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively from `import`.
 
 The current local state has `needs_layer_rerun: false`.
 
@@ -360,9 +359,10 @@ Payload shape:
   "topics": [],
   "events": [],
   "causal_links": [],
-  "last_extraction_at": "2026-09-20T11:23:27.105364+00:00",
-  "last_layer_build_at": "2026-09-20T13:17:21.869654+00:00",
-  "needs_layer_rerun": false
+  "last_extraction_at": "2026-09-23T18:08:36.712761+00:00",
+  "last_layer_build_at": "2026-09-23T18:08:46.846709+00:00",
+  "needs_layer_rerun": false,
+  "stale_reasons": []
 }
 ```
 
@@ -444,7 +444,7 @@ The Knowledge tab provides:
 | `Building knowledge layer...` state | Shown while build is running. |
 | Last reference extraction timestamp | `state.last_extraction_at`, formatted by `formatTimestamp`. |
 | Last knowledge build timestamp | `state.last_layer_build_at`, formatted by `formatTimestamp`. |
-| Stale warning | Shown when `state.needs_layer_rerun` is true. |
+| Stale warning | Shown when `state.needs_layer_rerun` is true, with each `state.stale_reasons` entry listed on its own line underneath. |
 | Success message | `Done. X topics, Y events, Z causal links.` |
 | Metrics row | Model, Calls, Tokens, Discarded evidence. |
 | Topic cards | Shows topic name, type, and summary. |

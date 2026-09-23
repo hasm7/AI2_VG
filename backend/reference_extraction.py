@@ -22,6 +22,7 @@ nodes apart from the bookkeeping singleton, and calls no model.
 import re
 from datetime import datetime, timezone
 
+from pipeline_staleness import read_pipeline_state as _read_full_pipeline_state
 
 EXTRACTOR_NAME = "reference-extraction-v1"
 
@@ -263,24 +264,10 @@ def touch_pipeline_state(tx, field, value):
 
 
 def read_pipeline_state(tx):
-    row = tx.run(f"""
-        MATCH (s:{PIPELINE_STATE_LABEL} {{id: $id}})
-        RETURN s.last_import_at AS last_import_at,
-               s.last_extraction_at AS last_extraction_at
-    """, {"id": PIPELINE_STATE_ID}).single()
-    if not row:
-        return {"last_import_at": None, "last_extraction_at": None}
-    return {"last_import_at": row["last_import_at"],
-            "last_extraction_at": row["last_extraction_at"]}
-
-
-def needs_rerun(state):
-    """True when an import has happened since the last extraction."""
-    if not state.get("last_extraction_at"):
-        return True
-    if not state.get("last_import_at"):
-        return False
-    return state["last_import_at"] > state["last_extraction_at"]
+    # Delegates to `pipeline_staleness`, which reads every stage's timestamp
+    # (not just this layer's own upstream) so that staleness can be computed
+    # transitively across the whole pipeline. See `pipeline_staleness.py`.
+    return _read_full_pipeline_state(tx)
 
 
 def load_extracted_edges(tx):

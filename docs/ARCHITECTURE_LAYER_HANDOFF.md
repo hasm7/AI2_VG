@@ -27,9 +27,10 @@ From `/api/architecture`:
 | Components | 3 |
 | Dependencies | 2 |
 | `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
-| `last_extraction_at` | `2026-09-20T11:23:27.105364+00:00` |
-| `last_architecture_build_at` | `2026-09-23T17:22:40.434771+00:00` |
+| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
+| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
 | `needs_rerun` | `false` |
+| `stale_reasons` | `[]` |
 
 Current repository: `backend-api`, with modules `backend/auth` and `tests/auth`.
 
@@ -151,13 +152,13 @@ This differs from the Knowledge layer's delete-first order on purpose: an Archit
 | `last_extraction_at` | Reference extraction | Upstream for staleness; also the build prerequisite. |
 | `last_architecture_build_at` | Architecture layer | This layer's own timestamp. |
 
-`needs_rerun` is `true` when `last_architecture_build_at` is missing, or when `last_import_at` or `last_extraction_at` is newer than it.
+Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `import` and `references`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively (for example, from a stale Knowledge layer, through Causal, into Collaboration).
 
 ## Backend API
 
 ### `GET /api/architecture`
 
-Returns pipeline timestamps, `needs_rerun`, `counts`, and the `components`, `dependencies`, `files` tables described in the work order.
+Returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `components`, `dependencies`, `files` tables described in the work order.
 
 ### `POST /api/architecture/build`
 

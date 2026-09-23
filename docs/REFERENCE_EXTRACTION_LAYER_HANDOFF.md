@@ -30,11 +30,12 @@ From `/api/references`:
 | `MENTIONS_ISSUE` | 22 |
 | `MENTIONS_PULL_REQUEST` | 21 |
 | `MENTIONS_DOCUMENT` | 12 |
-| `last_extraction_at` | `2026-09-20T11:23:27.105364+00:00` |
+| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
 | `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
-| `needs_rerun` | `true` |
+| `needs_rerun` | `false` |
+| `stale_reasons` | `[]` |
 
-`needs_rerun = true` means source data was imported after the last extraction run. Existing edges are still present, but the UI should warn that the layer may be stale.
+This snapshot is from immediately after a full pipeline rebuild (see the follow-up staleness work order), so `needs_rerun` is currently `false`. When source data is imported after the last extraction run, `needs_rerun` becomes `true` and `stale_reasons` explains why (see the Pipeline State section below).
 
 ## Neo4j Relationship Model
 
@@ -155,13 +156,7 @@ Relevant fields:
 | `last_import_at` | SQL import paths in `viewer/app.py` | Indicates source graph data changed. |
 | `last_extraction_at` | `reference_extraction.run_extraction` | Indicates reference layer was rebuilt. |
 
-`needs_rerun` is computed as:
-
-- `true` when `last_extraction_at` is missing
-- `false` when no import timestamp exists
-- otherwise `last_import_at > last_extraction_at`
-
-The current local state has `needs_rerun: true`, because the last import timestamp is newer than the last reference extraction timestamp.
+Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's only upstream stage, per `UPSTREAM_BY_STAGE`, is `import`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively from stages further upstream.
 
 ## Backend API
 
@@ -174,8 +169,9 @@ Payload shape:
 ```json
 {
   "last_import_at": "2026-09-20T13:18:12.864348+00:00",
-  "last_extraction_at": "2026-09-20T11:23:27.105364+00:00",
-  "needs_rerun": true,
+  "last_extraction_at": "2026-09-23T18:08:36.712761+00:00",
+  "needs_rerun": false,
+  "stale_reasons": [],
   "edges": [],
   "total": 55,
   "counts": {
@@ -238,7 +234,7 @@ The reference tab provides:
 | `Extracting...` button state | Shown while the POST is running. |
 | Last extraction timestamp | `state.last_extraction_at`, formatted by `formatTimestamp`. |
 | Last import timestamp | `state.last_import_at`, formatted by `formatTimestamp`. |
-| Stale warning | Shown when `state.needs_rerun` is true. |
+| Stale warning | Shown when `state.needs_rerun` is true, with each `state.stale_reasons` entry listed on its own line underneath. |
 | Success message | `Done. X edges created.` after a successful run. |
 | Counts row | Shows `Issue`, `Pull request`, `Document`, and `Total`. |
 | Results table | Shows all `state.edges`. |

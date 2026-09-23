@@ -16,10 +16,10 @@ from neo4j import GraphDatabase
 from reference_extraction import (
     PIPELINE_STATE_LABEL,
     load_extracted_edges,
-    needs_rerun,
     read_pipeline_state,
     run_extraction,
 )
+from pipeline_staleness import compute_staleness
 from topic_event_extraction import MissingApiKeyError, build_knowledge_layer, knowledge_state_payload
 from embedding_pass import build_embeddings, embedding_state_payload
 from architecture_layer import (
@@ -393,10 +393,12 @@ def api_graph():
 
 def reference_state_payload(session):
     state = session.execute_read(read_pipeline_state)
+    staleness = compute_staleness(state)["references"]
     return {
         "last_import_at": state["last_import_at"],
         "last_extraction_at": state["last_extraction_at"],
-        "needs_rerun": needs_rerun(state),
+        "needs_rerun": staleness["stale"],
+        "stale_reasons": staleness["reasons"],
     }
 
 

@@ -23,13 +23,10 @@ import hashlib
 import re
 from typing import Callable, Optional
 
-from reference_extraction import (
-    PIPELINE_STATE_ID,
-    PIPELINE_STATE_LABEL,
-    now_iso,
-    touch_pipeline_state,
-)
+from reference_extraction import now_iso, touch_pipeline_state
 from topic_event_extraction import MissingApiKeyError, require_openai_client
+from pipeline_staleness import compute_staleness
+from pipeline_staleness import read_pipeline_state as _read_full_pipeline_state
 
 EMBEDDING_VERSION = "embedding-v1"
 EMBEDDING_MODEL = "text-embedding-3-large"
@@ -234,27 +231,9 @@ def read_embedding_models_in_use(tx):
 
 
 def read_pipeline_state_for_embeddings(tx):
-    row = tx.run(f"""
-        MATCH (s:{PIPELINE_STATE_LABEL} {{id: $id}})
-        RETURN s.last_import_at AS last_import_at,
-               s.last_layer_build_at AS last_layer_build_at,
-               s.last_embedding_at AS last_embedding_at
-    """, {"id": PIPELINE_STATE_ID}).single()
-    if not row:
-        return {"last_import_at": None, "last_layer_build_at": None, "last_embedding_at": None}
-    return dict(row)
-
-
-def needs_embedding_rerun(state):
-    """True when an import or a knowledge-layer build happened since the last embedding run."""
-    if not state.get("last_embedding_at"):
-        return True
-    last_embedding_at = state["last_embedding_at"]
-    if state.get("last_import_at") and state["last_import_at"] > last_embedding_at:
-        return True
-    if state.get("last_layer_build_at") and state["last_layer_build_at"] > last_embedding_at:
-        return True
-    return False
+    # Reads every stage's timestamp (not just this layer's own upstream) so
+    # that staleness can be computed transitively. See `pipeline_staleness.py`.
+    return _read_full_pipeline_state(tx)
 
 
 def load_embedding_state(session):
@@ -266,6 +245,7 @@ def load_embedding_state(session):
 
     result = session.execute_read(_read)
     pipeline = result["pipeline"]
+    staleness = compute_staleness(pipeline)["embeddings"]
     return {
         "per_label": result["per_label"],
         "models_in_use": result["models_in_use"],
@@ -274,7 +254,10 @@ def load_embedding_state(session):
         "last_embedding_at": pipeline["last_embedding_at"],
         "last_import_at": pipeline["last_import_at"],
         "last_layer_build_at": pipeline["last_layer_build_at"],
-        "needs_rerun": needs_embedding_rerun(pipeline),
+        "last_architecture_build_at": pipeline["last_architecture_build_at"],
+        "last_causal_build_at": pipeline["last_causal_build_at"],
+        "needs_rerun": staleness["stale"],
+        "stale_reasons": staleness["reasons"],
     }
 
 

@@ -28,12 +28,9 @@ from typing import Literal, Optional
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from reference_extraction import (
-    PIPELINE_STATE_ID,
-    PIPELINE_STATE_LABEL,
-    now_iso,
-    touch_pipeline_state,
-)
+from reference_extraction import now_iso, touch_pipeline_state
+from pipeline_staleness import compute_staleness
+from pipeline_staleness import read_pipeline_state as _read_full_pipeline_state
 
 # `person_identity.py` lives in `viewer/`, not `backend/`. It is imported
 # rather than duplicated because Task 06 must call `resolve_person_key`, not
@@ -649,23 +646,9 @@ def write_caused(tx, topic_slug, link, generated_at):
 # ---------------------------------------------------------------------------
 
 def read_pipeline_state_full(tx):
-    row = tx.run(f"""
-        MATCH (s:{PIPELINE_STATE_LABEL} {{id: $id}})
-        RETURN s.last_import_at AS last_import_at, s.last_extraction_at AS last_extraction_at,
-               s.last_layer_build_at AS last_layer_build_at
-    """, {"id": PIPELINE_STATE_ID}).single()
-    if not row:
-        return {"last_import_at": None, "last_extraction_at": None, "last_layer_build_at": None}
-    return dict(row)
-
-
-def needs_layer_rerun(state):
-    """True when the reference layer changed since the last knowledge build, or none has run."""
-    if not state.get("last_layer_build_at"):
-        return True
-    if not state.get("last_extraction_at"):
-        return False
-    return state["last_extraction_at"] > state["last_layer_build_at"]
+    # Reads every stage's timestamp (not just this layer's own upstream) so
+    # that staleness can be computed transitively. See `pipeline_staleness.py`.
+    return _read_full_pipeline_state(tx)
 
 
 def load_knowledge_state(tx):
@@ -697,13 +680,15 @@ def load_knowledge_state(tx):
     """)]
 
     state = read_pipeline_state_full(tx)
+    staleness = compute_staleness(state)["knowledge"]
     return {
         "topics": topics,
         "events": events,
         "causal_links": causal_links,
         "last_extraction_at": state["last_extraction_at"],
         "last_layer_build_at": state["last_layer_build_at"],
-        "needs_layer_rerun": needs_layer_rerun(state),
+        "needs_layer_rerun": staleness["stale"],
+        "stale_reasons": staleness["reasons"],
     }
 
 

@@ -20,14 +20,15 @@ From `/api/causal`:
 | Field | Current value |
 | --- | --- |
 | Root causes | 3 |
-| Code contributions | 6 |
-| Affected components | 8 |
+| Code contributions | 5 |
+| Affected components | 10 |
 | Cross-topic links | 0 |
-| Within-topic links (`CAUSED`, read-only) | 7 |
-| `last_layer_build_at` | `2026-09-23T17:24:01.989315+00:00` |
-| `last_architecture_build_at` | `2026-09-23T17:22:40.434771+00:00` |
-| `last_causal_build_at` | `2026-09-23T17:25:27.631397+00:00` |
+| Within-topic links (`CAUSED`, read-only) | 6 |
+| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
+| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
+| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
 | `needs_rerun` | `false` |
+| `stale_reasons` | `[]` |
 
 0 cross-topic links is correct: the local dataset has exactly one `Topic`, so there is no second topic to link into.
 
@@ -35,9 +36,11 @@ Current root causes:
 
 | Name | Type | Components |
 | --- | --- | --- |
-| Fixed elapsed-time session expiry was used instead of inactivity-based validation | design_decision | Session validity policy |
-| Known client-endpoint difference was not acted on | process | Web session refresh endpoint, Mobile session refresh endpoint |
-| Session-policy implementation omitted the separate mobile refresh path | implementation_gap | Session validity policy, Web session refresh endpoint, Mobile session refresh endpoint |
+| Fixed-expiry design did not meet the administrator session policy | design_decision | Session lifecycle policy |
+| Known mobile endpoint difference was not followed up | process | Mobile session refresh endpoint |
+| Web-only refresh implementation left the mobile fixed-expiry path unchanged | implementation_gap | Session lifecycle policy, Web session refresh endpoint, Mobile session refresh endpoint |
+
+(Root cause names, component names, and exact counts vary between rebuilds since both the Architecture and Causal layers are LLM-derived and do not propose identical output every run.)
 
 ## Model and Configuration
 
@@ -122,11 +125,11 @@ CREATE CONSTRAINT root_cause_slug IF NOT EXISTS FOR (n:RootCause) REQUIRE n.slug
 | `last_architecture_build_at` | Architecture layer |
 | `last_causal_build_at` | Causal layer (this layer's own timestamp) |
 
-`needs_rerun` is `true` when `last_causal_build_at` is missing, or when `last_layer_build_at` or `last_architecture_build_at` is newer than it.
+Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `knowledge` and `architecture`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively.
 
 ## Backend API
 
-`GET /api/causal` returns pipeline timestamps, `needs_rerun`, `counts`, and the `root_causes`, `code_contributions`, `affected_components`, `cross_topic_links`, `within_topic_links` tables (the last read directly from the Knowledge layer's `CAUSED` relationships, read-only).
+`GET /api/causal` returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `root_causes`, `code_contributions`, `affected_components`, `cross_topic_links`, `within_topic_links` tables (the last read directly from the Knowledge layer's `CAUSED` relationships, read-only).
 
 `POST /api/causal/build` returns the same payload plus `built_at`, `deleted_relationships`, `deleted_nodes`, `calls`, `model`, `discarded_evidence`, `token_usage`.
 

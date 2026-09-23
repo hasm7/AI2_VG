@@ -17,16 +17,18 @@ From `/api/algorithms`:
 | Field | Current value |
 | --- | --- |
 | Communities | 2 |
-| Persons | 7 |
+| Persons | 5 |
 | Topics | 1 |
 | Components | 3 |
-| `last_architecture_build_at` | `2026-09-23T17:22:40.434771+00:00` |
-| `last_causal_build_at` | `2026-09-23T17:25:27.631397+00:00` |
-| `last_collaboration_build_at` | `2026-09-23T17:26:03.752708+00:00` |
-| `last_algorithms_run_at` | `2026-09-23T17:26:07.152902+00:00` |
+| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
+| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
+| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
+| `last_collaboration_build_at` | `2026-09-23T18:10:20.780808+00:00` |
+| `last_algorithms_run_at` | `2026-09-23T18:10:21.590196+00:00` |
 | `needs_rerun` | `false` |
+| `stale_reasons` | `[]` |
 
-The dataset has only 5 eligible persons, so these results exist but are not statistically meaningful — this is expected (see the work order, section 7).
+`counts.persons` and the `persons` table are scoped to eligible persons only (not `actor_type = "mailbox"`, not `identity_ambiguous = true`) — the same rule the Collaboration layer uses. The local dataset has 5 eligible persons out of 7 total, so these results exist but are not statistically meaningful — this is expected (see `NEW_LAYERS_WORK_ORDER.md`, section 7).
 
 Communities:
 
@@ -39,12 +41,14 @@ Bus factor:
 
 | Subject | Bus factor | Experts | Top expert |
 | --- | ---: | ---: | --- |
-| Mobile session refresh endpoint (Component) | 1 | 2 | Erik Nilsson |
-| Administrator session lifetime policy compliance (Topic) | 2 | 4 | Anna Lindqvist |
-| Session validity policy (Component) | 2 | 4 | Priya Raman |
-| Web session refresh endpoint (Component) | 2 | 3 | Anna Lindqvist |
+| Mobile session refresh endpoint (Component) | 1 | 3 | Erik Nilsson |
+| Administrator session lifetime policy (Topic) | 2 | 4 | Anna Berg |
+| Session lifecycle policy (Component) | 2 | 4 | Priya Raman |
+| Web session refresh endpoint (Component) | 2 | 3 | Priya Raman |
 
-Excluded persons (`Support`, `Anna`) never receive `collab_*`/`community_id` properties — their values stay `null`, which is expected since they have no `WORKS_WITH` edges to begin with.
+(Component and topic names vary between rebuilds since the Architecture and Knowledge layers are LLM-derived.)
+
+Excluded persons (`Support`, `Anna`) never appear in `counts.persons`, the `persons` table, or receive `collab_*`/`community_id` properties at all — this is expected since they are not eligible in the first place, not merely because they have no `WORKS_WITH` edges.
 
 ## Properties Written to Existing Nodes
 
@@ -102,16 +106,17 @@ CREATE CONSTRAINT community_key IF NOT EXISTS FOR (n:Community) REQUIRE n.commun
 
 | Property | Written by |
 | --- | --- |
+| `last_layer_build_at` | Knowledge layer |
 | `last_architecture_build_at` | Architecture layer |
 | `last_causal_build_at` | Causal layer |
 | `last_collaboration_build_at` | Collaboration layer |
 | `last_algorithms_run_at` | Graph algorithm layer (this layer's own timestamp) |
 
-`needs_rerun` is `true` when `last_algorithms_run_at` is missing, or when any of the three upstream timestamps is newer than it. Note this table intentionally does **not** include `last_layer_build_at` (Knowledge): a Knowledge-layer rebuild only makes this layer stale indirectly, once the Causal or Collaboration layers that actually depend on it are rebuilt and produce a newer timestamp.
+Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `knowledge`, `architecture`, `causal`, and `collaboration` — Knowledge is a direct upstream stage here, not merely an indirect one reached through Causal/Collaboration. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set. `last_layer_build_at` is also included in the `/api/algorithms` payload so the frontend can show "Last knowledge build" alongside the other upstream timestamps.
 
 ## Backend API
 
-`GET /api/algorithms` returns pipeline timestamps, `needs_rerun`, `counts`, and the `persons` (sorted by `collab_betweenness` descending), `communities`, `bus_factor` (sorted by `bus_factor` ascending then name), `components` tables.
+`GET /api/algorithms` returns pipeline timestamps (including `last_layer_build_at`), `needs_rerun`, `stale_reasons`, `counts`, and the `persons` (sorted by `collab_betweenness` descending), `communities`, `bus_factor` (sorted by `bus_factor` ascending then name), `components` tables.
 
 `POST /api/algorithms/run` returns the same payload plus `run_at`, `deleted_relationships`, `deleted_nodes`.
 
@@ -119,7 +124,7 @@ Errors: `409` if Collaboration has not run; `500` otherwise. Requires the `netwo
 
 ## Frontend UI
 
-Tab `Graph algorithms` inside `BuildGraphLayersPanel`, rendered by `GraphAlgorithmsPanel`, sixth of seven inner tabs. Button text `Run graph algorithms` / `Running graph algorithms...`. Tables, in order: `Persons`, `Communities`, `Bus factor`, `Components`.
+Tab `Graph algorithms` inside `BuildGraphLayersPanel`, rendered by `GraphAlgorithmsPanel`, sixth of seven inner tabs. Button text `Run graph algorithms` / `Running graph algorithms...`. Upstream timestamps shown: Last knowledge build, Last architecture build, Last causal build, Last collaboration build. Tables, in order: `Persons`, `Communities`, `Bus factor`, `Components`.
 
 ## Graph Visualization Filter
 

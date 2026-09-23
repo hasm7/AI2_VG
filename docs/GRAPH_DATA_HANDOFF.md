@@ -15,8 +15,8 @@ Current node counts:
 | `Component` | 3 |
 | `Document` | 2 |
 | `DocumentVersion` | 3 |
-| `Event` | 14 |
-| `Expertise` | 13 |
+| `Event` | 10 |
+| `Expertise` | 14 |
 | `File` | 4 |
 | `Issue` | 2 |
 | `IssueComment` | 5 |
@@ -39,32 +39,32 @@ Current relationship counts:
 | Type | Count |
 | --- | ---: |
 | `ABOUT_TOPIC` | 2 |
-| `ACTED_IN_EVENT` | 22 |
-| `AFFECTED_COMPONENT` | 8 |
+| `ACTED_IN_EVENT` | 19 |
+| `AFFECTED_COMPONENT` | 10 |
 | `AUTHORED_DOCUMENT` | 2 |
 | `AUTHORED_DOCUMENT_VERSION` | 3 |
 | `AUTHORED_PR` | 2 |
-| `CAUSED` | 7 |
+| `CAUSED` | 6 |
 | `CHANGED_ISSUE_VERSION` | 7 |
 | `COMMENTED_ON_ISSUE` | 4 |
-| `COMPONENT_EVIDENCED_BY` | 15 |
+| `COMPONENT_EVIDENCED_BY` | 12 |
 | `CONTAINS_FILE` | 4 |
 | `CONTAINS_MODULE` | 2 |
-| `CONTRIBUTED_TO` | 6 |
+| `CONTRIBUTED_TO` | 5 |
 | `CREATED_ISSUE` | 2 |
 | `DEPENDS_ON` | 2 |
 | `DERIVED_FROM` | 51 |
-| `EVENT_OF_TOPIC` | 14 |
-| `EVIDENCED_BY` | 37 |
-| `EXPERTISE_EVIDENCED_BY` | 92 |
-| `EXPERTISE_IN` | 13 |
+| `EVENT_OF_TOPIC` | 10 |
+| `EVIDENCED_BY` | 29 |
+| `EXPERTISE_EVIDENCED_BY` | 93 |
+| `EXPERTISE_IN` | 14 |
 | `HAS_CODE_CHANGE` | 7 |
 | `HAS_DOCUMENT_VERSION` | 3 |
-| `HAS_EXPERTISE` | 13 |
+| `HAS_EXPERTISE` | 14 |
 | `HAS_ISSUE_COMMENT` | 5 |
 | `HAS_ISSUE_VERSION` | 7 |
 | `HAS_PR_REVIEW` | 6 |
-| `HAS_ROOT_CAUSE` | 9 |
+| `HAS_ROOT_CAUSE` | 6 |
 | `HAS_TEAMS_TRANSCRIPT_SEGMENT` | 9 |
 | `IMPLEMENTED_IN` | 3 |
 | `MAIL_RECIPIENT` | 8 |
@@ -81,8 +81,8 @@ Current relationship counts:
 | `REPLY_TO_ISSUE_COMMENT` | 1 |
 | `REPLY_TO_PR_REVIEW` | 1 |
 | `REVIEWED_PR` | 4 |
-| `ROOT_CAUSE_EVIDENCED_BY` | 19 |
-| `ROOT_CAUSE_IN_COMPONENT` | 6 |
+| `ROOT_CAUSE_EVIDENCED_BY` | 15 |
+| `ROOT_CAUSE_IN_COMPONENT` | 5 |
 | `SENT_MAIL` | 4 |
 | `SENT_SLACK_MESSAGE` | 12 |
 | `SLACK_THREAD_REPLY_TO` | 2 |
@@ -91,7 +91,7 @@ Current relationship counts:
 | `WROTE_ISSUE_COMMENT` | 5 |
 | `WROTE_PR_REVIEW` | 6 |
 
-(`Event`/`EVENT_OF_TOPIC`/`CAUSED` counts differ slightly from earlier snapshots because the Knowledge layer was rebuilt during this work, which is expected LLM-run-to-run variation, not a bug.)
+(`Event`, `EVENT_OF_TOPIC`, `CAUSED`, and the counts of everything downstream of the Knowledge layer vary slightly between runs, because the LLM does not propose exactly the same events every time. This snapshot is from the full pipeline rebuild performed for the staleness follow-up work order.)
 
 ## Source of Truth and Build Order
 
@@ -125,7 +125,78 @@ Steps 4-7 are each gated on their prerequisites (see each layer's own handoff do
 
 `PipelineState` is excluded from `/api/graph` visualization.
 
+Current `PipelineState` snapshot (after a full rebuild of every stage, in order):
+
+| Property | Value |
+| --- | --- |
+| `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
+| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
+| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
+| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
+| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
+| `last_collaboration_build_at` | `2026-09-23T18:10:20.780808+00:00` |
+| `last_algorithms_run_at` | `2026-09-23T18:10:21.590196+00:00` |
+| `last_embedding_at` | `2026-09-23T18:10:21.842346+00:00` |
+
 See `ARCHITECTURE_LAYER_HANDOFF.md`, `CAUSAL_LAYER_HANDOFF.md`, `COLLABORATION_LAYER_HANDOFF.md`, and `GRAPH_ALGORITHMS_HANDOFF.md` for the full detail on each of the four newer layers.
+
+## Pipeline Staleness
+
+Implemented in `backend/pipeline_staleness.py`. This is the single place that computes whether a layer is stale (`needs_rerun` / `needs_layer_rerun`) and why. Every layer's `GET` and `POST` response reads its staleness from here instead of computing it locally.
+
+A stage is stale not only when its *direct* upstream has moved on, but also when that upstream is itself stale — staleness propagates transitively through the whole pipeline. For example, if Reference extraction is stale, Architecture, Causal, Collaboration, Algorithms, and Embeddings are all stale too, even though only Architecture and Embeddings list References as a *direct* upstream.
+
+Three constants define the pipeline:
+
+```python
+TIMESTAMP_BY_STAGE = {
+    "import": "last_import_at",
+    "references": "last_extraction_at",
+    "knowledge": "last_layer_build_at",
+    "architecture": "last_architecture_build_at",
+    "causal": "last_causal_build_at",
+    "collaboration": "last_collaboration_build_at",
+    "algorithms": "last_algorithms_run_at",
+    "embeddings": "last_embedding_at",
+}
+
+UPSTREAM_BY_STAGE = {
+    "references": ["import"],
+    "knowledge": ["references"],
+    "architecture": ["import", "references"],
+    "causal": ["knowledge", "architecture"],
+    "collaboration": ["import", "knowledge", "architecture", "causal"],
+    "algorithms": ["knowledge", "architecture", "causal", "collaboration"],
+    "embeddings": ["import", "knowledge", "architecture", "causal"],
+}
+
+STAGE_LABELS = {
+    "import": "Import",
+    "references": "Reference extraction",
+    "knowledge": "Knowledge layer",
+    "architecture": "Architecture layer",
+    "causal": "Causal layer",
+    "collaboration": "Collaboration layer",
+    "algorithms": "Graph algorithms",
+    "embeddings": "Embeddings",
+}
+```
+
+`import` is a source, not a layer; it never has a `stale` status of its own, only a timestamp other stages compare against.
+
+`compute_staleness(pipeline_state)` returns `{stage: {"stale": bool, "reasons": [str]}}` for every stage except `"import"`, evaluated in `UPSTREAM_BY_STAGE` order (which is already dependency order, so every stage's upstream stages are always resolved before it):
+
+1. If a stage's own timestamp is missing, it is stale with the single reason `"Never built."`, and no further rules are checked for it.
+2. Otherwise, for each of its upstream stages `U`, in the order listed in `UPSTREAM_BY_STAGE`:
+   - if `U`'s timestamp exists and is newer than the stage's own timestamp, add the reason `"<label of U> was rebuilt after this layer."`;
+   - if `U` is not `import` and `U` is itself stale, add the reason `"<label of U> is stale."`.
+3. The stage is stale if it collected at least one reason.
+
+A missing upstream timestamp is always covered by rule 1 turning that upstream stale, which in turn is picked up by the second bullet of rule 2 as `"<label> is stale."` — there is no separate case for "upstream missing but not stale."
+
+Every layer's state payload includes both the boolean field (named `needs_rerun`, except the Knowledge layer's `needs_layer_rerun`, for backward compatibility) and a `stale_reasons: string[]` field with the human-readable reasons, in the order `compute_staleness` produced them. The frontend renders each reason on its own line under the stale warning.
+
+`backend/pipeline_staleness.py` also owns the one `read_pipeline_state(tx)` query that reads all eight timestamps at once; every layer module's own `read_pipeline_state` now delegates to it, so prerequisite checks (the `409` responses) and staleness computation always see a consistent snapshot of `PipelineState`.
 
 ## SQL to Graph Model
 
@@ -471,13 +542,15 @@ This layer builds issue-centered bundles and uses the OpenAI Responses API with 
 Current graph has:
 
 - 1 `Topic`
-- 11 `Event`
+- 10 `Event`
 - 2 `ABOUT_TOPIC`
 - 51 `DERIVED_FROM`
-- 11 `EVENT_OF_TOPIC`
-- 35 `EVIDENCED_BY`
-- 20 `ACTED_IN_EVENT`
-- 5 `CAUSED`
+- 10 `EVENT_OF_TOPIC`
+- 29 `EVIDENCED_BY`
+- 19 `ACTED_IN_EVENT`
+- 6 `CAUSED`
+
+(These counts vary slightly run to run; see the note under the node/relationship count tables above.)
 
 Model constants in code:
 

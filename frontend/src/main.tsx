@@ -50,6 +50,7 @@ type ReferenceState = {
   last_import_at: string | null;
   last_extraction_at: string | null;
   needs_rerun: boolean;
+  stale_reasons: string[];
   error?: string;
 };
 
@@ -100,6 +101,7 @@ type KnowledgeState = {
   last_extraction_at: string | null;
   last_layer_build_at: string | null;
   needs_layer_rerun: boolean;
+  stale_reasons: string[];
   calls?: number;
   model?: string;
   discarded_evidence?: number;
@@ -142,7 +144,10 @@ type EmbeddingState = {
   last_embedding_at: string | null;
   last_import_at: string | null;
   last_layer_build_at: string | null;
+  last_architecture_build_at?: string | null;
+  last_causal_build_at?: string | null;
   needs_rerun: boolean;
+  stale_reasons: string[];
   run_at?: string;
   forced?: boolean;
   model?: string;
@@ -203,6 +208,7 @@ type ArchitectureState = {
   last_extraction_at: string | null;
   last_architecture_build_at: string | null;
   needs_rerun: boolean;
+  stale_reasons: string[];
   counts: ArchitectureCounts;
   components: ArchitectureComponent[];
   dependencies: ArchitectureDependency[];
@@ -280,6 +286,7 @@ type CausalState = {
   last_architecture_build_at: string | null;
   last_causal_build_at: string | null;
   needs_rerun: boolean;
+  stale_reasons: string[];
   counts: CausalCounts;
   root_causes: CausalRootCause[];
   code_contributions: CausalCodeContribution[];
@@ -336,6 +343,7 @@ type CollaborationState = {
   last_causal_build_at: string | null;
   last_collaboration_build_at: string | null;
   needs_rerun: boolean;
+  stale_reasons: string[];
   counts: CollaborationCounts;
   expertise: CollaborationExpertise[];
   works_with: CollaborationWorksWith[];
@@ -383,11 +391,13 @@ type AlgorithmsComponent = {
 };
 
 type AlgorithmsState = {
+  last_layer_build_at: string | null;
   last_architecture_build_at: string | null;
   last_causal_build_at: string | null;
   last_collaboration_build_at: string | null;
   last_algorithms_run_at: string | null;
   needs_rerun: boolean;
+  stale_reasons: string[];
   counts: AlgorithmsCounts;
   persons: AlgorithmsPerson[];
   communities: AlgorithmsCommunity[];
@@ -1640,7 +1650,14 @@ function ReferenceExtractionPanel() {
           <span>Last extraction: {formatTimestamp(state?.last_extraction_at ?? null)}</span>
           <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
           {state?.needs_rerun ? (
-            <span className="reference-stale">An import has happened since the last extraction. Run it again.</span>
+            <span className="reference-stale">
+              An import has happened since the last extraction. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
         </div>
       </div>
@@ -1759,7 +1776,14 @@ function KnowledgeLayerPanel() {
           <span>Last reference extraction: {formatTimestamp(state?.last_extraction_at ?? null)}</span>
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           {state?.needs_layer_rerun ? (
-            <span className="reference-stale">References have changed since the last build. Run it again.</span>
+            <span className="reference-stale">
+              References have changed since the last build. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
         </div>
       </div>
@@ -1940,7 +1964,14 @@ function ArchitectureLayerPanel() {
           <span>Last reference extraction: {formatTimestamp(state?.last_extraction_at ?? null)}</span>
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
           {state?.needs_rerun ? (
-            <span className="reference-stale">Upstream data has changed since the last build. Run it again.</span>
+            <span className="reference-stale">
+              Upstream data has changed since the last build. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
         </div>
       </div>
@@ -2134,7 +2165,14 @@ function CausalLayerPanel() {
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
           <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
           {state?.needs_rerun ? (
-            <span className="reference-stale">Upstream data has changed since the last build. Run it again.</span>
+            <span className="reference-stale">
+              Upstream data has changed since the last build. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
         </div>
       </div>
@@ -2360,7 +2398,14 @@ function CollaborationLayerPanel() {
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
           <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
           {state?.needs_rerun ? (
-            <span className="reference-stale">Upstream data has changed since the last build. Run it again.</span>
+            <span className="reference-stale">
+              Upstream data has changed since the last build. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
         </div>
       </div>
@@ -2520,12 +2565,20 @@ function GraphAlgorithmsPanel() {
           {isRunning ? "Running graph algorithms..." : "Run graph algorithms"}
         </button>
         <div className="reference-status">
+          <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
           <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
           <span>Last collaboration build: {formatTimestamp(state?.last_collaboration_build_at ?? null)}</span>
           <span>Last algorithms run: {formatTimestamp(state?.last_algorithms_run_at ?? null)}</span>
           {state?.needs_rerun ? (
-            <span className="reference-stale">Upstream data has changed since the last run. Run it again.</span>
+            <span className="reference-stale">
+              Upstream data has changed since the last run. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
         </div>
       </div>
@@ -2744,7 +2797,14 @@ function EmbeddingPanel() {
           <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           {state?.needs_rerun ? (
-            <span className="reference-stale">Import or knowledge build happened since the last embedding run. Run it again.</span>
+            <span className="reference-stale">
+              Import or knowledge build happened since the last embedding run. Run it again.
+              <ul>
+                {state.stale_reasons.map((reason, index) => (
+                  <li key={index}>{reason}</li>
+                ))}
+              </ul>
+            </span>
           ) : null}
           {mixedModels ? (
             <span className="reference-stale">Mixed embedding models in the graph: {state?.models_in_use.join(", ")}.</span>

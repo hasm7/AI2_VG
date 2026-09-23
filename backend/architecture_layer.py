@@ -24,13 +24,10 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
-from reference_extraction import (
-    PIPELINE_STATE_ID,
-    PIPELINE_STATE_LABEL,
-    now_iso,
-    touch_pipeline_state,
-)
+from reference_extraction import now_iso, touch_pipeline_state
 from topic_event_extraction import require_openai_client
+from pipeline_staleness import compute_staleness
+from pipeline_staleness import read_pipeline_state as _read_full_pipeline_state
 
 OPENAI_MODEL = "gpt-5.6-terra"
 OPENAI_REASONING_EFFORT = "medium"
@@ -563,25 +560,9 @@ def delete_generated_nodes(tx):
 # ---------------------------------------------------------------------------
 
 def read_pipeline_state(tx):
-    row = tx.run(f"""
-        MATCH (s:{PIPELINE_STATE_LABEL} {{id: $id}})
-        RETURN s.last_import_at AS last_import_at, s.last_extraction_at AS last_extraction_at,
-               s.last_architecture_build_at AS last_architecture_build_at
-    """, {"id": PIPELINE_STATE_ID}).single()
-    if not row:
-        return {"last_import_at": None, "last_extraction_at": None, "last_architecture_build_at": None}
-    return dict(row)
-
-
-def needs_architecture_rerun(state):
-    own = state.get("last_architecture_build_at")
-    if not own:
-        return True
-    for key in ("last_import_at", "last_extraction_at"):
-        upstream = state.get(key)
-        if upstream and upstream > own:
-            return True
-    return False
+    # Reads every stage's timestamp (not just this layer's own upstream) so
+    # that staleness can be computed transitively. See `pipeline_staleness.py`.
+    return _read_full_pipeline_state(tx)
 
 
 def load_counts(tx):
@@ -642,11 +623,13 @@ def load_architecture_state(session):
 
     result = session.execute_read(_read)
     state = result["state"]
+    staleness = compute_staleness(state)["architecture"]
     return {
         "last_import_at": state["last_import_at"],
         "last_extraction_at": state["last_extraction_at"],
         "last_architecture_build_at": state["last_architecture_build_at"],
-        "needs_rerun": needs_architecture_rerun(state),
+        "needs_rerun": staleness["stale"],
+        "stale_reasons": staleness["reasons"],
         "counts": result["counts"],
         "components": result["components"],
         "dependencies": result["dependencies"],
