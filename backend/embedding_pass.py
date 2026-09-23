@@ -110,6 +110,14 @@ def _event_text(props):
     return _build_text([(None, props.get("name")), (None, props.get("summary"))])
 
 
+def _component_text(props):
+    return _build_text([(None, props.get("name")), (None, props.get("component_type")), (None, props.get("summary"))])
+
+
+def _root_cause_text(props):
+    return _build_text([(None, props.get("name")), (None, props.get("cause_type")), (None, props.get("summary"))])
+
+
 class LabelConfig:
     def __init__(self, label: str, key_props: list[str], text_fn: Callable[[dict], str]):
         self.label = label
@@ -152,6 +160,8 @@ LABELS = [
     LabelConfig("PullRequest", ["source_instance", "repository", "pr_number"], _pull_request_text),
     LabelConfig("Topic", ["slug"], _topic_text),
     LabelConfig("Event", ["topic_slug", "slug"], _event_text),
+    LabelConfig("Component", ["source_instance", "repository", "slug"], _component_text),
+    LabelConfig("RootCause", ["slug"], _root_cause_text),
 ]
 
 FULLTEXT_ENTITY_LABELS = ["Person", "Issue", "Document", "PullRequest", "Topic"]

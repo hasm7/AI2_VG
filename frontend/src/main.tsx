@@ -20,7 +20,19 @@ type GraphRelationship = {
   properties: Record<string, string>;
 };
 
-type DataSource = "Mail" | "Slack" | "Teams" | "Issues" | "Docs" | "PRs" | "References" | "Knowledge";
+type DataSource =
+  | "Mail"
+  | "Slack"
+  | "Teams"
+  | "Issues"
+  | "Docs"
+  | "PRs"
+  | "References"
+  | "Knowledge"
+  | "Architecture"
+  | "Causal"
+  | "Collaboration"
+  | "Algorithms";
 
 type ReferenceEdge = {
   source_label: string;
@@ -146,6 +158,247 @@ type EmbeddingState = {
   error?: string;
 };
 
+type ArchitectureTokenUsage = {
+  input_tokens: number;
+  output_tokens: number;
+};
+
+type ArchitectureCounts = {
+  repositories: number;
+  modules: number;
+  files: number;
+  components: number;
+  dependencies: number;
+};
+
+type ArchitectureComponent = {
+  repository: string;
+  slug: string;
+  name: string;
+  component_type: string;
+  summary: string;
+  files: string[];
+  evidence: string[];
+};
+
+type ArchitectureDependency = {
+  from_name: string;
+  to_name: string;
+  dependency_type: string;
+  explanation: string;
+  evidence: string[];
+};
+
+type ArchitectureFile = {
+  repository: string;
+  module: string;
+  path: string;
+  change_count: number;
+  modified_by: string[];
+  components: string[];
+};
+
+type ArchitectureState = {
+  last_import_at: string | null;
+  last_extraction_at: string | null;
+  last_architecture_build_at: string | null;
+  needs_rerun: boolean;
+  counts: ArchitectureCounts;
+  components: ArchitectureComponent[];
+  dependencies: ArchitectureDependency[];
+  files: ArchitectureFile[];
+  built_at?: string;
+  deleted_relationships?: number;
+  deleted_nodes?: number;
+  calls?: number;
+  model?: string;
+  discarded_evidence?: number;
+  discarded_file_paths?: number;
+  token_usage?: ArchitectureTokenUsage | null;
+  error?: string;
+};
+
+type CausalTokenUsage = {
+  input_tokens: number;
+  output_tokens: number;
+};
+
+type CausalCounts = {
+  root_causes: number;
+  code_contributions: number;
+  affected_components: number;
+  cross_topic_links: number;
+  within_topic_links: number;
+};
+
+type CausalRootCause = {
+  slug: string;
+  name: string;
+  cause_type: string;
+  summary: string;
+  events: string[];
+  components: string[];
+  evidence: string[];
+};
+
+type CausalCodeContribution = {
+  code_change: string;
+  file_path: string;
+  event_name: string;
+  topic_name: string;
+  contribution_type: string;
+  explanation: string;
+  evidence: string[];
+};
+
+type CausalAffectedComponent = {
+  event_name: string;
+  topic_name: string;
+  component_name: string;
+  explanation: string;
+  evidence: string[];
+};
+
+type CausalCrossTopicLink = {
+  cause_name: string;
+  cause_topic: string;
+  effect_name: string;
+  effect_topic: string;
+  explanation: string;
+  evidence: string[];
+};
+
+type CausalWithinTopicLink = {
+  topic_name: string;
+  cause_name: string;
+  effect_name: string;
+  explanation: string;
+};
+
+type CausalState = {
+  last_layer_build_at: string | null;
+  last_architecture_build_at: string | null;
+  last_causal_build_at: string | null;
+  needs_rerun: boolean;
+  counts: CausalCounts;
+  root_causes: CausalRootCause[];
+  code_contributions: CausalCodeContribution[];
+  affected_components: CausalAffectedComponent[];
+  cross_topic_links: CausalCrossTopicLink[];
+  within_topic_links: CausalWithinTopicLink[];
+  built_at?: string;
+  deleted_relationships?: number;
+  deleted_nodes?: number;
+  calls?: number;
+  model?: string;
+  discarded_evidence?: number;
+  token_usage?: CausalTokenUsage | null;
+  error?: string;
+};
+
+type CollaborationCounts = {
+  expertise: number;
+  persons_with_expertise: number;
+  works_with_pairs: number;
+  excluded_persons: number;
+};
+
+type CollaborationExpertise = {
+  person_name: string;
+  subject_label: string;
+  subject_name: string;
+  score: number;
+  share: number;
+  rank: number;
+  activity_count: number;
+  first_activity_at: string | null;
+  last_activity_at: string | null;
+};
+
+type CollaborationWorksWith = {
+  person_a: string;
+  person_b: string;
+  weight: number;
+  work_item_types: string[];
+  shared_work_items: string[];
+};
+
+type CollaborationExcludedPerson = {
+  person_name: string;
+  person_key: string;
+  reason: string;
+};
+
+type CollaborationState = {
+  last_import_at: string | null;
+  last_layer_build_at: string | null;
+  last_architecture_build_at: string | null;
+  last_causal_build_at: string | null;
+  last_collaboration_build_at: string | null;
+  needs_rerun: boolean;
+  counts: CollaborationCounts;
+  expertise: CollaborationExpertise[];
+  works_with: CollaborationWorksWith[];
+  excluded_persons: CollaborationExcludedPerson[];
+  built_at?: string;
+  deleted_relationships?: number;
+  deleted_nodes?: number;
+  error?: string;
+};
+
+type AlgorithmsCounts = {
+  communities: number;
+  persons: number;
+  topics: number;
+  components: number;
+};
+
+type AlgorithmsPerson = {
+  name: string;
+  collab_weighted_degree: number | null;
+  collab_betweenness: number | null;
+  community_id: string | null;
+};
+
+type AlgorithmsCommunity = {
+  community_id: string;
+  size: number;
+  members: string[];
+};
+
+type AlgorithmsBusFactor = {
+  subject_label: string;
+  subject_name: string;
+  bus_factor: number;
+  expert_count: number;
+  top_expert: string | null;
+};
+
+type AlgorithmsComponent = {
+  name: string;
+  depends_on_count: number | null;
+  depended_on_by_count: number | null;
+  affected_event_count: number | null;
+  bus_factor: number | null;
+};
+
+type AlgorithmsState = {
+  last_architecture_build_at: string | null;
+  last_causal_build_at: string | null;
+  last_collaboration_build_at: string | null;
+  last_algorithms_run_at: string | null;
+  needs_rerun: boolean;
+  counts: AlgorithmsCounts;
+  persons: AlgorithmsPerson[];
+  communities: AlgorithmsCommunity[];
+  bus_factor: AlgorithmsBusFactor[];
+  components: AlgorithmsComponent[];
+  run_at?: string;
+  deleted_relationships?: number;
+  deleted_nodes?: number;
+  error?: string;
+};
+
 type GraphViewHandle = {
   selectNodeByDisplayName: (type: string, displayName: string) => void;
 };
@@ -197,7 +450,21 @@ type ViewerStartResponse = {
   error?: string;
 };
 
-const dataSources: Array<DataSource | "All"> = ["All", "Mail", "Slack", "Teams", "Issues", "Docs", "PRs", "References", "Knowledge"];
+const dataSources: Array<DataSource | "All"> = [
+  "All",
+  "Mail",
+  "Slack",
+  "Teams",
+  "Issues",
+  "Docs",
+  "PRs",
+  "References",
+  "Knowledge",
+  "Architecture",
+  "Causal",
+  "Collaboration",
+  "Algorithms",
+];
 const graphApiUrl = "/api/graph";
 const nodeTypeOrder = [
   "Person",
@@ -231,6 +498,13 @@ const nodeColors: Record<string, string> = {
   PullRequest: "#6366f1",
   PullRequestReview: "#818cf8",
   CodeChange: "#8b5cf6",
+  Repository: "#eab308",
+  Module: "#fb923c",
+  File: "#fbbf24",
+  Component: "#34d399",
+  RootCause: "#f43f5e",
+  Expertise: "#22d3ee",
+  Community: "#a3e635",
 };
 
 const fallbackNodeColors = [
@@ -1602,6 +1876,770 @@ function KnowledgeLayerPanel() {
   );
 }
 
+function ArchitectureLayerPanel() {
+  const [state, setState] = useState<ArchitectureState | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [justRan, setJustRan] = useState(false);
+
+  const loadState = async () => {
+    try {
+      const response = await fetch("/api/architecture");
+      const data = (await response.json()) as ArchitectureState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read the architecture layer.");
+      }
+      setState(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read the architecture layer.");
+    }
+  };
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  const runBuild = async () => {
+    setError("");
+    setIsRunning(true);
+    setJustRan(false);
+
+    try {
+      const response = await fetch("/api/architecture/build", { method: "POST" });
+      const data = (await response.json()) as ArchitectureState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Build failed.");
+      }
+      setState(data);
+      setJustRan(true);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Build failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const components = state?.components ?? [];
+  const dependencies = state?.dependencies ?? [];
+  const files = state?.files ?? [];
+  const counts = state?.counts;
+
+  return (
+    <div className="knowledge-panel">
+      <div className="reference-actions">
+        <button
+          className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
+          type="button"
+          disabled={isRunning}
+          onClick={runBuild}
+        >
+          {isRunning ? "Building architecture layer..." : "Build architecture layer"}
+        </button>
+        <div className="reference-status">
+          <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
+          <span>Last reference extraction: {formatTimestamp(state?.last_extraction_at ?? null)}</span>
+          <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
+          {state?.needs_rerun ? (
+            <span className="reference-stale">Upstream data has changed since the last build. Run it again.</span>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+      {justRan && !error ? (
+        <p className="reference-success">
+          Done. {components.length} components, {dependencies.length} dependencies, {files.length} files.
+        </p>
+      ) : null}
+
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">Repositories: <strong>{counts.repositories}</strong></span>
+          <span className="reference-count">Modules: <strong>{counts.modules}</strong></span>
+          <span className="reference-count">Files: <strong>{counts.files}</strong></span>
+          <span className="reference-count">Components: <strong>{counts.components}</strong></span>
+          <span className="reference-count">Dependencies: <strong>{counts.dependencies}</strong></span>
+        </div>
+      ) : null}
+
+      {justRan && !error ? (
+        <div className="reference-counts">
+          <span className="reference-count">Model: <strong>{state?.model ?? "-"}</strong></span>
+          <span className="reference-count">Calls: <strong>{state?.calls ?? 0}</strong></span>
+          <span className="reference-count">
+            Tokens:{" "}
+            <strong>
+              {state?.token_usage ? `${state.token_usage.input_tokens} in / ${state.token_usage.output_tokens} out` : "n/a"}
+            </strong>
+          </span>
+          <span className="reference-count">Discarded evidence: <strong>{state?.discarded_evidence ?? 0}</strong></span>
+          <span className="reference-count">Discarded file paths: <strong>{state?.discarded_file_paths ?? 0}</strong></span>
+        </div>
+      ) : null}
+
+      {components.length === 0 ? (
+        <p className="reference-empty">No architecture layer yet. Press the button to build it.</p>
+      ) : (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">Components</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Repository</th>
+                  <th>Component</th>
+                  <th>Type</th>
+                  <th>Summary</th>
+                  <th>Files</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {components.map((component) => (
+                  <tr key={`${component.repository}-${component.slug}`}>
+                    <td>{component.repository}</td>
+                    <td>{component.name}</td>
+                    <td>{component.component_type}</td>
+                    <td>{component.summary}</td>
+                    <td>{component.files.join(", ")}</td>
+                    <td>{component.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Dependencies</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Type</th>
+                  <th>Explanation</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dependencies.map((dependency, index) => (
+                  <tr key={`${dependency.from_name}-${dependency.to_name}-${index}`}>
+                    <td>{dependency.from_name}</td>
+                    <td>{dependency.to_name}</td>
+                    <td>{dependency.dependency_type}</td>
+                    <td>{dependency.explanation}</td>
+                    <td>{dependency.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Files</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Repository</th>
+                  <th>Module</th>
+                  <th>File</th>
+                  <th>Changes</th>
+                  <th>Modified by</th>
+                  <th>Components</th>
+                </tr>
+              </thead>
+              <tbody>
+                {files.map((file) => (
+                  <tr key={`${file.repository}-${file.path}`}>
+                    <td>{file.repository}</td>
+                    <td>{file.module}</td>
+                    <td>{file.path}</td>
+                    <td>{file.change_count}</td>
+                    <td>{file.modified_by.join(", ")}</td>
+                    <td>{file.components.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CausalLayerPanel() {
+  const [state, setState] = useState<CausalState | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [justRan, setJustRan] = useState(false);
+
+  const loadState = async () => {
+    try {
+      const response = await fetch("/api/causal");
+      const data = (await response.json()) as CausalState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read the causal layer.");
+      }
+      setState(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read the causal layer.");
+    }
+  };
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  const runBuild = async () => {
+    setError("");
+    setIsRunning(true);
+    setJustRan(false);
+
+    try {
+      const response = await fetch("/api/causal/build", { method: "POST" });
+      const data = (await response.json()) as CausalState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Build failed.");
+      }
+      setState(data);
+      setJustRan(true);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Build failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const rootCauses = state?.root_causes ?? [];
+  const codeContributions = state?.code_contributions ?? [];
+  const affectedComponents = state?.affected_components ?? [];
+  const crossTopicLinks = state?.cross_topic_links ?? [];
+  const withinTopicLinks = state?.within_topic_links ?? [];
+  const counts = state?.counts;
+
+  return (
+    <div className="knowledge-panel">
+      <div className="reference-actions">
+        <button
+          className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
+          type="button"
+          disabled={isRunning}
+          onClick={runBuild}
+        >
+          {isRunning ? "Building causal layer..." : "Build causal layer"}
+        </button>
+        <div className="reference-status">
+          <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
+          <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
+          <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          {state?.needs_rerun ? (
+            <span className="reference-stale">Upstream data has changed since the last build. Run it again.</span>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+      {justRan && !error ? (
+        <p className="reference-success">
+          Done. {rootCauses.length} root causes, {codeContributions.length} code contributions,{" "}
+          {affectedComponents.length} affected components, {crossTopicLinks.length} cross-topic links.
+        </p>
+      ) : null}
+
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">Root causes: <strong>{counts.root_causes}</strong></span>
+          <span className="reference-count">Code contributions: <strong>{counts.code_contributions}</strong></span>
+          <span className="reference-count">Affected components: <strong>{counts.affected_components}</strong></span>
+          <span className="reference-count">Cross-topic links: <strong>{counts.cross_topic_links}</strong></span>
+          <span className="reference-count">Within-topic links: <strong>{counts.within_topic_links}</strong></span>
+        </div>
+      ) : null}
+
+      {justRan && !error ? (
+        <div className="reference-counts">
+          <span className="reference-count">Model: <strong>{state?.model ?? "-"}</strong></span>
+          <span className="reference-count">Calls: <strong>{state?.calls ?? 0}</strong></span>
+          <span className="reference-count">
+            Tokens:{" "}
+            <strong>
+              {state?.token_usage ? `${state.token_usage.input_tokens} in / ${state.token_usage.output_tokens} out` : "n/a"}
+            </strong>
+          </span>
+          <span className="reference-count">Discarded evidence: <strong>{state?.discarded_evidence ?? 0}</strong></span>
+        </div>
+      ) : null}
+
+      {rootCauses.length === 0 && codeContributions.length === 0 && affectedComponents.length === 0
+      && crossTopicLinks.length === 0 && withinTopicLinks.length === 0 ? (
+        <p className="reference-empty">No causal layer yet. Press the button to build it.</p>
+      ) : (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">Root causes</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Name</th><th>Type</th><th>Summary</th><th>Explains events</th><th>Components</th><th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rootCauses.map((rc) => (
+                  <tr key={rc.slug}>
+                    <td>{rc.name}</td>
+                    <td>{rc.cause_type}</td>
+                    <td>{rc.summary}</td>
+                    <td>{rc.events.join(", ")}</td>
+                    <td>{rc.components.join(", ")}</td>
+                    <td>{rc.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Code contributions</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Code change</th><th>File</th><th>Event</th><th>Topic</th><th>Contribution</th><th>Explanation</th><th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {codeContributions.map((row, index) => (
+                  <tr key={`${row.code_change}-${row.event_name}-${index}`}>
+                    <td>{row.code_change}</td>
+                    <td>{row.file_path}</td>
+                    <td>{row.event_name}</td>
+                    <td>{row.topic_name}</td>
+                    <td>{row.contribution_type}</td>
+                    <td>{row.explanation}</td>
+                    <td>{row.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Affected components</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Event</th><th>Topic</th><th>Component</th><th>Explanation</th><th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {affectedComponents.map((row, index) => (
+                  <tr key={`${row.event_name}-${row.component_name}-${index}`}>
+                    <td>{row.event_name}</td>
+                    <td>{row.topic_name}</td>
+                    <td>{row.component_name}</td>
+                    <td>{row.explanation}</td>
+                    <td>{row.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Cross-topic links</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Cause</th><th>Cause topic</th><th>Effect</th><th>Effect topic</th><th>Explanation</th><th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {crossTopicLinks.map((row, index) => (
+                  <tr key={`${row.cause_name}-${row.effect_name}-${index}`}>
+                    <td>{row.cause_name}</td>
+                    <td>{row.cause_topic}</td>
+                    <td>{row.effect_name}</td>
+                    <td>{row.effect_topic}</td>
+                    <td>{row.explanation}</td>
+                    <td>{row.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Within-topic links (from Knowledge layer)</h4>
+          <p className="knowledge-table-caption">This table is read-only.</p>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Topic</th><th>Cause</th><th>Effect</th><th>Explanation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {withinTopicLinks.map((row, index) => (
+                  <tr key={`${row.topic_name}-${row.cause_name}-${row.effect_name}-${index}`}>
+                    <td>{row.topic_name}</td>
+                    <td>{row.cause_name}</td>
+                    <td>{row.effect_name}</td>
+                    <td>{row.explanation}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CollaborationLayerPanel() {
+  const [state, setState] = useState<CollaborationState | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [justRan, setJustRan] = useState(false);
+
+  const loadState = async () => {
+    try {
+      const response = await fetch("/api/collaboration");
+      const data = (await response.json()) as CollaborationState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read the collaboration layer.");
+      }
+      setState(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read the collaboration layer.");
+    }
+  };
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  const runBuild = async () => {
+    setError("");
+    setIsRunning(true);
+    setJustRan(false);
+
+    try {
+      const response = await fetch("/api/collaboration/build", { method: "POST" });
+      const data = (await response.json()) as CollaborationState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Build failed.");
+      }
+      setState(data);
+      setJustRan(true);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Build failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const expertise = state?.expertise ?? [];
+  const worksWith = state?.works_with ?? [];
+  const excludedPersons = state?.excluded_persons ?? [];
+  const counts = state?.counts;
+
+  return (
+    <div className="knowledge-panel">
+      <div className="reference-actions">
+        <button
+          className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
+          type="button"
+          disabled={isRunning}
+          onClick={runBuild}
+        >
+          {isRunning ? "Building collaboration layer..." : "Build collaboration layer"}
+        </button>
+        <div className="reference-status">
+          <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
+          <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
+          <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
+          <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          {state?.needs_rerun ? (
+            <span className="reference-stale">Upstream data has changed since the last build. Run it again.</span>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+      {justRan && !error ? (
+        <p className="reference-success">
+          Done. {expertise.length} expertise entries, {worksWith.length} collaboration pairs.
+        </p>
+      ) : null}
+
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">Expertise entries: <strong>{counts.expertise}</strong></span>
+          <span className="reference-count">Persons with expertise: <strong>{counts.persons_with_expertise}</strong></span>
+          <span className="reference-count">Collaboration pairs: <strong>{counts.works_with_pairs}</strong></span>
+          <span className="reference-count">Excluded persons: <strong>{counts.excluded_persons}</strong></span>
+        </div>
+      ) : null}
+
+      {expertise.length === 0 && worksWith.length === 0 ? (
+        <p className="reference-empty">No collaboration layer yet. Press the button to build it.</p>
+      ) : (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">Expertise</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Person</th><th>Subject type</th><th>Subject</th><th>Score</th><th>Share</th>
+                  <th>Rank</th><th>Activities</th><th>First activity</th><th>Last activity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {expertise.map((row, index) => (
+                  <tr key={`${row.person_name}-${row.subject_name}-${index}`}>
+                    <td>{row.person_name}</td>
+                    <td>{row.subject_label}</td>
+                    <td>{row.subject_name}</td>
+                    <td>{row.score}</td>
+                    <td>{row.share}</td>
+                    <td>{row.rank}</td>
+                    <td>{row.activity_count}</td>
+                    <td>{formatTimestamp(row.first_activity_at)}</td>
+                    <td>{formatTimestamp(row.last_activity_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Collaboration</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Person A</th><th>Person B</th><th>Weight</th><th>Work item types</th><th>Shared work items</th>
+                </tr>
+              </thead>
+              <tbody>
+                {worksWith.map((row, index) => (
+                  <tr key={`${row.person_a}-${row.person_b}-${index}`}>
+                    <td>{row.person_a}</td>
+                    <td>{row.person_b}</td>
+                    <td>{row.weight}</td>
+                    <td>{row.work_item_types.join(", ")}</td>
+                    <td>{row.shared_work_items.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Excluded persons</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Person</th><th>Person key</th><th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {excludedPersons.map((row) => (
+                  <tr key={row.person_key}>
+                    <td>{row.person_name}</td>
+                    <td>{row.person_key}</td>
+                    <td>{row.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function GraphAlgorithmsPanel() {
+  const [state, setState] = useState<AlgorithmsState | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState("");
+  const [justRan, setJustRan] = useState(false);
+
+  const loadState = async () => {
+    try {
+      const response = await fetch("/api/algorithms");
+      const data = (await response.json()) as AlgorithmsState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read the graph algorithm results.");
+      }
+      setState(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read the graph algorithm results.");
+    }
+  };
+
+  useEffect(() => {
+    void loadState();
+  }, []);
+
+  const runBuild = async () => {
+    setError("");
+    setIsRunning(true);
+    setJustRan(false);
+
+    try {
+      const response = await fetch("/api/algorithms/run", { method: "POST" });
+      const data = (await response.json()) as AlgorithmsState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Run failed.");
+      }
+      setState(data);
+      setJustRan(true);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "Run failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const persons = state?.persons ?? [];
+  const communities = state?.communities ?? [];
+  const busFactor = state?.bus_factor ?? [];
+  const components = state?.components ?? [];
+  const counts = state?.counts;
+
+  return (
+    <div className="knowledge-panel">
+      <div className="reference-actions">
+        <button
+          className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
+          type="button"
+          disabled={isRunning}
+          onClick={runBuild}
+        >
+          {isRunning ? "Running graph algorithms..." : "Run graph algorithms"}
+        </button>
+        <div className="reference-status">
+          <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
+          <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          <span>Last collaboration build: {formatTimestamp(state?.last_collaboration_build_at ?? null)}</span>
+          <span>Last algorithms run: {formatTimestamp(state?.last_algorithms_run_at ?? null)}</span>
+          {state?.needs_rerun ? (
+            <span className="reference-stale">Upstream data has changed since the last run. Run it again.</span>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+      {justRan && !error ? (
+        <p className="reference-success">
+          Done. {communities.length} communities, {persons.length} persons analyzed.
+        </p>
+      ) : null}
+
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">Communities: <strong>{counts.communities}</strong></span>
+          <span className="reference-count">Persons: <strong>{counts.persons}</strong></span>
+          <span className="reference-count">Topics: <strong>{counts.topics}</strong></span>
+          <span className="reference-count">Components: <strong>{counts.components}</strong></span>
+        </div>
+      ) : null}
+
+      {persons.length === 0 && communities.length === 0 ? (
+        <p className="reference-empty">No algorithm results yet. Press the button to run them.</p>
+      ) : (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">Persons</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Person</th><th>Weighted degree</th><th>Betweenness</th><th>Community</th>
+                </tr>
+              </thead>
+              <tbody>
+                {persons.map((row) => (
+                  <tr key={row.name}>
+                    <td>{row.name}</td>
+                    <td>{row.collab_weighted_degree ?? "-"}</td>
+                    <td>{row.collab_betweenness ?? "-"}</td>
+                    <td>{row.community_id ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Communities</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Community</th><th>Size</th><th>Members</th>
+                </tr>
+              </thead>
+              <tbody>
+                {communities.map((row) => (
+                  <tr key={row.community_id}>
+                    <td>{row.community_id}</td>
+                    <td>{row.size}</td>
+                    <td>{row.members.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Bus factor</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Subject type</th><th>Subject</th><th>Bus factor</th><th>Experts</th><th>Top expert</th>
+                </tr>
+              </thead>
+              <tbody>
+                {busFactor.map((row, index) => (
+                  <tr key={`${row.subject_label}-${row.subject_name}-${index}`}>
+                    <td>{row.subject_label}</td>
+                    <td>{row.subject_name}</td>
+                    <td>{row.bus_factor}</td>
+                    <td>{row.expert_count}</td>
+                    <td>{row.top_expert ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">Components</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Component</th><th>Depends on</th><th>Depended on by</th><th>Affected events</th><th>Bus factor</th>
+                </tr>
+              </thead>
+              <tbody>
+                {components.map((row) => (
+                  <tr key={row.name}>
+                    <td>{row.name}</td>
+                    <td>{row.depends_on_count ?? "-"}</td>
+                    <td>{row.depended_on_by_count ?? "-"}</td>
+                    <td>{row.affected_event_count ?? "-"}</td>
+                    <td>{row.bus_factor ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 const EMBEDDING_MODEL_FALLBACK = "text-embedding-3-large";
 
 function EmbeddingPanel() {
@@ -1774,44 +2812,52 @@ function EmbeddingPanel() {
   );
 }
 
+type BuildGraphLayersTab =
+  | "reference"
+  | "knowledge"
+  | "architecture"
+  | "causal"
+  | "collaboration"
+  | "algorithms"
+  | "embeddings";
+
+const buildGraphLayersTabs: Array<{ id: BuildGraphLayersTab; label: string }> = [
+  { id: "reference", label: "Reference extraction" },
+  { id: "knowledge", label: "Knowledge layer" },
+  { id: "architecture", label: "Architecture layer" },
+  { id: "causal", label: "Causal layer" },
+  { id: "collaboration", label: "Collaboration layer" },
+  { id: "algorithms", label: "Graph algorithms" },
+  { id: "embeddings", label: "Embeddings" },
+];
+
 function BuildGraphLayersPanel() {
-  const [activeInnerTab, setActiveInnerTab] = useState<"step1" | "step2" | "step3">("step1");
+  const [activeInnerTab, setActiveInnerTab] = useState<BuildGraphLayersTab>("reference");
 
   return (
     <div className="build-graph-layers">
       <div className="center-tabs center-tabs-inner" role="tablist" aria-label="Build graph layers tabs">
-        <button
-          className={`center-tab${activeInnerTab === "step1" ? " center-tab-active" : ""}`}
-          type="button"
-          role="tab"
-          aria-selected={activeInnerTab === "step1"}
-          onClick={() => setActiveInnerTab("step1")}
-        >
-          Reference extraction
-        </button>
-        <button
-          className={`center-tab${activeInnerTab === "step2" ? " center-tab-active" : ""}`}
-          type="button"
-          role="tab"
-          aria-selected={activeInnerTab === "step2"}
-          onClick={() => setActiveInnerTab("step2")}
-        >
-          Knowledge layer
-        </button>
-        <button
-          className={`center-tab${activeInnerTab === "step3" ? " center-tab-active" : ""}`}
-          type="button"
-          role="tab"
-          aria-selected={activeInnerTab === "step3"}
-          onClick={() => setActiveInnerTab("step3")}
-        >
-          Embeddings
-        </button>
+        {buildGraphLayersTabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={`center-tab${activeInnerTab === tab.id ? " center-tab-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeInnerTab === tab.id}
+            onClick={() => setActiveInnerTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
       <div className="center-tab-panel" role="tabpanel">
-        {activeInnerTab === "step1" ? <ReferenceExtractionPanel /> : null}
-        {activeInnerTab === "step2" ? <KnowledgeLayerPanel /> : null}
-        {activeInnerTab === "step3" ? <EmbeddingPanel /> : null}
+        {activeInnerTab === "reference" ? <ReferenceExtractionPanel /> : null}
+        {activeInnerTab === "knowledge" ? <KnowledgeLayerPanel /> : null}
+        {activeInnerTab === "architecture" ? <ArchitectureLayerPanel /> : null}
+        {activeInnerTab === "causal" ? <CausalLayerPanel /> : null}
+        {activeInnerTab === "collaboration" ? <CollaborationLayerPanel /> : null}
+        {activeInnerTab === "algorithms" ? <GraphAlgorithmsPanel /> : null}
+        {activeInnerTab === "embeddings" ? <EmbeddingPanel /> : null}
       </div>
     </div>
   );

@@ -1,646 +1,380 @@
 # SQL Data Handoff Specification
 
-This document describes the PostgreSQL source schema for generating or loading simulated software engineering team data.
+This document describes the PostgreSQL source-preserving layer as it exists in the local database and in `scripts/setup_postgres_schema.py`.
 
-The most important rule is that the data must stay separated into six logical data sources. The database has ten tables because some sources need multiple tables, but the data should not be flattened into one generic event table.
+PostgreSQL is the source of truth. Neo4j is derived from it and can be rebuilt. The SQL layer deliberately keeps the original source-system boundaries instead of flattening everything into a generic event table.
+
+## Current Data Snapshot
+
+Read-only inventory from the local PostgreSQL database:
+
+| Table | Rows | Logical source |
+| --- | ---: | --- |
+| `mail_messages` | 4 | Mail |
+| `slack_messages` | 12 | Slack / project chat |
+| `teams_meetings` | 2 | Teams meetings |
+| `teams_transcript_segments` | 9 | Teams transcripts |
+| `issues` | 2 | Issues / tickets |
+| `issue_versions` | 7 | Issue lifecycle history |
+| `issue_comments` | 5 | Issue comments |
+| `document_versions` | 3 | Requirements and technical documentation |
+| `pr_versions` | 4 | Pull requests |
+| `pr_reviews` | 6 | PR reviews and code comments |
+
+The data tells one connected product-engineering story around administrator session lifetime:
+
+- `AUTH-17`: administrator sessions expire too early during long tasks; created on `2026-02-26`; 5 issue versions; final status `done`.
+- `AUTH-19`: mobile administrators still expire while active; created on `2026-03-16`; 2 issue versions; current status `in progress`.
+- `REQ-AUTH-SESSION`: requirement document with 2 versions, rewritten after the March 3 refinement call.
+- `doc-002`: technical design for the session refresh path.
+- `backend-api#42`: PR for `AUTH-17`, 3 versions, merged.
+- `backend-api#47`: PR for `AUTH-19`, 1 version, open.
 
 ## Source Groups
 
-| Logical source | Tables | Purpose |
+There are six logical data sources and ten SQL tables:
+
+| Logical source | SQL tables | Purpose |
 | --- | --- | --- |
-| Mail | `mail_messages` | Email messages and reply chains. |
-| Slack / project chat | `slack_messages` | Channel messages, threads, and edited message versions. |
+| Mail | `mail_messages` | Email messages, recipients, and reply-chain IDs. |
+| Slack / project chat | `slack_messages` | Channel messages, thread replies, and edited message versions. |
 | Teams / meeting transcripts | `teams_meetings`, `teams_transcript_segments` | Meeting metadata and ordered transcript segments. |
-| Issues / tickets | `issues`, `issue_versions`, `issue_comments` | Ticket identity, version history with status transitions, ownership, acceptance criteria, and comments. |
-| Requirements and technical documentation | `document_versions` | Versioned requirements and technical documents. |
-| Pull requests, code reviews, and code changes | `pr_versions`, `pr_reviews` | PR history, changed code metadata, review decisions, and code comments. |
+| Issues / tickets | `issues`, `issue_versions`, `issue_comments` | Stable issue identity, lifecycle state versions, and comment versions. |
+| Requirements and technical documentation | `document_versions` | Versioned requirement/design/runbook/decision documents. |
+| Pull requests, reviews, and code changes | `pr_versions`, `pr_reviews` | PR state versions, review decisions, line comments, and changed-code JSON. |
 
-## General Data Rules
+## SQL to Graph Summary
 
-- Use stable source IDs from the simulated source system. Do not invent new IDs for the same real-world object across versions.
-- Use `source_instance` to identify the simulated source system instance, for example `gmail-main`, `slack-main`, `jira-main`, `docs-main`, or `github-main`.
-- Use ISO-like timestamp values with timezone for all `TIMESTAMPTZ` fields, for example `2026-02-14T10:30:00+01:00`.
-- Preserve versions by inserting multiple rows with the same object ID and increasing `version_number`.
-- Keep cross-source references in text and IDs when useful, but do not merge the six source groups into one table.
-- JSONB array fields must contain JSON arrays, not strings containing JSON.
+The graph import in `viewer/app.py` maps source tables into Neo4j as follows:
 
-## How SQL Relates to the Graph
+| SQL table or field | Neo4j output |
+| --- | --- |
+| `mail_messages` | `MailMessage` nodes; `SENT_MAIL`; `MAIL_RECIPIENT`. |
+| `slack_messages` | One `SlackMessage` node per version; `SENT_SLACK_MESSAGE`; `SLACK_THREAD_REPLY_TO`. |
+| `teams_meetings` | `TeamsMeeting` nodes; `PARTICIPATED_IN_MEETING`. |
+| `teams_transcript_segments` | `TeamsTranscriptSegment` nodes; `HAS_TEAMS_TRANSCRIPT_SEGMENT`; `SPOKE_TEAMS_TRANSCRIPT_SEGMENT`. |
+| `issues` | Parent `Issue` nodes; creator fields feed `CREATED_ISSUE`. |
+| `issue_versions` | Parent `Issue` latest-state properties; `IssueVersion` nodes; `HAS_ISSUE_VERSION`; `NEXT_ISSUE_VERSION`; `CHANGED_ISSUE_VERSION`; assignee feeds `OWNS_ISSUE`. |
+| `issue_comments` | `IssueComment` nodes from latest comment row; `HAS_ISSUE_COMMENT`; `WROTE_ISSUE_COMMENT`; `REPLY_TO_ISSUE_COMMENT`; authors feed `COMMENTED_ON_ISSUE`. |
+| `document_versions` | Parent `Document` latest-state node; all `DocumentVersion` nodes; `AUTHORED_DOCUMENT`; `HAS_DOCUMENT_VERSION`; `NEXT_DOCUMENT_VERSION`; `AUTHORED_DOCUMENT_VERSION`. |
+| `pr_versions` | Parent `PullRequest` latest-state node; `AUTHORED_PR`; `CodeChange` nodes from each `code_changes` array entry; `HAS_CODE_CHANGE`. |
+| `pr_reviews` | `PullRequestReview` nodes from latest review rows; `REVIEWED_PR`; `HAS_PR_REVIEW`; `WROTE_PR_REVIEW`; `REPLY_TO_PR_REVIEW`. |
+| Person-bearing fields across all tables | Shared `Person` nodes resolved by `viewer/person_identity.py`. |
 
-PostgreSQL is the source of truth. Neo4j is derived from these tables and can be rebuilt from them.
+Do not add SQL tables only to make graph traversal easier. SQL tables should preserve source records. Graph-only retrieval units, derived references, embeddings, topics, and events belong in Neo4j/backend layers.
 
-For the actual current graph shape — every node label's properties and data types, existing Neo4j constraints/indexes, and every relationship type's endpoint label pairs, taken from a live introspection rather than from this document's description of intent — see `GRAPH_SCHEMA_HANDOFF.md` in the repository root.
+## General Rules
 
-The SQL schema preserves source records, stable source IDs, timestamps, version rows, and JSONB source fragments. It does not try to pre-compute the graph. Relationships such as authorship, ownership, comments, reviews, and version chains are created during import into Neo4j from the source fields documented below.
-
-Several SQL tables map to one logical source in the graph:
-
-- `issues`, `issue_versions`, and `issue_comments` become the Issues graph model.
-- `document_versions` becomes both the latest `Document` state and per-version `DocumentVersion` retrieval units.
-- `pr_versions` and `pr_reviews` become the Pull Request graph model, including `CodeChange` nodes derived from the `code_changes` JSONB array.
-
-Do not add SQL tables just to support graph traversal unless the source system itself has a distinct source record that needs preservation. Graph-only retrieval units and relationships belong in the import layer.
+- Use stable source IDs from the simulated source system.
+- Use `source_instance` to identify the simulated source system instance, such as `gmail-main`, `slack-main`, `teams-main`, `jira-main`, `docs-main`, or `github-main`.
+- Use timezone-aware timestamps for every `TIMESTAMPTZ`.
+- Preserve history with multiple rows using the same stable object ID and increasing `version_number`.
+- JSONB array fields must contain JSON arrays, not stringified JSON.
+- Cross-source links are preserved through explicit text references such as `AUTH-17`, `backend-api#42`, and `REQ-AUTH-SESSION`; those references are extracted later into Neo4j.
 
 ## Table Details
 
-### 1. Mail: `mail_messages`
+### `mail_messages`
 
 One row is one email message.
 
+Primary key: `(source_instance, message_id)`.
+
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `message_id` | `TEXT` | Yes | Stable email ID. Part of primary key. |
-| `sender_address` | `TEXT` | Yes | Email address of sender. |
-| `sender_name` | `TEXT` | No | Display name of sender. |
-| `recipients` | `JSONB` | Yes | JSON array of recipients. |
-| `subject` | `TEXT` | No | Email subject. |
-| `body` | `TEXT` | Yes | Email body. |
-| `sent_at` | `TIMESTAMPTZ` | Yes | When the email was sent. |
-| `in_reply_to_id` | `TEXT` | No | Message ID of the email this replies to. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+| `source_instance` | `TEXT` | yes | Source system instance. |
+| `message_id` | `TEXT` | yes | Stable email ID. |
+| `sender_address` | `TEXT` | yes | Sender email. |
+| `sender_name` | `TEXT` | no | Sender display name. |
+| `recipients` | `JSONB` | yes | Array of recipient objects. |
+| `subject` | `TEXT` | no | Email subject. |
+| `body` | `TEXT` | yes | Email body. |
+| `sent_at` | `TIMESTAMPTZ` | yes | Send time. |
+| `in_reply_to_id` | `TEXT` | no | Parent email `message_id`; indexed but not a foreign key. |
+| `source_url` | `TEXT` | no | Link back to source. |
 
-Primary key: `(source_instance, message_id)`
+Checks and indexes:
 
-Indexes:
-
+- `CHECK (jsonb_typeof(recipients) = 'array')`
 - `idx_mail_reply` on `(source_instance, in_reply_to_id)`
 
-Recipient JSON example:
+Current rows:
 
-```json
-[
-  {"type": "to", "address": "owner@example.com", "name": "Product Owner"},
-  {"type": "cc", "address": "team@example.com", "name": "Team"}
-]
-```
+| ID | Sender | Subject | Time | Reply to |
+| --- | --- | --- | --- | --- |
+| `mail-001` | Martin Ek | Administrators logged out during audit exports | `2026-02-24 09:12+01` | |
+| `mail-002` | Anna | Fwd: Administrators logged out during audit exports | `2026-02-24 11:40+01` | `mail-001` |
+| `mail-003` | Anna Berg | Re: Administrators logged out during audit exports | `2026-03-13 08:30+01` | `mail-001` |
+| `mail-004` | Martin Ek | Re: Administrators logged out during audit exports | `2026-03-16 14:05+01` | `mail-003` |
 
-Functional mailbox addresses are allowed source facts. The graph import recognises them by exact, case-insensitive local-part match before `@`, for example `support@example.com`, `noreply@example.com`, or `notifications@example.com`, and marks the resulting node with `actor_type = "mailbox"` instead of excluding it.
+### `slack_messages`
 
-### 2. Slack / Project Chat: `slack_messages`
+One row is one version of one Slack message. Edited messages keep previous versions.
 
-One row is one version of one Slack message. Edited messages should keep previous versions.
+Primary key: `(source_instance, workspace_id, channel_id, message_id, version_number)`.
 
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `message_id` | `TEXT` | Yes | Stable message ID. Part of primary key. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
-| `workspace_id` | `TEXT` | Yes | Slack workspace ID. Part of primary key. |
-| `channel_id` | `TEXT` | Yes | Slack channel ID. Part of primary key. |
-| `channel_name` | `TEXT` | No | Human-readable channel name. |
-| `author_source_id` | `TEXT` | No | Source ID for author. |
-| `author_name` | `TEXT` | No | Display name for author. |
-| `author_email` | `TEXT` | No | Author email. |
-| `body` | `TEXT` | Yes | Message body. |
-| `sent_at` | `TIMESTAMPTZ` | Yes | Original send time. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Time for this version; must be greater than or equal to `sent_at`. |
-| `thread_root_id` | `TEXT` | No | Root message ID for thread replies. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+| `source_instance` | `TEXT` | yes | Source system instance. |
+| `message_id` | `TEXT` | yes | Stable message ID. |
+| `version_number` | `INTEGER` | yes | Starts at 1; `> 0`. |
+| `workspace_id` | `TEXT` | yes | Workspace ID. |
+| `channel_id` | `TEXT` | yes | Channel ID. |
+| `channel_name` | `TEXT` | no | Human-readable channel name. |
+| `author_source_id` | `TEXT` | no | Source ID for author. |
+| `author_name` | `TEXT` | no | Display name. |
+| `author_email` | `TEXT` | no | Email when known. |
+| `body` | `TEXT` | yes | Message body. |
+| `sent_at` | `TIMESTAMPTZ` | yes | Original send time. |
+| `version_at` | `TIMESTAMPTZ` | yes | Version timestamp; must be `>= sent_at`. |
+| `thread_root_id` | `TEXT` | no | Root message ID for thread replies. |
+| `source_url` | `TEXT` | no | Link back to source. |
 
-Primary key: `(source_instance, workspace_id, channel_id, message_id, version_number)`
+Checks and indexes:
 
-Indexes:
-
+- `CHECK (version_number > 0)`
+- `CHECK (version_at >= sent_at)`
 - `idx_slack_thread` on `(source_instance, workspace_id, channel_id, thread_root_id, sent_at)`
 
-### 3. Teams / Meeting Transcripts
+Current data:
 
-Teams data is split into meeting metadata and transcript segments.
+- All rows are in `slack-main`, workspace `w-example`, channel `auth-platform`.
+- Messages `slack-001` through `slack-011` exist.
+- `slack-006` has two versions.
+- `slack-008` replies to `slack-007`.
+- `slack-011` replies to `slack-010`.
+- Authors represented: Erik Nilsson, Anna, Anna Berg, Anna Lindqvist, Priya Raman.
 
-#### `teams_meetings`
+### `teams_meetings`
 
-One row is one meeting.
+One row is one Teams meeting.
 
-| Column | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `meeting_id` | `TEXT` | Yes | Stable meeting ID. Part of primary key. |
-| `title` | `TEXT` | Yes | Meeting title. |
-| `started_at` | `TIMESTAMPTZ` | Yes | Meeting start time. |
-| `ended_at` | `TIMESTAMPTZ` | No | Must be greater than or equal to `started_at` when present. |
-| `participants` | `JSONB` | Yes | JSON array; defaults to `[]`. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
-
-Primary key: `(source_instance, meeting_id)`
-
-Participants JSON example:
-
-```json
-[
-  {"source_id": "u-anna", "name": "Anna Svensson", "email": "anna@example.com"},
-  {"source_id": "u-erik", "name": "Erik Nilsson", "email": "erik@example.com"}
-]
-```
-
-#### `teams_transcript_segments`
-
-One row is one ordered transcript segment in a meeting.
+Primary key: `(source_instance, meeting_id)`.
 
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Must match parent meeting. Part of primary key. |
-| `meeting_id` | `TEXT` | Yes | Must match parent meeting. Part of primary key. |
-| `segment_id` | `TEXT` | Yes | Stable segment ID. Part of primary key. |
-| `sequence_number` | `INTEGER` | Yes | Ordered position in transcript; must be greater than `0`. |
-| `speaker_source_id` | `TEXT` | No | Source ID for speaker. |
-| `speaker_name` | `TEXT` | No | Speaker display name. |
-| `start_offset_ms` | `BIGINT` | Yes | Offset from meeting start; must be greater than or equal to `0`. |
-| `end_offset_ms` | `BIGINT` | No | Must be greater than or equal to `start_offset_ms` when present. |
-| `body` | `TEXT` | Yes | Transcript text. |
+| `source_instance` | `TEXT` | yes | Source system instance. |
+| `meeting_id` | `TEXT` | yes | Stable meeting ID. |
+| `title` | `TEXT` | yes | Meeting title. |
+| `started_at` | `TIMESTAMPTZ` | yes | Start time. |
+| `ended_at` | `TIMESTAMPTZ` | no | Must be `>= started_at` when present. |
+| `participants` | `JSONB` | yes | Array, defaults to `[]`. |
+| `source_url` | `TEXT` | no | Link back to source. |
 
-Primary key: `(source_instance, meeting_id, segment_id)`
+Checks:
 
-Unique key: `(source_instance, meeting_id, sequence_number)`
+- `CHECK (ended_at IS NULL OR ended_at >= started_at)`
+- `CHECK (jsonb_typeof(participants) = 'array')`
 
-Foreign key:
+Current rows:
 
-- `(source_instance, meeting_id)` references `teams_meetings(source_instance, meeting_id)`
+| ID | Title | Time | Participant count |
+| --- | --- | --- | ---: |
+| `meet-001` | Auth refinement: administrator session lifetime | `2026-03-03 13:00-13:45+01` | 4 |
+| `meet-002` | Sprint review | `2026-03-12 10:00-10:30+01` | 3 |
 
-### 4. Issues / Tickets
+### `teams_transcript_segments`
 
-Issue data is split into three tables: identity, versioned state, and comments. This is still **one** logical source, not three.
+One row is one ordered transcript segment inside a meeting.
 
-The split exists because one table was holding two different things. Issue identity does not change: AUTH-17 exists, it was created on this date, by this person. Issue state changes repeatedly: AUTH-17 was `blocked`, assigned to Erik, with these acceptance criteria, as of this timestamp. Comments belong to the identity, not to any one state, so the foreign key has something stable to point at and versions are free to multiply.
+Primary key: `(source_instance, meeting_id, segment_id)`.
 
-Issues are the only object in the data model with a lifecycle. Status transitions with timestamps are what make it possible to answer questions about cause and delay rather than only about current state.
+Unique key: `(source_instance, meeting_id, sequence_number)`.
 
-#### `issues`
-
-One row is one issue. Identity only.
-
-| Column | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `issue_id` | `TEXT` | Yes | Stable issue ID. Part of primary key. |
-| `issue_key` | `TEXT` | Yes | Human-readable key, for example `AUTH-17`. |
-| `created_at` | `TIMESTAMPTZ` | Yes | Issue creation time. |
-| `creator_source_id` | `TEXT` | No | Source ID for creator. |
-| `creator_name` | `TEXT` | No | Creator display name. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
-
-Primary key: `(source_instance, issue_id)`
-
-Unique key: `(source_instance, issue_key)`
-
-`issue_key` has its own unique constraint because it is the identifier a human writes in Slack or a commit message. Later extraction work looks issues up by that string, and it must resolve to exactly one issue.
-
-#### `issue_versions`
-
-One row is one version of one issue. State only.
-
-Multiple rows per issue are expected. This is where the lifecycle lives.
+Foreign key: `(source_instance, meeting_id)` references `teams_meetings`.
 
 | Column | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `issue_id` | `TEXT` | Yes | Issue ID. Part of primary key. Must exist in `issues`. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
-| `issue_type` | `TEXT` | Yes | For example `story`, `bug`, `task`, or `epic`. Stays in the version table because a ticket can be reclassified, and that reclassification is part of its history. |
-| `title` | `TEXT` | Yes | Issue title for this version. |
-| `description` | `TEXT` | No | Issue description for this version. |
-| `acceptance_criteria` | `TEXT` | No | Completion criteria for this version. |
-| `status` | `TEXT` | Yes | Status for this version. |
-| `priority` | `TEXT` | No | Priority label for this version. |
-| `assignee_source_id` | `TEXT` | No | Source ID for assignee. |
-| `assignee_name` | `TEXT` | No | Assignee display name. |
-| `changed_by_id` | `TEXT` | No | Source ID for person who made this version change. |
-| `changed_by_name` | `TEXT` | No | Name of person who made this version change. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Version time. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+| `source_instance` | `TEXT` | yes | Must match parent meeting. |
+| `meeting_id` | `TEXT` | yes | Parent meeting. |
+| `segment_id` | `TEXT` | yes | Stable segment ID. |
+| `sequence_number` | `INTEGER` | yes | Ordered position; `> 0`. |
+| `speaker_source_id` | `TEXT` | no | Speaker source ID. |
+| `speaker_name` | `TEXT` | no | Speaker display name. |
+| `start_offset_ms` | `BIGINT` | yes | Offset from meeting start; `>= 0`. |
+| `end_offset_ms` | `BIGINT` | no | Must be `>= start_offset_ms` when present. |
+| `body` | `TEXT` | yes | Transcript text. |
 
-Primary key: `(source_instance, issue_id, version_number)`
+Current rows:
 
-Unique key: `(source_instance, issue_id, version_at)`
+- `meet-001`: `seg-001` to `seg-006`, speakers Anna Berg, Anna, Priya Raman, Erik Nilsson.
+- `meet-002`: `seg-007` to `seg-009`, speakers Anna Berg, Anna Lindqvist, Erik Nilsson.
 
-Two versions of the same issue cannot share a timestamp. Without that constraint, version order becomes ambiguous the moment anything sorts by time rather than by number.
+### `issues`
 
-Foreign key:
+One row is one stable issue identity. Mutable state is in `issue_versions`.
 
-- `(source_instance, issue_id)` references `issues(source_instance, issue_id)`
+Primary key: `(source_instance, issue_id)`.
 
-Indexes:
+Unique key: `(source_instance, issue_key)`.
 
-- `idx_issue_versions_history` on `(source_instance, issue_id, version_number)`
+| Column | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `source_instance` | `TEXT` | yes | Source system instance. |
+| `issue_id` | `TEXT` | yes | Stable source ID. |
+| `issue_key` | `TEXT` | yes | Human-readable key, e.g. `AUTH-17`. |
+| `created_at` | `TIMESTAMPTZ` | yes | Issue creation time. |
+| `creator_source_id` | `TEXT` | no | Creator source ID. |
+| `creator_name` | `TEXT` | no | Creator display name. |
+| `source_url` | `TEXT` | no | Link back to source. |
 
-**Ordering rules that are not enforced by constraints.** `created_at` now lives in `issues`, and PostgreSQL cannot express a cross-table check constraint, so the old `CHECK (version_at >= created_at)` is gone from this table. The rule still holds and is now a data generation rule:
+Current rows:
 
-- `version_at` must be greater than or equal to the issue's `created_at` in `issues`.
-- `version_number` should start at `1` and increase without gaps.
-- `version_at` should increase with `version_number`.
+| Issue ID | Key | Created | Creator | Versions |
+| --- | --- | --- | --- | ---: |
+| `issue-001` | `AUTH-17` | `2026-02-26 10:15+01` | Anna Berg | 5 |
+| `issue-002` | `AUTH-19` | `2026-03-16 15:20+01` | Erik Nilsson | 2 |
 
-**How the viewer presents these three tables.** The SQL viewer is source-oriented, so `issues` is not a separate menu entry. The Issues source shows all three tables together, in the same way the Teams source combines a meeting with its transcript segments:
+### `issue_versions`
 
-| Panel | Table |
-| --- | --- |
-| Issue (identity) | `issues` |
-| Issue latest version | `issue_versions`, highest `version_number` |
-| Version history | `issue_versions`, every row in ascending order |
-| Issue comments | `issue_comments` |
+One row is one version of an issue's state.
 
-The list on the left shows one entry per issue, not one per version. The table view shows one row per version joined with its comments, so a single issue appears several times there.
+Primary key: `(source_instance, issue_id, version_number)`.
 
-#### `issue_comments`
+Unique key: `(source_instance, issue_id, version_at)`.
+
+Foreign key: `(source_instance, issue_id)` references `issues`.
+
+Index: `idx_issue_versions_history` on `(source_instance, issue_id, version_number)`.
+
+| Column | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `source_instance` | `TEXT` | yes | Source system instance. |
+| `issue_id` | `TEXT` | yes | Parent issue. |
+| `version_number` | `INTEGER` | yes | Starts at 1; `> 0`. |
+| `issue_type` | `TEXT` | yes | Story, bug, task, epic, etc. |
+| `title` | `TEXT` | yes | Versioned title. |
+| `description` | `TEXT` | no | Versioned description. |
+| `acceptance_criteria` | `TEXT` | no | Versioned acceptance criteria. |
+| `status` | `TEXT` | yes | Versioned status. |
+| `priority` | `TEXT` | no | Versioned priority. |
+| `assignee_source_id` | `TEXT` | no | Assignee source ID. |
+| `assignee_name` | `TEXT` | no | Assignee name. |
+| `changed_by_id` | `TEXT` | no | Person who made the version change. |
+| `changed_by_name` | `TEXT` | no | Display name of changer. |
+| `version_at` | `TIMESTAMPTZ` | yes | Version timestamp. |
+| `source_url` | `TEXT` | no | Link back to source. |
+
+Current lifecycle:
+
+| Issue | Version | Status | Priority | Assignee | Changed by | Time |
+| --- | ---: | --- | --- | --- | --- | --- |
+| `AUTH-17` | 1 | open | medium | | Anna Berg | `2026-02-26 10:15+01` |
+| `AUTH-17` | 2 | in progress | medium | Anna Lindqvist | Anna Lindqvist | `2026-02-27 09:40+01` |
+| `AUTH-17` | 3 | blocked | high | Anna Lindqvist | Anna Berg | `2026-03-03 14:25+01` |
+| `AUTH-17` | 4 | in progress | high | Anna Lindqvist | Anna Lindqvist | `2026-03-10 09:35+01` |
+| `AUTH-17` | 5 | done | high | Anna Lindqvist | Anna Lindqvist | `2026-03-11 15:55+01` |
+| `AUTH-19` | 1 | open | high | | Erik Nilsson | `2026-03-16 15:20+01` |
+| `AUTH-19` | 2 | in progress | high | Erik Nilsson | Erik Nilsson | `2026-03-16 16:05+01` |
+
+### `issue_comments`
 
 One row is one version of one issue comment.
 
-| Column | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `comment_id` | `TEXT` | Yes | Stable comment ID. Part of primary key. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
-| `issue_id` | `TEXT` | Yes | Parent issue ID. |
-| `author_source_id` | `TEXT` | No | Source ID for author. |
-| `author_name` | `TEXT` | No | Author display name. |
-| `body` | `TEXT` | Yes | Comment body. |
-| `created_at` | `TIMESTAMPTZ` | Yes | Comment creation time. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Version time; must be greater than or equal to `created_at`. |
-| `reply_to_comment_id` | `TEXT` | No | Parent comment ID for threaded replies. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+Primary key: `(source_instance, comment_id, version_number)`.
 
-Primary key: `(source_instance, comment_id, version_number)`
+Foreign key: `(source_instance, issue_id)` references `issues`.
 
-Foreign key:
+Index: `idx_issue_comments_issue` on `(source_instance, issue_id, created_at)`.
 
-- `(source_instance, issue_id)` references `issues(source_instance, issue_id)`
+Current rows:
 
-Indexes:
+| Comment | Issue | Author | Created | Reply to |
+| --- | --- | --- | --- | --- |
+| `comment-001` | `AUTH-17` | Anna Lindqvist | `2026-02-26 11:02+01` | |
+| `comment-002` | `AUTH-17` | Priya Raman | `2026-03-03 14:30+01` | |
+| `comment-003` | `AUTH-17` | Anna Berg | `2026-03-04 09:15+01` | `comment-002` |
+| `comment-004` | `AUTH-17` | Anna Lindqvist | `2026-03-11 15:58+01` | |
+| `comment-005` | `AUTH-19` | Anna Lindqvist | `2026-03-16 16:00+01` | |
 
-- `idx_issue_comments_issue` on `(source_instance, issue_id, created_at)`
+### `document_versions`
 
-### 5. Requirements and Technical Documentation: `document_versions`
+One row is one document version.
 
-One row is one version of one document.
+Primary key: `(source_instance, document_id, version_number)`.
 
-| Column | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `document_id` | `TEXT` | Yes | Stable document ID. Part of primary key. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
-| `document_type` | `TEXT` | Yes | For example `requirement`, `technical-design`, `decision-record`, or `runbook`. |
-| `title` | `TEXT` | Yes | Document title. |
-| `body` | `TEXT` | Yes | Document content. |
-| `content_format` | `TEXT` | Yes | Defaults to `markdown`. |
-| `author_source_id` | `TEXT` | No | Source ID for author. |
-| `author_name` | `TEXT` | No | Author display name. |
-| `created_at` | `TIMESTAMPTZ` | Yes | Document creation time. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Version time; must be greater than or equal to `created_at`. |
-| `change_summary` | `TEXT` | No | Summary of this version change. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+Checks:
 
-Primary key: `(source_instance, document_id, version_number)`
+- `CHECK (version_number > 0)`
+- `CHECK (version_at >= created_at)`
 
-### 6. Pull Requests, Code Reviews, and Code Changes
+Current rows:
 
-Pull request data is split into versioned PR state and reviews/comments.
+| Document | Version | Type | Title | Author | Version time |
+| --- | ---: | --- | --- | --- | --- |
+| `doc-001` | 1 | requirement | REQ-AUTH-SESSION: Administrator session lifetime | Anna Berg | `2026-02-27 09:00+01` |
+| `doc-001` | 2 | requirement | REQ-AUTH-SESSION: Administrator session lifetime | Anna Berg | `2026-03-03 16:10+01` |
+| `doc-002` | 1 | technical-design | Session refresh path | Anna Lindqvist | `2026-03-10 10:00+01` |
 
-#### `pr_versions`
+### `pr_versions`
 
 One row is one version of one pull request.
 
-| Column | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `repository` | `TEXT` | Yes | Repository name. Part of primary key. |
-| `pr_number` | `INTEGER` | Yes | PR number; must be greater than `0`. Part of primary key. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
-| `title` | `TEXT` | Yes | PR title. |
-| `description` | `TEXT` | No | PR description. |
-| `author_source_id` | `TEXT` | No | Source ID for author. |
-| `author_name` | `TEXT` | No | Author display name. |
-| `state` | `TEXT` | Yes | Must be one of `open`, `closed`, `merged`. |
-| `created_at` | `TIMESTAMPTZ` | Yes | PR creation time. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Version time; must be greater than or equal to `created_at`. |
-| `base_commit` | `TEXT` | Yes | Base commit hash or stable simulated commit ID. |
-| `head_commit` | `TEXT` | Yes | Head commit hash or stable simulated commit ID. |
-| `code_changes` | `JSONB` | Yes | JSON array of changed files or hunks. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+Primary key: `(source_instance, repository, pr_number, version_number)`.
 
-Primary key: `(source_instance, repository, pr_number, version_number)`
+Checks:
 
-Code changes JSON example:
+- `CHECK (pr_number > 0)`
+- `CHECK (version_number > 0)`
+- `CHECK (state IN ('open', 'closed', 'merged'))`
+- `CHECK (version_at >= created_at)`
+- `CHECK (jsonb_typeof(code_changes) = 'array')`
 
-```json
-[
-  {
-    "file_path": "backend/auth/session.py",
-    "change_type": "modified",
-    "before_summary": "Session timeout was fixed at 30 minutes.",
-    "after_summary": "Admin sessions now use a 60 minute inactivity timeout.",
-    "diff": "@@ ... simulated unified diff ..."
-  }
-]
-```
+Current rows:
 
-#### `pr_reviews`
+| PR | Version | State | Title | Author | Code changes | Version time |
+| --- | ---: | --- | --- | --- | ---: | --- |
+| `backend-api#42` | 1 | open | AUTH-17: raise administrator session expiry to sixty minutes | Anna Lindqvist | 2 | `2026-03-02 16:30+01` |
+| `backend-api#42` | 2 | open | AUTH-17: inactivity based administrator session expiry | Anna Lindqvist | 1 | `2026-03-10 14:20+01` |
+| `backend-api#42` | 3 | merged | AUTH-17: inactivity based administrator session expiry | Anna Lindqvist | 3 | `2026-03-11 15:45+01` |
+| `backend-api#47` | 1 | open | AUTH-19: apply inactivity rules to the mobile refresh endpoint | Erik Nilsson | 1 | `2026-03-16 16:30+01` |
 
-One row is one version of one PR review entry. It can be a whole-PR review decision or a specific code comment.
+### `pr_reviews`
 
-| Column | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `source_instance` | `TEXT` | Yes | Source system instance. Part of primary key. |
-| `repository` | `TEXT` | Yes | Parent repository. Part of primary key. |
-| `pr_number` | `INTEGER` | Yes | Parent PR number. Part of primary key. |
-| `entry_type` | `TEXT` | Yes | Must be one of `comment`, `approved`, `changes_requested`, `commented`. |
-| `source_id` | `TEXT` | Yes | Stable review/comment ID. Part of primary key. |
-| `version_number` | `INTEGER` | Yes | Starts at `1`; must be greater than `0`. Part of primary key. |
-| `pr_version_number` | `INTEGER` | Yes | Parent PR version being reviewed. |
-| `reviewed_commit` | `TEXT` | No | Required for line-specific comments. |
-| `author_source_id` | `TEXT` | No | Source ID for author. |
-| `author_name` | `TEXT` | No | Author display name. |
-| `body` | `TEXT` | No | Review body or comment text. |
-| `created_at` | `TIMESTAMPTZ` | Yes | Review entry creation time. |
-| `version_at` | `TIMESTAMPTZ` | Yes | Version time; must be greater than or equal to `created_at`. |
-| `reply_to_source_id` | `TEXT` | No | Parent review/comment ID for replies. |
-| `review_group_id` | `TEXT` | No | Groups comments belonging to the same review submission. |
-| `file_path` | `TEXT` | No | Required for line-specific comments. |
-| `line_number` | `INTEGER` | No | Required for line-specific comments; must be greater than `0`. |
-| `diff_side` | `TEXT` | No | Required for line-specific comments; must be `before` or `after`. |
-| `source_url` | `TEXT` | No | Link back to the simulated source. |
+One row is one version of one PR review entry. It can be a whole-PR review decision or a line-specific code comment.
 
-Primary key: `(source_instance, repository, pr_number, source_id, version_number)`
+Primary key: `(source_instance, repository, pr_number, source_id, version_number)`.
 
-Foreign key:
+Foreign key: `(source_instance, repository, pr_number, pr_version_number)` references `pr_versions`.
 
-- `(source_instance, repository, pr_number, pr_version_number)` references `pr_versions(source_instance, repository, pr_number, version_number)`
+Index: `idx_pr_reviews_pr_version` on `(source_instance, repository, pr_number, pr_version_number)`.
 
-Indexes:
-
-- `idx_pr_reviews_pr_version` on `(source_instance, repository, pr_number, pr_version_number)`
-
-Line-specific review rule:
+Line-specific rule:
 
 - If `line_number` is present, then `diff_side`, `file_path`, and `reviewed_commit` must also be present.
 - If the review is not line-specific, then `line_number` and `diff_side` must both be `NULL`.
 
-## Source Relationship Guidance
+Current rows:
 
-The SQL schema preserves original source material. It does not enforce all cross-source relationships with foreign keys, because those links are extracted later into the graph database.
+| Review | PR | Type | PR version | Author | File/line | Reply to |
+| --- | --- | --- | ---: | --- | --- | --- |
+| `review-001` | `backend-api#42` | changes_requested | 1 | Priya Raman | | |
+| `review-002` | `backend-api#42` | comment | 1 | Priya Raman | `backend/auth/session.py:12 after` | |
+| `review-003` | `backend-api#42` | comment | 1 | Anna Lindqvist | `backend/auth/session.py:12 after` | `review-002` |
+| `review-004` | `backend-api#42` | approved | 3 | Priya Raman | | |
+| `review-005` | `backend-api#42` | approved | 3 | Erik Nilsson | | |
+| `review-006` | `backend-api#47` | comment | 1 | Anna Lindqvist | `backend/auth/mobile_refresh.py:18 after` | |
 
-When generating data, create natural links across sources through shared people, IDs, titles, and text references. For example:
+## Person Identity Fields
 
-- A customer email describes a requirement.
-- Slack messages discuss the same requirement or issue key.
-- A Teams meeting transcript mentions the decision.
-- An issue captures the work and acceptance criteria.
-- A document records the agreed requirement or technical design.
-- A PR implements the issue and includes review comments.
+The graph importer resolves all person-bearing fields together before writing relationships:
 
-Keep those links explicit in the source content where realistic:
-
-- Mention issue keys such as `AUTH-17`.
-- Mention PR numbers such as `backend-api#42`.
-- Write identifiers out explicitly in the text. The graph extracts references by matching identifier strings against the entities it already holds, so an identifier that is never written out cannot be extracted. "the session ticket" produces no edge; `AUTH-17` does.
-- Reuse person names and source IDs consistently.
-- Use realistic timestamps so the sequence of events can be reconstructed.
-- Preserve uncertainty, changed decisions, and disagreement when appropriate.
-
-### Issue Lifecycles
-
-Issues are the only object in the data model with a lifecycle, so they carry most of the signal about cause and delay. When generating issues:
-
-- Give an issue several rows in `issue_versions`, not one. A single version wastes the table.
-- Use realistic status transitions, for example `open` to `in progress` to `blocked` to `in progress` to `done`, including the transitions that go backwards.
-- Set `changed_by_id` and `changed_by_name` per version. The person who moves a ticket to `blocked` is often not the assignee.
-- Interleave `version_at` timestamps coherently with the other sources: the Slack message that reports the blocker, the meeting where it is discussed, and the pull request that resolves it should sit around the version that records it.
-- Let `assignee_source_id`, `priority`, `title` and `issue_type` change across versions where it is realistic. Reassignment and reclassification are part of the history.
-
-## Person Identity Across Sources
-
-The graph import resolves one real person into one `Person` node by clustering every person-bearing field in this schema. The rules are documented in `docs/GRAPH_DATA_HANDOFF.md` and implemented in `viewer/person_identity.py`. What matters when generating SQL data is which fields carry the signal.
-
-| Table | Person fields | Email present? |
+| SQL location | Person fields | Email present |
 | --- | --- | --- |
 | `mail_messages` | `sender_address`, `sender_name` | yes |
-| `mail_messages.recipients` (JSONB) | `address`, `name` per entry | yes |
+| `mail_messages.recipients` JSONB | `address`, `name` | yes |
 | `slack_messages` | `author_source_id`, `author_name`, `author_email` | yes |
-| `teams_meetings.participants` (JSONB) | `source_id`, `name`, `email` per entry | yes |
+| `teams_meetings.participants` JSONB | `source_id` or `id`, `name`, `email` | yes |
 | `teams_transcript_segments` | `speaker_source_id`, `speaker_name` | no |
-| `issues` | `creator_source_id`/`creator_name` | no |
-| `issue_versions` | `assignee_source_id`/`assignee_name`, `changed_by_id`/`changed_by_name`, once per version | no |
+| `issues` | `creator_source_id`, `creator_name` | no |
+| `issue_versions` | `assignee_source_id`, `assignee_name`, `changed_by_id`, `changed_by_name` | no |
 | `issue_comments` | `author_source_id`, `author_name` | no |
 | `document_versions` | `author_source_id`, `author_name` | no |
 | `pr_versions` | `author_source_id`, `author_name` | no |
 | `pr_reviews` | `author_source_id`, `author_name` | no |
 
-Only mail, Slack and Teams participants carry an email address. Four of the six sources have a source ID and a name but never an email, so email alone cannot join the data.
+The current graph resolves seven `Person` nodes: Anna Berg, Anna Lindqvist, Erik Nilsson, Martin Ek, Priya Raman, Support mailbox, and one ambiguous weak `Anna` name-only identity.
 
-The join works through the rows that carry **both** an email and a source ID:
+## Authoritative DDL
 
-- `slack_messages` with `author_email` and `author_source_id`
-- `teams_meetings.participants` entries with `email` and `source_id`
-
-Generation rules that keep identity resolvable:
-
-- Give every person at least one such bridge row, otherwise their mail identity and their issue/document/PR identity stay separate.
-- Reuse the same `source_id` for the same person in every table and every `source_instance`. The importer treats a source ID as globally unique by default (`SOURCE_ID_IS_GLOBAL`).
-- Reuse the same email spelling; case and surrounding whitespace are normalised, nothing else is.
-- Use functional mailbox local parts deliberately when an address is not a human actor. The initial recognised local parts are `noreply`, `no-reply`, `donotreply`, `do-not-reply`, `support`, `info`, `hello`, `contact`, `admin`, `team`, `help`, `sales`, `billing`, `notifications`, `jira`, `github`, `builds`, `ci`, `alerts`, `postmaster`, and `mailer-daemon`.
-- Do not give two different people the same name unless both also have an email or a source ID. A name alone can only attach a name-only occurrence to one existing identity; if the name matches several identities, the occurrence is kept separate and flagged as ambiguous.
-- Fill in `speaker_source_id` in `teams_transcript_segments` when the source system would know it. A transcript speaker with only a name depends entirely on the name being unique.
-
-## Full DDL
-
-The authoritative schema is defined in `scripts/setup_postgres_schema.py`. The DDL is reproduced here for handoff convenience.
-
-```sql
-CREATE TABLE mail_messages (
-    source_instance     TEXT NOT NULL,
-    message_id          TEXT NOT NULL,
-    sender_address      TEXT NOT NULL,
-    sender_name         TEXT,
-    recipients          JSONB NOT NULL,
-    subject             TEXT,
-    body                TEXT NOT NULL,
-    sent_at             TIMESTAMPTZ NOT NULL,
-    in_reply_to_id      TEXT,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, message_id),
-    CHECK (jsonb_typeof(recipients) = 'array')
-);
-
-CREATE TABLE slack_messages (
-    source_instance     TEXT NOT NULL,
-    message_id          TEXT NOT NULL,
-    version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    workspace_id        TEXT NOT NULL,
-    channel_id          TEXT NOT NULL,
-    channel_name        TEXT,
-    author_source_id    TEXT,
-    author_name         TEXT,
-    author_email        TEXT,
-    body                TEXT NOT NULL,
-    sent_at             TIMESTAMPTZ NOT NULL,
-    version_at          TIMESTAMPTZ NOT NULL,
-    thread_root_id      TEXT,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, workspace_id, channel_id, message_id, version_number),
-    CHECK (version_at >= sent_at)
-);
-
-CREATE TABLE teams_meetings (
-    source_instance     TEXT NOT NULL,
-    meeting_id          TEXT NOT NULL,
-    title               TEXT NOT NULL,
-    started_at          TIMESTAMPTZ NOT NULL,
-    ended_at            TIMESTAMPTZ,
-    participants        JSONB NOT NULL DEFAULT '[]'::jsonb,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, meeting_id),
-    CHECK (ended_at IS NULL OR ended_at >= started_at),
-    CHECK (jsonb_typeof(participants) = 'array')
-);
-
-CREATE TABLE teams_transcript_segments (
-    source_instance     TEXT NOT NULL,
-    meeting_id          TEXT NOT NULL,
-    segment_id          TEXT NOT NULL,
-    sequence_number     INTEGER NOT NULL CHECK (sequence_number > 0),
-    speaker_source_id   TEXT,
-    speaker_name        TEXT,
-    start_offset_ms     BIGINT NOT NULL CHECK (start_offset_ms >= 0),
-    end_offset_ms       BIGINT,
-    body                TEXT NOT NULL,
-    PRIMARY KEY (source_instance, meeting_id, segment_id),
-    UNIQUE (source_instance, meeting_id, sequence_number),
-    FOREIGN KEY (source_instance, meeting_id)
-        REFERENCES teams_meetings (source_instance, meeting_id),
-    CHECK (end_offset_ms IS NULL OR end_offset_ms >= start_offset_ms)
-);
-
-CREATE TABLE issues (
-    source_instance     TEXT NOT NULL,
-    issue_id            TEXT NOT NULL,
-    issue_key           TEXT NOT NULL,
-    created_at          TIMESTAMPTZ NOT NULL,
-    creator_source_id   TEXT,
-    creator_name        TEXT,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, issue_id),
-    UNIQUE (source_instance, issue_key)
-);
-
-CREATE TABLE issue_versions (
-    source_instance     TEXT NOT NULL,
-    issue_id            TEXT NOT NULL,
-    version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    issue_type          TEXT NOT NULL,
-    title               TEXT NOT NULL,
-    description         TEXT,
-    acceptance_criteria TEXT,
-    status              TEXT NOT NULL,
-    priority            TEXT,
-    assignee_source_id  TEXT,
-    assignee_name       TEXT,
-    changed_by_id       TEXT,
-    changed_by_name     TEXT,
-    version_at          TIMESTAMPTZ NOT NULL,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, issue_id, version_number),
-    UNIQUE (source_instance, issue_id, version_at),
-    FOREIGN KEY (source_instance, issue_id)
-        REFERENCES issues (source_instance, issue_id)
-);
-
-CREATE TABLE issue_comments (
-    source_instance     TEXT NOT NULL,
-    comment_id          TEXT NOT NULL,
-    version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    issue_id            TEXT NOT NULL,
-    author_source_id    TEXT,
-    author_name         TEXT,
-    body                TEXT NOT NULL,
-    created_at          TIMESTAMPTZ NOT NULL,
-    version_at          TIMESTAMPTZ NOT NULL,
-    reply_to_comment_id TEXT,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, comment_id, version_number),
-    FOREIGN KEY (source_instance, issue_id)
-        REFERENCES issues (source_instance, issue_id),
-    CHECK (version_at >= created_at)
-);
-
-CREATE TABLE document_versions (
-    source_instance     TEXT NOT NULL,
-    document_id         TEXT NOT NULL,
-    version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    document_type       TEXT NOT NULL,
-    title               TEXT NOT NULL,
-    body                TEXT NOT NULL,
-    content_format      TEXT NOT NULL DEFAULT 'markdown',
-    author_source_id    TEXT,
-    author_name         TEXT,
-    created_at          TIMESTAMPTZ NOT NULL,
-    version_at          TIMESTAMPTZ NOT NULL,
-    change_summary      TEXT,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, document_id, version_number),
-    CHECK (version_at >= created_at)
-);
-
-CREATE TABLE pr_versions (
-    source_instance     TEXT NOT NULL,
-    repository          TEXT NOT NULL,
-    pr_number           INTEGER NOT NULL CHECK (pr_number > 0),
-    version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    title               TEXT NOT NULL,
-    description         TEXT,
-    author_source_id    TEXT,
-    author_name         TEXT,
-    state               TEXT NOT NULL CHECK (state IN ('open', 'closed', 'merged')),
-    created_at          TIMESTAMPTZ NOT NULL,
-    version_at          TIMESTAMPTZ NOT NULL,
-    base_commit         TEXT NOT NULL,
-    head_commit         TEXT NOT NULL,
-    code_changes        JSONB NOT NULL,
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, repository, pr_number, version_number),
-    CHECK (version_at >= created_at),
-    CHECK (jsonb_typeof(code_changes) = 'array')
-);
-
-CREATE TABLE pr_reviews (
-    source_instance     TEXT NOT NULL,
-    repository          TEXT NOT NULL,
-    pr_number           INTEGER NOT NULL,
-    entry_type          TEXT NOT NULL CHECK (entry_type IN ('comment', 'approved', 'changes_requested', 'commented')),
-    source_id           TEXT NOT NULL,
-    version_number      INTEGER NOT NULL CHECK (version_number > 0),
-    pr_version_number   INTEGER NOT NULL,
-    reviewed_commit     TEXT,
-    author_source_id    TEXT,
-    author_name         TEXT,
-    body                TEXT,
-    created_at          TIMESTAMPTZ NOT NULL,
-    version_at          TIMESTAMPTZ NOT NULL,
-    reply_to_source_id  TEXT,
-    review_group_id     TEXT,
-    file_path           TEXT,
-    line_number         INTEGER CHECK (line_number > 0),
-    diff_side           TEXT CHECK (diff_side IN ('before', 'after')),
-    source_url          TEXT,
-    PRIMARY KEY (source_instance, repository, pr_number, source_id, version_number),
-    FOREIGN KEY (source_instance, repository, pr_number, pr_version_number)
-        REFERENCES pr_versions (source_instance, repository, pr_number, version_number),
-    CHECK (version_at >= created_at),
-    CHECK (
-        (line_number IS NULL AND diff_side IS NULL)
-        OR
-        (line_number IS NOT NULL AND diff_side IS NOT NULL AND file_path IS NOT NULL AND reviewed_commit IS NOT NULL)
-    )
-);
-
-CREATE INDEX idx_mail_reply
-    ON mail_messages (source_instance, in_reply_to_id);
-
-CREATE INDEX idx_slack_thread
-    ON slack_messages (source_instance, workspace_id, channel_id, thread_root_id, sent_at);
-
-CREATE INDEX idx_issue_versions_history
-    ON issue_versions (source_instance, issue_id, version_number);
-
-CREATE INDEX idx_issue_comments_issue
-    ON issue_comments (source_instance, issue_id, created_at);
-
-CREATE INDEX idx_pr_reviews_pr_version
-    ON pr_reviews (source_instance, repository, pr_number, pr_version_number);
-```
+The authoritative DDL is the `SCHEMA_SQL` string in `scripts/setup_postgres_schema.py`. If this document and that file disagree, update this document from the script and then verify against the live database.

@@ -22,6 +22,21 @@ from reference_extraction import (
 )
 from topic_event_extraction import MissingApiKeyError, build_knowledge_layer, knowledge_state_payload
 from embedding_pass import build_embeddings, embedding_state_payload
+from architecture_layer import (
+    architecture_state_payload,
+    build_architecture_layer,
+    PrerequisiteError as ArchitecturePrerequisiteError,
+)
+from causal_layer import (
+    causal_state_payload,
+    build_causal_layer,
+    PrerequisiteError as CausalPrerequisiteError,
+)
+from collaboration_layer import (
+    collaboration_state_payload,
+    build_collaboration_layer,
+    PrerequisiteError as CollaborationPrerequisiteError,
+)
 
 
 load_dotenv()
@@ -76,6 +91,33 @@ GRAPH_SOURCE_RELATIONSHIPS = {
         "EVIDENCED_BY",
         "CAUSED",
         "ACTED_IN_EVENT",
+    ],
+    "Architecture": [
+        "CONTAINS_MODULE",
+        "CONTAINS_FILE",
+        "MODIFIES_FILE",
+        "IMPLEMENTED_IN",
+        "PART_OF_REPOSITORY",
+        "DEPENDS_ON",
+        "COMPONENT_EVIDENCED_BY",
+    ],
+    "Causal": [
+        "CAUSED",
+        "CROSS_TOPIC_CAUSED",
+        "HAS_ROOT_CAUSE",
+        "ROOT_CAUSE_IN_COMPONENT",
+        "ROOT_CAUSE_EVIDENCED_BY",
+        "CONTRIBUTED_TO",
+        "AFFECTED_COMPONENT",
+    ],
+    "Collaboration": [
+        "HAS_EXPERTISE",
+        "EXPERTISE_IN",
+        "EXPERTISE_EVIDENCED_BY",
+        "WORKS_WITH",
+    ],
+    "Algorithms": [
+        "MEMBER_OF_COMMUNITY",
     ],
 }
 
@@ -422,6 +464,158 @@ def api_knowledge_build():
             with driver.session(database=database) as session:
                 result = build_knowledge_layer(session)
         return jsonify(result)
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/architecture", methods=["GET", "OPTIONS"])
+def api_architecture():
+    """Current Architecture layer (Repository/Module/File/Component) plus pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(architecture_state_payload(session))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/architecture/build", methods=["POST", "OPTIONS"])
+def api_architecture_build():
+    """Run the Architecture layer build (deterministic structure plus LLM components)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = build_architecture_layer(session)
+        return jsonify(result)
+    except ArchitecturePrerequisiteError as error:
+        return jsonify({"error": str(error)}), 409
+    except MissingApiKeyError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/causal", methods=["GET", "OPTIONS"])
+def api_causal():
+    """Current Causal layer (root causes, code contributions, cross-topic links) plus pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(causal_state_payload(session))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/causal/build", methods=["POST", "OPTIONS"])
+def api_causal_build():
+    """Run the Causal layer build."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = build_causal_layer(session)
+        return jsonify(result)
+    except CausalPrerequisiteError as error:
+        return jsonify({"error": str(error)}), 409
+    except MissingApiKeyError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/collaboration", methods=["GET", "OPTIONS"])
+def api_collaboration():
+    """Current Collaboration layer (expertise, collaboration pairs) plus pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(collaboration_state_payload(session))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/collaboration/build", methods=["POST", "OPTIONS"])
+def api_collaboration_build():
+    """Run the Collaboration layer build."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = build_collaboration_layer(session)
+        return jsonify(result)
+    except CollaborationPrerequisiteError as error:
+        return jsonify({"error": str(error)}), 409
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/algorithms", methods=["GET", "OPTIONS"])
+def api_algorithms():
+    """Current Graph algorithm results (collaboration metrics, bus factor) plus pipeline timestamps."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        from graph_algorithms import algorithms_state_payload
+    except ImportError as error:
+        return jsonify({
+            "error": f"Graph algorithms are unavailable: {error}. "
+                     "Install dependencies with .\\scripts\\install_deps.ps1."
+        }), 503
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(algorithms_state_payload(session))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/algorithms/run", methods=["POST", "OPTIONS"])
+def api_algorithms_run():
+    """Run the graph algorithm layer (networkx-based collaboration metrics and bus factor)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        from graph_algorithms import run_algorithms, PrerequisiteError as AlgorithmsPrerequisiteError
+    except ImportError as error:
+        return jsonify({
+            "error": f"Graph algorithms are unavailable: {error}. "
+                     "Install dependencies with .\\scripts\\install_deps.ps1."
+        }), 503
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database) as session:
+                result = run_algorithms(session)
+        return jsonify(result)
+    except AlgorithmsPrerequisiteError as error:
+        return jsonify({"error": str(error)}), 409
     except Exception as error:
         return jsonify({"error": str(error)}), 500
 
