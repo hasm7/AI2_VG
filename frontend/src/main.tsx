@@ -1463,7 +1463,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       <div className="source-filters" aria-label="Data source filters">
         {dataSources.map((source) => (
           <button
-            className={`source-filter-button${activeSource === source ? " source-filter-button-active" : ""}`}
+            className={`graph-action-button source-filter-button${activeSource === source ? " graph-action-button-active" : ""}`}
             type="button"
             key={source}
             onClick={() => filterBySource(source)}
@@ -1557,7 +1557,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       </div>
       <div className="graph-footer">
         <button
-          className="viewer-button"
+          className="graph-action-button"
           type="button"
           disabled={isViewerStarting}
           onClick={openSqlViewer}
@@ -3905,8 +3905,21 @@ function ChatPanel({ graphViewRef }: { graphViewRef: React.RefObject<GraphViewHa
 }
 
 function RightGraphicsPanel() {
+  const [isMotionOn, setIsMotionOn] = useState(true);
+
   return (
-    <aside className="right-graphics-panel" aria-label="Layer graphics">
+    <aside
+      className={`right-graphics-panel${isMotionOn ? "" : " right-graphics-paused"}`}
+      aria-label="Layer graphics"
+    >
+      <button
+        className="right-graphics-motion-toggle"
+        type="button"
+        aria-pressed={isMotionOn}
+        onClick={() => setIsMotionOn((current) => !current)}
+      >
+        {isMotionOn ? "Motion on" : "Motion off"}
+      </button>
       <svg className="layer-ladder-svg" viewBox="0 0 420 360" role="img" aria-label="Graph layer map">
         <defs>
           <filter id="layerMapGlow" x="-80%" y="-80%" width="260%" height="260%">
@@ -3918,6 +3931,8 @@ function RightGraphicsPanel() {
           </filter>
         </defs>
 
+        {/* Shift the ladder left so the brackets and the longest label are centered in the 420-wide viewBox. */}
+        <g transform="translate(-30 0)">
         <path className="layer-map-line" d="M110 76 Q88 76 88 90 V100 Q88 108 80 108 Q88 108 88 116 V126 Q88 140 110 140" />
         <path className="layer-map-line" d="M110 148 Q88 148 88 162 V172 Q88 180 80 180 Q88 180 88 188 V198 Q88 212 110 212" />
         <path className="layer-map-line" d="M110 222 Q88 222 88 236 V244 Q88 252 80 252 Q88 252 88 260 V270 Q88 284 110 284" />
@@ -3951,6 +3966,7 @@ function RightGraphicsPanel() {
           <circle className="layer-map-dot" cx="12" cy="18" r="4" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="25" cy="12" r="3" />
           <text x="40" y="23">Knowledge layer</text>
+        </g>
         </g>
       </svg>
 
