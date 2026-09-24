@@ -129,7 +129,7 @@ Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/
 
 ## Backend API
 
-`GET /api/causal` returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `root_causes`, `code_contributions`, `affected_components`, `cross_topic_links`, `within_topic_links` tables (the last read directly from the Knowledge layer's `CAUSED` relationships, read-only).
+`GET /api/causal` returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `root_causes`, `code_contributions`, `affected_components`, `cross_topic_links`, `within_topic_links` tables (the last read directly from the Knowledge layer's `CAUSED` relationships, read-only), plus `root_cause_links` (one row per `HAS_ROOT_CAUSE` relationship: `event_name`, `topic_name`, `root_cause_name`, `explanation`, `evidence`) and `relationships`: one row per relationship type this layer created (`generated_by = "causal-layer-v1"`) with `relationship_type`, `from_labels`, `to_labels`, `count`, sorted by type. The endpoint labels are read from the graph, not hard-coded; a type with no relationships (currently `CROSS_TOPIC_CAUSED`) does not appear.
 
 `POST /api/causal/build` returns the same payload plus `built_at`, `deleted_relationships`, `deleted_nodes`, `calls`, `model`, `discarded_evidence`, `token_usage`.
 
@@ -137,7 +137,19 @@ Errors: `409` if Knowledge or Architecture has not run; `503` if `OPENAI_API_KEY
 
 ## Frontend UI
 
-Tab `Causal layer` inside `BuildGraphLayersPanel`, rendered by `CausalLayerPanel`, fourth of seven inner tabs. Button text `Build causal layer` / `Building causal layer...`. Tables, in order: `Root causes`, `Code contributions`, `Affected components`, `Cross-topic links`, and the read-only `Within-topic links (from Knowledge layer)`.
+Tab `Root cause & impact layer` inside `BuildGraphLayersPanel`, rendered by `CausalLayerPanel`, fourth of seven inner tabs. Button text `Build root cause & impact layer` / `Building root cause & impact layer...`. "Root cause & impact layer" is the display name only; code, API routes (`/api/causal`), `CAUSAL_VERSION`, `last_causal_build_at`, and the graph filter key `Causal` keep the `causal` name. Below the button and status row, a description line (`reference-description`) reads `Finds the root causes behind events, the code changes that contributed to them, and the components they affected.` The counts row is preceded by the heading `Nodes and relationships:` (`reference-description reference-counts-heading`) and lists only what this layer creates: root causes, code contributions, affected components, cross-topic links. The within-topic link count is shown separately below it under the heading `Read from Knowledge layer:`, since `CAUSED` is created by the Knowledge layer.
+
+Tables, in order, each with a lighter `knowledge-section-kind` suffix in its heading and on each column. Long text columns use `reference-cell-wrap` (fixed 280px, wrapping).
+
+| Table | Heading suffix | Columns |
+| --- | --- | --- |
+| `Root causes` | `(node)` | Name (property), Type (property), Summary (property), Explains events (via HAS_ROOT_CAUSE), Components (via ROOT_CAUSE_IN_COMPONENT), Evidence (via ROOT_CAUSE_EVIDENCED_BY) |
+| `Relationships` | `(all relationship types)` | Relationship, From → To, Count |
+| `Root cause links` | `(relationship: HAS_ROOT_CAUSE)` | Event (start node), Topic (via EVENT_OF_TOPIC), Root cause (end node), Explanation (property), Evidence (property) |
+| `Code contributions` | `(relationship: CONTRIBUTED_TO)` | Code change (start node), File (start node property), Event (end node), Topic (via EVENT_OF_TOPIC), Contribution (property), Explanation (property), Evidence (property) |
+| `Affected components` | `(relationship: AFFECTED_COMPONENT)` | Event (start node), Topic (via EVENT_OF_TOPIC), Component (end node), Explanation (property), Evidence (property) |
+| `Cross-topic links` | `(relationship: CROSS_TOPIC_CAUSED)` | Cause (start node), Cause topic (via EVENT_OF_TOPIC), Effect (end node), Effect topic (via EVENT_OF_TOPIC), Explanation (property), Evidence (property) |
+| `Within-topic links` | `(relationship: CAUSED, from Knowledge layer)` | Topic (via EVENT_OF_TOPIC), Cause (start node), Effect (end node), Explanation (property); two-line caption `Created by the Knowledge layer. Rebuilding this layer does not change these links.` / `Sent to the model as context when finding the root causes above.` |
 
 ## Graph Visualization Filter
 

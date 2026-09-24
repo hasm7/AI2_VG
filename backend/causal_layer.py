@@ -654,6 +654,16 @@ def load_root_causes(tx):
     """)]
 
 
+def load_root_cause_links(tx):
+    return [dict(row) for row in tx.run("""
+        MATCH (e:Event)-[r:HAS_ROOT_CAUSE]->(rc:RootCause)
+        OPTIONAL MATCH (e)-[:EVENT_OF_TOPIC]->(t:Topic)
+        RETURN e.name AS event_name, t.name AS topic_name, rc.name AS root_cause_name,
+               r.explanation AS explanation, coalesce(r.evidence, []) AS evidence
+        ORDER BY t.name, e.occurred_at, rc.name
+    """)]
+
+
 def load_code_contributions(tx):
     return [dict(row) for row in tx.run("""
         MATCH (c:CodeChange)-[r:CONTRIBUTED_TO]->(e:Event)-[:EVENT_OF_TOPIC]->(t:Topic)
@@ -694,16 +704,29 @@ def load_within_topic_links(tx):
     """)]
 
 
+def load_relationships(tx):
+    return [dict(row) for row in tx.run("""
+        MATCH (a)-[r]->(b) WHERE r.generated_by = $version
+        RETURN type(r) AS relationship_type,
+               collect(DISTINCT head(labels(a))) AS from_labels,
+               collect(DISTINCT head(labels(b))) AS to_labels,
+               count(r) AS count
+        ORDER BY relationship_type
+    """, {"version": CAUSAL_VERSION})]
+
+
 def load_causal_state(session):
     def _read(tx):
         return {
             "state": read_pipeline_state(tx),
             "counts": load_counts(tx),
             "root_causes": load_root_causes(tx),
+            "root_cause_links": load_root_cause_links(tx),
             "code_contributions": load_code_contributions(tx),
             "affected_components": load_affected_components(tx),
             "cross_topic_links": load_cross_topic_links(tx),
             "within_topic_links": load_within_topic_links(tx),
+            "relationships": load_relationships(tx),
         }
 
     result = session.execute_read(_read)
@@ -717,10 +740,12 @@ def load_causal_state(session):
         "stale_reasons": staleness["reasons"],
         "counts": result["counts"],
         "root_causes": result["root_causes"],
+        "root_cause_links": result["root_cause_links"],
         "code_contributions": result["code_contributions"],
         "affected_components": result["affected_components"],
         "cross_topic_links": result["cross_topic_links"],
         "within_topic_links": result["within_topic_links"],
+        "relationships": result["relationships"],
     }
 
 

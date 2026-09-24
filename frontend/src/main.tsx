@@ -216,7 +216,7 @@ type ArchitectureFile = {
   components: string[];
 };
 
-type ArchitectureRelationship = {
+type LayerRelationship = {
   relationship_type: string;
   from_labels: string[];
   to_labels: string[];
@@ -235,7 +235,7 @@ type ArchitectureState = {
   components: ArchitectureComponent[];
   dependencies: ArchitectureDependency[];
   files: ArchitectureFile[];
-  relationships: ArchitectureRelationship[];
+  relationships: LayerRelationship[];
   built_at?: string;
   deleted_relationships?: number;
   deleted_nodes?: number;
@@ -267,6 +267,14 @@ type CausalRootCause = {
   summary: string;
   events: string[];
   components: string[];
+  evidence: string[];
+};
+
+type CausalRootCauseLink = {
+  event_name: string;
+  topic_name: string | null;
+  root_cause_name: string;
+  explanation: string;
   evidence: string[];
 };
 
@@ -312,10 +320,12 @@ type CausalState = {
   stale_reasons: string[];
   counts: CausalCounts;
   root_causes: CausalRootCause[];
+  root_cause_links: CausalRootCauseLink[];
   code_contributions: CausalCodeContribution[];
   affected_components: CausalAffectedComponent[];
   cross_topic_links: CausalCrossTopicLink[];
   within_topic_links: CausalWithinTopicLink[];
+  relationships: LayerRelationship[];
   built_at?: string;
   deleted_relationships?: number;
   deleted_nodes?: number;
@@ -780,7 +790,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const viewerCloseTimerRef = useRef<number | null>(null);
   const isMotionPausedRef = useRef(false);
   const motionLevelRef = useRef(1);
-  const areLabelsVisibleRef = useRef(true);
+  const areLabelsVisibleRef = useRef(false);
   const pendingSelectionRef = useRef<{ type: string; displayName: string } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -789,7 +799,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const [isLegendVisible, setIsLegendVisible] = useState(true);
   const [motionLevel, setMotionLevel] = useState(1);
   const [spacingLevel, setSpacingLevel] = useState(1);
-  const [areLabelsVisible, setAreLabelsVisible] = useState(true);
+  const [areLabelsVisible, setAreLabelsVisible] = useState(false);
   const [isNeighborMode, setIsNeighborMode] = useState(false);
   const [activeSource, setActiveSource] = useState<DataSource | "All">("All");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -2218,7 +2228,7 @@ function ArchitectureLayerPanel() {
           <h4 className="knowledge-card-title knowledge-section-title">
             Dependencies <span className="knowledge-section-kind">(relationship: DEPENDS_ON)</span>
           </h4>
-          <div className="reference-table-wrapper architecture-last-table">
+          <div className="reference-table-wrapper layer-last-table">
             <table className="reference-table">
               <thead>
                 <tr>
@@ -2269,11 +2279,11 @@ function CausalLayerPanel() {
       const response = await fetch("/api/causal");
       const data = (await response.json()) as CausalState;
       if (!response.ok || data.error) {
-        throw new Error(data.error || "Could not read the causal layer.");
+        throw new Error(data.error || "Could not read the root cause & impact layer.");
       }
       setState(data);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not read the causal layer.");
+      setError(loadError instanceof Error ? loadError.message : "Could not read the root cause & impact layer.");
     }
   };
 
@@ -2302,14 +2312,16 @@ function CausalLayerPanel() {
   };
 
   const rootCauses = state?.root_causes ?? [];
+  const rootCauseLinks = state?.root_cause_links ?? [];
   const codeContributions = state?.code_contributions ?? [];
   const affectedComponents = state?.affected_components ?? [];
   const crossTopicLinks = state?.cross_topic_links ?? [];
   const withinTopicLinks = state?.within_topic_links ?? [];
+  const relationships = state?.relationships ?? [];
   const counts = state?.counts;
 
   return (
-    <div className="knowledge-panel">
+    <div className="knowledge-panel causal-panel">
       <div className="reference-actions">
         <button
           className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
@@ -2317,12 +2329,12 @@ function CausalLayerPanel() {
           disabled={isRunning}
           onClick={runBuild}
         >
-          {isRunning ? "Building causal layer..." : "Build causal layer"}
+          {isRunning ? "Building root cause & impact layer..." : "Build root cause & impact layer"}
         </button>
         <div className="reference-status">
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
-          <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          <span>Last root cause &amp; impact build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
           {state?.needs_rerun ? (
             <span className="reference-stale">
               Upstream data has changed since the last build. Run it again.
@@ -2336,6 +2348,10 @@ function CausalLayerPanel() {
         </div>
       </div>
 
+      <p className="reference-description">
+        Finds the root causes behind events, the code changes that contributed to them, and the components they affected.
+      </p>
+
       {error ? <p className="reference-error">{error}</p> : null}
       {justRan && !error ? (
         <p className="reference-success">
@@ -2344,12 +2360,19 @@ function CausalLayerPanel() {
         </p>
       ) : null}
 
+      {counts ? <p className="reference-description reference-counts-heading">Nodes and relationships:</p> : null}
       {counts ? (
         <div className="reference-counts">
           <span className="reference-count">Root causes: <strong>{counts.root_causes}</strong></span>
           <span className="reference-count">Code contributions: <strong>{counts.code_contributions}</strong></span>
           <span className="reference-count">Affected components: <strong>{counts.affected_components}</strong></span>
           <span className="reference-count">Cross-topic links: <strong>{counts.cross_topic_links}</strong></span>
+        </div>
+      ) : null}
+
+      {counts ? <p className="reference-description reference-counts-heading">Read from Knowledge layer:</p> : null}
+      {counts ? (
+        <div className="reference-counts">
           <span className="reference-count">Within-topic links: <strong>{counts.within_topic_links}</strong></span>
         </div>
       ) : null}
@@ -2370,117 +2393,282 @@ function CausalLayerPanel() {
 
       {rootCauses.length === 0 && codeContributions.length === 0 && affectedComponents.length === 0
       && crossTopicLinks.length === 0 && withinTopicLinks.length === 0 ? (
-        <p className="reference-empty">No causal layer yet. Press the button to build it.</p>
+        <p className="reference-empty">No root cause & impact layer yet. Press the button to build it.</p>
       ) : (
         <>
-          <h4 className="knowledge-card-title knowledge-section-title">Root causes</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Root causes <span className="knowledge-section-kind">(node)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Name</th><th>Type</th><th>Summary</th><th>Explains events</th><th>Components</th><th>Evidence</th>
+                  <th className="reference-cell-wrap">
+                    Name <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Type <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Summary <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explains events <span className="knowledge-section-kind">(via HAS_ROOT_CAUSE)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Components <span className="knowledge-section-kind">(via ROOT_CAUSE_IN_COMPONENT)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(via ROOT_CAUSE_EVIDENCED_BY)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {rootCauses.map((rc) => (
                   <tr key={rc.slug}>
-                    <td>{rc.name}</td>
+                    <td className="reference-cell-wrap">{rc.name}</td>
                     <td>{rc.cause_type}</td>
-                    <td>{rc.summary}</td>
-                    <td>{rc.events.join(", ")}</td>
-                    <td>{rc.components.join(", ")}</td>
-                    <td>{rc.evidence.join(", ")}</td>
+                    <td className="reference-cell-wrap">{rc.summary}</td>
+                    <td className="reference-cell-wrap">{rc.events.join(", ")}</td>
+                    <td className="reference-cell-wrap">{rc.components.join(", ")}</td>
+                    <td className="reference-cell-wrap">{rc.evidence.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Code contributions</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Relationships <span className="knowledge-section-kind">(all relationship types)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Code change</th><th>File</th><th>Event</th><th>Topic</th><th>Contribution</th><th>Explanation</th><th>Evidence</th>
+                  <th>Relationship</th>
+                  <th className="reference-cell-wrap">From → To</th>
+                  <th className="reference-cell-center">Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {relationships.map((relationship) => (
+                  <tr key={relationship.relationship_type}>
+                    <td>{relationship.relationship_type}</td>
+                    <td className="reference-cell-wrap">
+                      {relationship.from_labels.join(", ")} → {relationship.to_labels.join(", ")}
+                    </td>
+                    <td className="reference-cell-center">{relationship.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Root cause links <span className="knowledge-section-kind">(relationship: HAS_ROOT_CAUSE)</span>
+          </h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th className="reference-cell-wrap">
+                    Event <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Root cause <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explanation <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rootCauseLinks.map((row, index) => (
+                  <tr key={`${row.event_name}-${row.root_cause_name}-${index}`}>
+                    <td className="reference-cell-wrap">{row.event_name}</td>
+                    <td className="reference-cell-wrap">{row.topic_name}</td>
+                    <td className="reference-cell-wrap">{row.root_cause_name}</td>
+                    <td className="reference-cell-wrap">{row.explanation}</td>
+                    <td className="reference-cell-wrap">{row.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Code contributions <span className="knowledge-section-kind">(relationship: CONTRIBUTED_TO)</span>
+          </h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th className="reference-cell-wrap">
+                    Code change <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    File <span className="knowledge-section-kind">(start node property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Event <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                  </th>
+                  <th>
+                    Contribution <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explanation <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {codeContributions.map((row, index) => (
                   <tr key={`${row.code_change}-${row.event_name}-${index}`}>
-                    <td>{row.code_change}</td>
-                    <td>{row.file_path}</td>
-                    <td>{row.event_name}</td>
-                    <td>{row.topic_name}</td>
+                    <td className="reference-cell-wrap">{row.code_change}</td>
+                    <td className="reference-cell-wrap">{row.file_path}</td>
+                    <td className="reference-cell-wrap">{row.event_name}</td>
+                    <td className="reference-cell-wrap">{row.topic_name}</td>
                     <td>{row.contribution_type}</td>
-                    <td>{row.explanation}</td>
-                    <td>{row.evidence.join(", ")}</td>
+                    <td className="reference-cell-wrap">{row.explanation}</td>
+                    <td className="reference-cell-wrap">{row.evidence.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Affected components</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Affected components <span className="knowledge-section-kind">(relationship: AFFECTED_COMPONENT)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Event</th><th>Topic</th><th>Component</th><th>Explanation</th><th>Evidence</th>
+                  <th className="reference-cell-wrap">
+                    Event <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Component <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explanation <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {affectedComponents.map((row, index) => (
                   <tr key={`${row.event_name}-${row.component_name}-${index}`}>
-                    <td>{row.event_name}</td>
-                    <td>{row.topic_name}</td>
-                    <td>{row.component_name}</td>
-                    <td>{row.explanation}</td>
-                    <td>{row.evidence.join(", ")}</td>
+                    <td className="reference-cell-wrap">{row.event_name}</td>
+                    <td className="reference-cell-wrap">{row.topic_name}</td>
+                    <td className="reference-cell-wrap">{row.component_name}</td>
+                    <td className="reference-cell-wrap">{row.explanation}</td>
+                    <td className="reference-cell-wrap">{row.evidence.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Cross-topic links</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Cross-topic links <span className="knowledge-section-kind">(relationship: CROSS_TOPIC_CAUSED)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Cause</th><th>Cause topic</th><th>Effect</th><th>Effect topic</th><th>Explanation</th><th>Evidence</th>
+                  <th className="reference-cell-wrap">
+                    Cause <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Cause topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Effect <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Effect topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explanation <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
+                {crossTopicLinks.length === 0 ? (
+                  <tr>
+                    <td className="reference-empty" colSpan={6}>
+                      No cross-topic links. These need events in at least two different topics.
+                    </td>
+                  </tr>
+                ) : null}
                 {crossTopicLinks.map((row, index) => (
                   <tr key={`${row.cause_name}-${row.effect_name}-${index}`}>
-                    <td>{row.cause_name}</td>
-                    <td>{row.cause_topic}</td>
-                    <td>{row.effect_name}</td>
-                    <td>{row.effect_topic}</td>
-                    <td>{row.explanation}</td>
-                    <td>{row.evidence.join(", ")}</td>
+                    <td className="reference-cell-wrap">{row.cause_name}</td>
+                    <td className="reference-cell-wrap">{row.cause_topic}</td>
+                    <td className="reference-cell-wrap">{row.effect_name}</td>
+                    <td className="reference-cell-wrap">{row.effect_topic}</td>
+                    <td className="reference-cell-wrap">{row.explanation}</td>
+                    <td className="reference-cell-wrap">{row.evidence.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Within-topic links (from Knowledge layer)</h4>
-          <p className="knowledge-table-caption">This table is read-only.</p>
-          <div className="reference-table-wrapper">
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Within-topic links{" "}
+            <span className="knowledge-section-kind">(relationship: CAUSED, from Knowledge layer)</span>
+          </h4>
+          <p className="knowledge-table-caption">
+            Created by the Knowledge layer. Rebuilding this layer does not change these links.
+            <br />
+            Sent to the model as context when finding the root causes above.
+          </p>
+          <div className="reference-table-wrapper layer-last-table">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Topic</th><th>Cause</th><th>Effect</th><th>Explanation</th>
+                  <th className="reference-cell-wrap">
+                    Topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Cause <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Effect <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explanation <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {withinTopicLinks.map((row, index) => (
                   <tr key={`${row.topic_name}-${row.cause_name}-${row.effect_name}-${index}`}>
-                    <td>{row.topic_name}</td>
-                    <td>{row.cause_name}</td>
-                    <td>{row.effect_name}</td>
-                    <td>{row.explanation}</td>
+                    <td className="reference-cell-wrap">{row.topic_name}</td>
+                    <td className="reference-cell-wrap">{row.cause_name}</td>
+                    <td className="reference-cell-wrap">{row.effect_name}</td>
+                    <td className="reference-cell-wrap">{row.explanation}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2555,7 +2743,7 @@ function CollaborationLayerPanel() {
           <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
-          <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          <span>Last root cause &amp; impact build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
           {state?.needs_rerun ? (
             <span className="reference-stale">
               Upstream data has changed since the last build. Run it again.
@@ -2726,7 +2914,7 @@ function GraphAlgorithmsPanel() {
         <div className="reference-status">
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
-          <span>Last causal build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          <span>Last root cause &amp; impact build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
           <span>Last collaboration build: {formatTimestamp(state?.last_collaboration_build_at ?? null)}</span>
           <span>Last algorithms run: {formatTimestamp(state?.last_algorithms_run_at ?? null)}</span>
           {state?.needs_rerun ? (
@@ -3044,7 +3232,7 @@ const buildGraphLayersTabs: Array<{ id: BuildGraphLayersTab; label: string }> = 
   { id: "reference", label: "Reference extraction" },
   { id: "knowledge", label: "Knowledge layer" },
   { id: "architecture", label: "Architecture layer" },
-  { id: "causal", label: "Causal layer" },
+  { id: "causal", label: "Root cause & impact layer" },
   { id: "collaboration", label: "Collaboration layer" },
   { id: "algorithms", label: "Graph algorithms" },
   { id: "embeddings", label: "Embeddings" },
@@ -3349,7 +3537,7 @@ function RightGraphicsPanel() {
           <path className="layer-map-icon-line" d="M17 14 L24 20 L17 26" />
           <circle className="layer-map-dot" cx="0" cy="20" r="4" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="26" cy="20" r="4" />
-          <text x="40" y="24">Causal layer</text>
+          <text x="40" y="24">Root cause &amp; impact layer</text>
         </g>
 
         <g className="layer-map-node" transform="translate(126 202)">

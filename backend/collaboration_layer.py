@@ -456,7 +456,7 @@ def collaboration_state_payload(session):
 def build_collaboration_layer(session):
     state = session.execute_read(read_pipeline_state)
     if not (state.get("last_layer_build_at") and state.get("last_architecture_build_at") and state.get("last_causal_build_at")):
-        raise PrerequisiteError("Run Knowledge, Architecture and Causal layers first.")
+        raise PrerequisiteError("Run Knowledge, Architecture and Root cause & impact layers first.")
 
     generated_at = now_iso()
     session.execute_write(ensure_collaboration_constraints)

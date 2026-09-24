@@ -45,7 +45,7 @@ STAGE_LABELS = {
     "references": "Reference extraction",
     "knowledge": "Knowledge layer",
     "architecture": "Architecture layer",
-    "causal": "Causal layer",
+    "causal": "Root cause & impact layer",
     "collaboration": "Collaboration layer",
     "algorithms": "Graph algorithms",
     "embeddings": "Embeddings",

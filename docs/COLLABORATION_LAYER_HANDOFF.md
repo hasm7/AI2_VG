@@ -103,7 +103,7 @@ CREATE CONSTRAINT expertise_key IF NOT EXISTS FOR (n:Expertise) REQUIRE (n.perso
 
 ## Build/Rebuild Behavior
 
-1. Require `last_layer_build_at`, `last_architecture_build_at`, and `last_causal_build_at` to all exist (else `409 {"error": "Run Knowledge, Architecture and Causal layers first."}`).
+1. Require `last_layer_build_at`, `last_architecture_build_at`, and `last_causal_build_at` to all exist (else `409 {"error": "Run Knowledge, Architecture and Root cause & impact layers first."}`).
 2. No model call; nothing can fail partway that would require the delete-after-success ordering the LLM layers use. The layer still deletes only its own previous data (`generated_by = "collaboration-layer-v1"`) before writing.
 3. Compute activities, subjects, expertise, and collaboration pairs; write `Expertise`, `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH`.
 4. Update `PipelineState.last_collaboration_build_at`.

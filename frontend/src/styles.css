@@ -1143,12 +1143,20 @@ main {
   overflow: auto;
 }
 
-.architecture-panel {
+.architecture-panel,
+.causal-panel {
   grid-template-rows: none;
   grid-auto-rows: max-content;
 }
 
-.architecture-last-table {
+.causal-panel .knowledge-table-caption {
+  margin: -6px 0 -4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #64748b;
+}
+
+.layer-last-table {
   margin-bottom: 20px;
 }
 
