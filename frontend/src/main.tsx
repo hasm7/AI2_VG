@@ -353,6 +353,7 @@ type CollaborationExpertise = {
   activity_count: number;
   first_activity_at: string | null;
   last_activity_at: string | null;
+  evidence: string[];
 };
 
 type CollaborationWorksWith = {
@@ -381,6 +382,7 @@ type CollaborationState = {
   expertise: CollaborationExpertise[];
   works_with: CollaborationWorksWith[];
   excluded_persons: CollaborationExcludedPerson[];
+  relationships: LayerRelationship[];
   built_at?: string;
   deleted_relationships?: number;
   deleted_nodes?: number;
@@ -2691,11 +2693,11 @@ function CollaborationLayerPanel() {
       const response = await fetch("/api/collaboration");
       const data = (await response.json()) as CollaborationState;
       if (!response.ok || data.error) {
-        throw new Error(data.error || "Could not read the collaboration layer.");
+        throw new Error(data.error || "Could not read the expertise & collaboration layer.");
       }
       setState(data);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not read the collaboration layer.");
+      setError(loadError instanceof Error ? loadError.message : "Could not read the expertise & collaboration layer.");
     }
   };
 
@@ -2726,10 +2728,11 @@ function CollaborationLayerPanel() {
   const expertise = state?.expertise ?? [];
   const worksWith = state?.works_with ?? [];
   const excludedPersons = state?.excluded_persons ?? [];
+  const relationships = state?.relationships ?? [];
   const counts = state?.counts;
 
   return (
-    <div className="knowledge-panel">
+    <div className="knowledge-panel collaboration-panel">
       <div className="reference-actions">
         <button
           className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
@@ -2737,7 +2740,7 @@ function CollaborationLayerPanel() {
           disabled={isRunning}
           onClick={runBuild}
         >
-          {isRunning ? "Building collaboration layer..." : "Build collaboration layer"}
+          {isRunning ? "Building expertise & collaboration layer..." : "Build expertise & collaboration layer"}
         </button>
         <div className="reference-status">
           <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
@@ -2757,6 +2760,11 @@ function CollaborationLayerPanel() {
         </div>
       </div>
 
+      <p className="reference-description">
+        Scores each person&apos;s expertise per topic and component from their activity, and finds which people share
+        work items.
+      </p>
+
       {error ? <p className="reference-error">{error}</p> : null}
       {justRan && !error ? (
         <p className="reference-success">
@@ -2764,26 +2772,63 @@ function CollaborationLayerPanel() {
         </p>
       ) : null}
 
+      {counts ? <p className="reference-description reference-counts-heading">Nodes and relationships:</p> : null}
       {counts ? (
         <div className="reference-counts">
           <span className="reference-count">Expertise entries: <strong>{counts.expertise}</strong></span>
-          <span className="reference-count">Persons with expertise: <strong>{counts.persons_with_expertise}</strong></span>
           <span className="reference-count">Collaboration pairs: <strong>{counts.works_with_pairs}</strong></span>
+        </div>
+      ) : null}
+
+      {counts ? <p className="reference-description reference-counts-heading">People (existing Person nodes):</p> : null}
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">Persons with expertise: <strong>{counts.persons_with_expertise}</strong></span>
           <span className="reference-count">Excluded persons: <strong>{counts.excluded_persons}</strong></span>
         </div>
       ) : null}
 
       {expertise.length === 0 && worksWith.length === 0 ? (
-        <p className="reference-empty">No collaboration layer yet. Press the button to build it.</p>
+        <p className="reference-empty">No expertise & collaboration layer yet. Press the button to build it.</p>
       ) : (
         <>
-          <h4 className="knowledge-card-title knowledge-section-title">Expertise</h4>
-          <div className="reference-table-wrapper">
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Expertise <span className="knowledge-section-kind">(node)</span>
+          </h4>
+          <div className="reference-table-wrapper reference-table-wrapper-capped">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Person</th><th>Subject type</th><th>Subject</th><th>Score</th><th>Share</th>
-                  <th>Rank</th><th>Activities</th><th>First activity</th><th>Last activity</th>
+                  <th>
+                    Person <span className="knowledge-section-kind">(via HAS_EXPERTISE)</span>
+                  </th>
+                  <th>
+                    Subject type <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Subject <span className="knowledge-section-kind">(via EXPERTISE_IN)</span>
+                  </th>
+                  <th>
+                    Score <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Share <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Rank <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Activities <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    First activity <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Last activity <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(via EXPERTISE_EVIDENCED_BY)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -2798,18 +2843,61 @@ function CollaborationLayerPanel() {
                     <td>{row.activity_count}</td>
                     <td>{formatTimestamp(row.first_activity_at)}</td>
                     <td>{formatTimestamp(row.last_activity_at)}</td>
+                    <td className="reference-cell-wrap">{row.evidence.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Collaboration</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Relationships <span className="knowledge-section-kind">(all relationship types)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Person A</th><th>Person B</th><th>Weight</th><th>Work item types</th><th>Shared work items</th>
+                  <th>Relationship</th>
+                  <th className="reference-cell-wrap">From → To</th>
+                  <th className="reference-cell-center">Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {relationships.map((relationship) => (
+                  <tr key={relationship.relationship_type}>
+                    <td>{relationship.relationship_type}</td>
+                    <td className="reference-cell-wrap">
+                      {relationship.from_labels.join(", ")} → {relationship.to_labels.join(", ")}
+                    </td>
+                    <td className="reference-cell-center">{relationship.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Collaboration <span className="knowledge-section-kind">(relationship: WORKS_WITH)</span>
+          </h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>
+                    Person A <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th>
+                    Person B <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th>
+                    Weight <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Work item types <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Shared work items <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -2818,20 +2906,34 @@ function CollaborationLayerPanel() {
                     <td>{row.person_a}</td>
                     <td>{row.person_b}</td>
                     <td>{row.weight}</td>
-                    <td>{row.work_item_types.join(", ")}</td>
-                    <td>{row.shared_work_items.join(", ")}</td>
+                    <td className="reference-cell-wrap">{row.work_item_types.join(", ")}</td>
+                    <td className="reference-cell-wrap">{row.shared_work_items.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Excluded persons</h4>
-          <div className="reference-table-wrapper">
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Excluded persons <span className="knowledge-section-kind">(existing Person nodes)</span>
+          </h4>
+          <p className="knowledge-table-caption">
+            Not given expertise or collaboration: mailboxes are not people, and ambiguous identities could be matched
+            to the wrong person.
+          </p>
+          <div className="reference-table-wrapper layer-last-table">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Person</th><th>Person key</th><th>Reason</th>
+                  <th>
+                    Person <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Person key <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Reason <span className="knowledge-section-kind">(computed from properties)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -2915,7 +3017,7 @@ function GraphAlgorithmsPanel() {
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
           <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
           <span>Last root cause &amp; impact build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
-          <span>Last collaboration build: {formatTimestamp(state?.last_collaboration_build_at ?? null)}</span>
+          <span>Last expertise &amp; collaboration build: {formatTimestamp(state?.last_collaboration_build_at ?? null)}</span>
           <span>Last algorithms run: {formatTimestamp(state?.last_algorithms_run_at ?? null)}</span>
           {state?.needs_rerun ? (
             <span className="reference-stale">
@@ -3233,7 +3335,7 @@ const buildGraphLayersTabs: Array<{ id: BuildGraphLayersTab; label: string }> = 
   { id: "knowledge", label: "Knowledge layer" },
   { id: "architecture", label: "Architecture layer" },
   { id: "causal", label: "Root cause & impact layer" },
-  { id: "collaboration", label: "Collaboration layer" },
+  { id: "collaboration", label: "Expertise & collaboration layer" },
   { id: "algorithms", label: "Graph algorithms" },
   { id: "embeddings", label: "Embeddings" },
 ];
@@ -3529,7 +3631,7 @@ function RightGraphicsPanel() {
           <circle className="layer-map-dot" cx="0" cy="18" r="5" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="16" cy="10" r="4" />
           <line className="layer-map-icon-line" x1="0" y1="18" x2="16" y2="10" />
-          <text x="40" y="22">Collaboration layer</text>
+          <text x="40" y="22">Expertise &amp; collaboration layer</text>
         </g>
 
         <g className="layer-map-node" transform="translate(126 124)">

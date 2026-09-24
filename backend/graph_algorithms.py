@@ -387,7 +387,7 @@ def algorithms_state_payload(session):
 def run_algorithms(session):
     state = session.execute_read(read_pipeline_state)
     if not state.get("last_collaboration_build_at"):
-        raise PrerequisiteError("Run Collaboration layer first.")
+        raise PrerequisiteError("Run Expertise & collaboration layer first.")
 
     run_at = now_iso()
 

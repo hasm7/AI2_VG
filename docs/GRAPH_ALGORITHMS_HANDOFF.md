@@ -96,7 +96,7 @@ CREATE CONSTRAINT community_key IF NOT EXISTS FOR (n:Community) REQUIRE n.commun
 
 ## Build/Rebuild Behavior
 
-1. Require `last_collaboration_build_at` to exist (else `409 {"error": "Run Collaboration layer first."}`).
+1. Require `last_collaboration_build_at` to exist (else `409 {"error": "Run Expertise & collaboration layer first."}`).
 2. No model call. Compute all metrics into Python data structures first.
 3. `REMOVE` the algorithm properties from `Person`, `Topic`, `Component`; delete the previous `Community`/`MEMBER_OF_COMMUNITY` layer by `generated_by = "graph-algorithms-v1"`.
 4. Write the new `Community` nodes and `MEMBER_OF_COMMUNITY` edges, then the `Person`/`Topic`/`Component` metric properties.

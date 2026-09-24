@@ -176,7 +176,7 @@ STAGE_LABELS = {
     "knowledge": "Knowledge layer",
     "architecture": "Architecture layer",
     "causal": "Root cause & impact layer",
-    "collaboration": "Collaboration layer",
+    "collaboration": "Expertise & collaboration layer",
     "algorithms": "Graph algorithms",
     "embeddings": "Embeddings",
 }

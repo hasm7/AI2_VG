@@ -441,6 +441,7 @@ main {
 }
 
 .center-tabs-inner {
+  align-items: stretch;
   flex-wrap: wrap;
   row-gap: 2px;
   padding-left: 0;
@@ -1144,16 +1145,22 @@ main {
 }
 
 .architecture-panel,
-.causal-panel {
+.causal-panel,
+.collaboration-panel {
   grid-template-rows: none;
   grid-auto-rows: max-content;
 }
 
-.causal-panel .knowledge-table-caption {
+.causal-panel .knowledge-table-caption,
+.collaboration-panel .knowledge-table-caption {
   margin: -6px 0 -4px;
   font-size: 11px;
   line-height: 1.4;
   color: #64748b;
+}
+
+.reference-table-wrapper-capped {
+  max-height: 60vh;
 }
 
 .layer-last-table {

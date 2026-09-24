@@ -130,7 +130,16 @@ Errors: `409` if an upstream layer has not run; `500` otherwise. This layer neve
 
 ## Frontend UI
 
-Tab `Collaboration layer` inside `BuildGraphLayersPanel`, rendered by `CollaborationLayerPanel`, fifth of seven inner tabs. Button text `Build collaboration layer` / `Building collaboration layer...`. Tables, in order: `Expertise`, `Collaboration`, `Excluded persons`.
+Tab `Expertise & collaboration layer` inside `BuildGraphLayersPanel`, rendered by `CollaborationLayerPanel`, fifth of seven inner tabs. Button text `Build expertise & collaboration layer` / `Building expertise & collaboration layer...`. "Expertise & collaboration layer" is the display name only; code, API routes (`/api/collaboration`), `last_collaboration_build_at`, and the graph filter key `Collaboration` keep the `collaboration` name. Below the button and status row, a description line (`reference-description`) reads `Scores each person's expertise per topic and component from their activity, and finds which people share work items.` The counts are split in two rows: `Nodes and relationships:` (expertise entries, collaboration pairs) and `People (existing Person nodes):` (persons with expertise, excluded persons), since the last two describe existing `Person` nodes rather than anything this layer creates. The `Expertise (node)` table has an `Evidence (via EXPERTISE_EVIDENCED_BY)` column listing the activity nodes behind each score (`evidence` on each `expertise` row, one entry per node; `SlackMessage` entries get a ` v<version_number>` suffix so versions of the same message stay distinct, matching `activity_count`). A `Relationships (all relationship types)` table sits between `Expertise (node)` and `Collaboration`, listing every relationship type this layer created (`generated_by = "collaboration-layer-v1"`) with From → To labels read from the graph and a count; `GET /api/collaboration` returns it as `relationships` (`relationship_type`, `from_labels`, `to_labels`, `count`). 
+
+Tables, in order, each with a lighter `knowledge-section-kind` suffix in its heading and on each column. Long text columns use `reference-cell-wrap` (fixed 280px, wrapping).
+
+| Table | Heading suffix | Columns |
+| --- | --- | --- |
+| `Expertise` | `(node)` | Person (via HAS_EXPERTISE), Subject type (property), Subject (via EXPERTISE_IN), Score, Share, Rank, Activities, First activity, Last activity (all property), Evidence (via EXPERTISE_EVIDENCED_BY); height capped at `60vh` (`reference-table-wrapper-capped`) so its horizontal scrollbar stays in view |
+| `Relationships` | `(all relationship types)` | Relationship, From → To, Count |
+| `Collaboration` | `(relationship: WORKS_WITH)` | Person A (start node), Person B (end node), Weight (property), Work item types (property), Shared work items (property) |
+| `Excluded persons` | `(existing Person nodes)` | Person (property), Person key (property), Reason (computed from properties); caption `Not given expertise or collaboration: mailboxes are not people, and ambiguous identities could be matched to the wrong person.` |
 
 ## Graph Visualization Filter
 

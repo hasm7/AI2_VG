@@ -400,10 +400,16 @@ def load_expertise_rows(tx):
     return [dict(row) for row in tx.run("""
         MATCH (p:Person)-[:HAS_EXPERTISE]->(e:Expertise)
         OPTIONAL MATCH (e)-[:EXPERTISE_IN]->(subject)
+        OPTIONAL MATCH (e)-[:EXPERTISE_EVIDENCED_BY]->(ev)
+        WITH p, e, subject, collect(DISTINCT ev) AS evidence_nodes
         RETURN p.name AS person_name, e.subject_label AS subject_label,
                coalesce(subject.name, subject.display_name) AS subject_name,
                e.score AS score, e.share AS share, e.rank AS rank, e.activity_count AS activity_count,
-               e.first_activity_at AS first_activity_at, e.last_activity_at AS last_activity_at
+               e.first_activity_at AS first_activity_at, e.last_activity_at AS last_activity_at,
+               [n IN evidence_nodes |
+                   coalesce(n.display_name, n.name, '') +
+                   CASE WHEN n:SlackMessage AND n.version_number IS NOT NULL
+                        THEN ' v' + toString(n.version_number) ELSE '' END] AS evidence
         ORDER BY subject_name, e.rank
     """)]
 
@@ -417,6 +423,17 @@ def load_works_with_rows(tx):
     """)]
 
 
+def load_relationships(tx):
+    return [dict(row) for row in tx.run("""
+        MATCH (a)-[r]->(b) WHERE r.generated_by = $version
+        RETURN type(r) AS relationship_type,
+               collect(DISTINCT head(labels(a))) AS from_labels,
+               collect(DISTINCT head(labels(b))) AS to_labels,
+               count(r) AS count
+        ORDER BY relationship_type
+    """, {"version": COLLABORATION_VERSION})]
+
+
 def load_collaboration_state(session):
     def _read(tx):
         return {
@@ -425,6 +442,7 @@ def load_collaboration_state(session):
             "expertise": load_expertise_rows(tx),
             "works_with": load_works_with_rows(tx),
             "excluded_persons": load_excluded_persons(tx),
+            "relationships": load_relationships(tx),
         }
 
     result = session.execute_read(_read)
@@ -442,6 +460,7 @@ def load_collaboration_state(session):
         "expertise": result["expertise"],
         "works_with": result["works_with"],
         "excluded_persons": result["excluded_persons"],
+        "relationships": result["relationships"],
     }
 
 
