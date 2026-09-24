@@ -1146,17 +1146,31 @@ main {
 
 .architecture-panel,
 .causal-panel,
-.collaboration-panel {
+.collaboration-panel,
+.algorithms-panel {
   grid-template-rows: none;
   grid-auto-rows: max-content;
 }
 
 .causal-panel .knowledge-table-caption,
-.collaboration-panel .knowledge-table-caption {
+.collaboration-panel .knowledge-table-caption,
+.algorithms-panel .knowledge-table-caption {
   margin: -6px 0 -4px;
   font-size: 11px;
   line-height: 1.4;
   color: #64748b;
+}
+
+.knowledge-table-caption p {
+  margin: 0 0 6px;
+}
+
+.knowledge-table-caption p:last-child {
+  margin-bottom: 0;
+}
+
+.knowledge-table-caption strong {
+  color: #475569;
 }
 
 .reference-table-wrapper-capped {

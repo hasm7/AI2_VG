@@ -391,6 +391,7 @@ type CollaborationState = {
 
 type AlgorithmsCounts = {
   communities: number;
+  community_memberships: number;
   persons: number;
   topics: number;
   components: number;
@@ -3001,9 +3002,15 @@ function GraphAlgorithmsPanel() {
   const busFactor = state?.bus_factor ?? [];
   const components = state?.components ?? [];
   const counts = state?.counts;
+  const personsByDegree = [...persons].sort(
+    (a, b) => (b.collab_weighted_degree ?? -1) - (a.collab_weighted_degree ?? -1),
+  );
+  const personsByBetweenness = [...persons].sort(
+    (a, b) => (b.collab_betweenness ?? -1) - (a.collab_betweenness ?? -1),
+  );
 
   return (
-    <div className="knowledge-panel">
+    <div className="knowledge-panel algorithms-panel">
       <div className="reference-actions">
         <button
           className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
@@ -3032,6 +3039,11 @@ function GraphAlgorithmsPanel() {
         </div>
       </div>
 
+      <p className="reference-description">
+        Computes collaboration metrics, communities and bus factor from the existing graph. Metrics are stored as
+        properties on existing nodes; communities are created as new Community nodes.
+      </p>
+
       {error ? <p className="reference-error">{error}</p> : null}
       {justRan && !error ? (
         <p className="reference-success">
@@ -3039,9 +3051,17 @@ function GraphAlgorithmsPanel() {
         </p>
       ) : null}
 
+      {counts ? <p className="reference-description reference-counts-heading">Nodes and relationships:</p> : null}
       {counts ? (
         <div className="reference-counts">
           <span className="reference-count">Communities: <strong>{counts.communities}</strong></span>
+          <span className="reference-count">Community memberships: <strong>{counts.community_memberships}</strong></span>
+        </div>
+      ) : null}
+
+      {counts ? <p className="reference-description reference-counts-heading">Analyzed (existing nodes):</p> : null}
+      {counts ? (
+        <div className="reference-counts">
           <span className="reference-count">Persons: <strong>{counts.persons}</strong></span>
           <span className="reference-count">Topics: <strong>{counts.topics}</strong></span>
           <span className="reference-count">Components: <strong>{counts.components}</strong></span>
@@ -3052,33 +3072,33 @@ function GraphAlgorithmsPanel() {
         <p className="reference-empty">No algorithm results yet. Press the button to run them.</p>
       ) : (
         <>
-          <h4 className="knowledge-card-title knowledge-section-title">Persons</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Communities <span className="knowledge-section-kind">(node, Louvain community detection algorithm)</span>
+          </h4>
+          <p className="knowledge-table-caption">
+            Groups of people whose collaboration is stronger inside the group than with people outside it.
+            <br />
+            Louvain starts with every person in their own group, moves people between groups as long as the grouping
+            improves, then merges the groups. Stronger WORKS_WITH weights pull people into the same group.
+            <br />
+            Louvain tries people in a random order, so two runs could give different groups. The random order always
+            starts from the same fixed value (seed 42), so rerunning on the same data always gives the same groups.
+            <br />
+            Groups are then numbered collab-1, collab-2, … from largest to smallest.
+          </p>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Person</th><th>Weighted degree</th><th>Betweenness</th><th>Community</th>
-                </tr>
-              </thead>
-              <tbody>
-                {persons.map((row) => (
-                  <tr key={row.name}>
-                    <td>{row.name}</td>
-                    <td>{row.collab_weighted_degree ?? "-"}</td>
-                    <td>{row.collab_betweenness ?? "-"}</td>
-                    <td>{row.community_id ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <h4 className="knowledge-card-title knowledge-section-title">Communities</h4>
-          <div className="reference-table-wrapper">
-            <table className="reference-table">
-              <thead>
-                <tr>
-                  <th>Community</th><th>Size</th><th>Members</th>
+                  <th>
+                    Community <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Size <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Members <span className="knowledge-section-kind">(via MEMBER_OF_COMMUNITY)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -3086,19 +3106,146 @@ function GraphAlgorithmsPanel() {
                   <tr key={row.community_id}>
                     <td>{row.community_id}</td>
                     <td>{row.size}</td>
-                    <td>{row.members.join(", ")}</td>
+                    <td className="reference-cell-wrap">{row.members.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Bus factor</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Weighted degree <span className="knowledge-section-kind">(graph metric, written to Person node)</span>
+          </h4>
+          <p className="knowledge-table-caption">
+            How much each person collaborates in total.
+            <br />
+            Adds up the weights of all the person&apos;s WORKS_WITH links. The weight is the number of work items two
+            people share: issues, PRs, meetings, mail threads and events.
+            <br />
+            High value: the person is heavily involved in shared work, often a key person others depend on day to day.
+            Low value: the person mostly works alone, or is new or on the edge of the team.
+            <br />
+            Shows how much a person collaborates, not how important they are for holding the team together; see
+            Betweenness centrality below.
+          </p>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Subject type</th><th>Subject</th><th>Bus factor</th><th>Experts</th><th>Top expert</th>
+                  <th>
+                    Person <span className="knowledge-section-kind">(Person node)</span>
+                  </th>
+                  <th>
+                    Weighted degree <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {personsByDegree.map((row) => (
+                  <tr key={row.name}>
+                    <td>{row.name}</td>
+                    <td>{row.collab_weighted_degree ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Betweenness centrality{" "}
+            <span className="knowledge-section-kind">(betweenness centrality algorithm, written to Person node)</span>
+          </h4>
+          <p className="knowledge-table-caption">
+            How often a person lies on the shortest path between two other people.
+            <br />
+            For every pair of people, the algorithm finds the shortest path between them. Distance is 1 / weight, so
+            people who share many work items are close. Each person&apos;s value is the share of all shortest paths
+            between other pairs that pass through them, from 0 (never in between) to 1 (every path passes through them).
+            <br />
+            High value: the person is a bridge that connects groups which otherwise have no contact. If they leave, are
+            away or are overloaded, the groups lose touch and information stops flowing, and everything passing through
+            them can make them a bottleneck.
+            <br />
+            Shows where a person sits in the network, not how much they collaborate; see Weighted degree above.
+          </p>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>
+                    Person <span className="knowledge-section-kind">(Person node)</span>
+                  </th>
+                  <th>
+                    Betweenness <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {personsByBetweenness.map((row) => (
+                  <tr key={row.name}>
+                    <td>{row.name}</td>
+                    <td>{row.collab_betweenness ?? "-"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Bus factor <span className="knowledge-section-kind">(algorithm on expertise shares, written to Topic and Component nodes)</span>
+          </h4>
+          <div className="knowledge-table-caption">
+            <p>How few people hold more than half of the knowledge about a topic or component.</p>
+            <p>
+              <strong>How it is calculated</strong>
+              <br />
+              Takes every expert&apos;s share of the expertise (from the Expertise &amp; collaboration layer).
+              <br />
+              Sorts them largest first and adds up the shares until they reach at least 50%.
+              <br />
+              The bus factor is the number of people that took.
+            </p>
+            <p>
+              <strong>Bus factor</strong>: how bad is it if the top expert disappears?
+              <br />
+              1 means one person holds more than half of the knowledge. If they leave, it is gone.
+              <br />
+              A high value means the knowledge is spread, so no single person is critical.
+            </p>
+            <p>
+              <strong>Experts</strong>: how many people are there to ask?
+              <br />
+              Everyone with any expertise in the subject, no matter how much.
+              <br />
+              Top expert is the one with the largest share.
+            </p>
+            <p>
+              <strong>Together</strong>: how evenly the knowledge is spread.
+              <br />
+              Many experts but a low bus factor means the knowledge exists but is unevenly shared.
+              <br />
+              Sorted lowest bus factor first, so the subjects where knowledge should be spread come first.
+            </p>
+          </div>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>
+                    Subject type <span className="knowledge-section-kind">(node label)</span>
+                  </th>
+                  <th>
+                    Subject <span className="knowledge-section-kind">(Topic or Component node)</span>
+                  </th>
+                  <th>
+                    Bus factor <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Experts <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Top expert <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -3115,12 +3262,46 @@ function GraphAlgorithmsPanel() {
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Components</h4>
-          <div className="reference-table-wrapper">
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Component metrics <span className="knowledge-section-kind">(simple counts, written to Component node)</span>
+          </h4>
+          <div className="knowledge-table-caption">
+            <p>Simple counts of existing relationships, not an algorithm.</p>
+            <p>
+              <strong>Depends on</strong>: counts outgoing DEPENDS_ON (from the Architecture layer).
+              <br />
+              How many other components this component depends on. A high value means that if something it uses
+              breaks, it is affected.
+            </p>
+            <p>
+              <strong>Depended on by</strong>: counts incoming DEPENDS_ON (from the Architecture layer).
+              <br />
+              How many other components depend on this one. A high value means the component is central, so a change
+              or fault here spreads.
+            </p>
+            <p>
+              <strong>Affected events</strong>: counts incoming AFFECTED_COMPONENT (from the Root cause &amp; impact
+              layer).
+              <br />
+              How many events have affected this component. A high value means it is a problem area.
+            </p>
+          </div>
+          <div className="reference-table-wrapper layer-last-table">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Component</th><th>Depends on</th><th>Depended on by</th><th>Affected events</th><th>Bus factor</th>
+                  <th>
+                    Component <span className="knowledge-section-kind">(Component node)</span>
+                  </th>
+                  <th>
+                    Depends on <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Depended on by <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Affected events <span className="knowledge-section-kind">(property)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -3130,7 +3311,6 @@ function GraphAlgorithmsPanel() {
                     <td>{row.depends_on_count ?? "-"}</td>
                     <td>{row.depended_on_by_count ?? "-"}</td>
                     <td>{row.affected_event_count ?? "-"}</td>
-                    <td>{row.bus_factor ?? "-"}</td>
                   </tr>
                 ))}
               </tbody>

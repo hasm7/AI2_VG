@@ -295,6 +295,9 @@ ELIGIBLE_PERSON_WHERE = "coalesce(p.actor_type, '') <> 'mailbox' AND coalesce(p.
 def load_counts(tx):
     return {
         "communities": tx.run("MATCH (c:Community) RETURN count(c) AS c").single()["c"],
+        "community_memberships": tx.run(
+            "MATCH (:Person)-[r:MEMBER_OF_COMMUNITY]->(:Community) RETURN count(r) AS c"
+        ).single()["c"],
         "persons": tx.run(f"MATCH (p:Person) WHERE {ELIGIBLE_PERSON_WHERE} RETURN count(p) AS c").single()["c"],
         "topics": tx.run("MATCH (t:Topic) RETURN count(t) AS c").single()["c"],
         "components": tx.run("MATCH (c:Component) RETURN count(c) AS c").single()["c"],
