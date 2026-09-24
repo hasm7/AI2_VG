@@ -21,7 +21,8 @@ from reference_extraction import (
 )
 from pipeline_staleness import compute_staleness
 from topic_event_extraction import MissingApiKeyError, build_knowledge_layer, knowledge_state_payload
-from embedding_pass import build_embeddings, embedding_state_payload
+from embedding_pass import build_embeddings, embedding_nodes_page, embedding_preview, embedding_state_payload
+from embedding_pass import PrerequisiteError as EmbeddingPrerequisiteError
 from architecture_layer import (
     architecture_state_payload,
     build_architecture_layer,
@@ -118,6 +119,10 @@ GRAPH_SOURCE_RELATIONSHIPS = {
     ],
     "Algorithms": [
         "MEMBER_OF_COMMUNITY",
+    ],
+    # Only chunk nodes of long texts (embedding layer); empty while no text is long enough to be split.
+    "Embeddings": [
+        "CHUNK_OF",
     ],
 }
 
@@ -351,7 +356,9 @@ def load_neo4j_graph(source):
 
     nodes = []
     for record in node_records:
-        labels = record["labels"]
+        # `Searchable` is the embedding layer's extra search label, never a node type.
+        # Neo4j lists labels in token order, so it can come first (as on EmbeddingChunk nodes).
+        labels = [label for label in record["labels"] if label != "Searchable"] or record["labels"]
         properties = record["properties"]
         nodes.append(
             {
@@ -637,6 +644,45 @@ def api_embeddings():
         return jsonify({"error": str(error)}), 500
 
 
+@app.route("/api/embeddings/nodes", methods=["GET", "OPTIONS"])
+def api_embeddings_nodes():
+    """One page of embedded texts. Query: layer, label, status, offset, limit (all optional)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(embedding_nodes_page(
+                    session,
+                    layer=request.args.get("layer") or None,
+                    label=request.args.get("label") or None,
+                    status=request.args.get("status") or None,
+                    offset=request.args.get("offset", 0, type=int),
+                    limit=request.args.get("limit", 50, type=int),
+                ))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/embeddings/preview", methods=["GET", "OPTIONS"])
+def api_embeddings_preview():
+    """What the next embedding run would embed, with a token estimate. Query: force (default false).
+    Reads only; never calls OpenAI."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    force = request.args.get("force", "false").lower() == "true"
+    try:
+        uri, user, password, database = neo4j_connection_settings()
+        with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+            with driver.session(database=database, default_access_mode="READ") as session:
+                return jsonify(embedding_preview(session, force=force))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
 @app.route("/api/embeddings/build", methods=["POST", "OPTIONS"])
 def api_embeddings_build():
     """Run the embedding pass. Body: {"force": bool} (default false)."""
@@ -652,6 +698,8 @@ def api_embeddings_build():
             with driver.session(database=database) as session:
                 result = build_embeddings(session, force=force)
         return jsonify(result)
+    except EmbeddingPrerequisiteError as error:
+        return jsonify({"error": str(error)}), 409
     except MissingApiKeyError as error:
         return jsonify({"error": str(error)}), 503
     except Exception as error:

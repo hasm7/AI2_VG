@@ -951,6 +951,16 @@ main {
   gap: 8px;
 }
 
+.graph-footer-left {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .neo4j-status {
   display: inline-flex;
   align-items: center;
@@ -1151,6 +1161,37 @@ main {
   white-space: normal;
 }
 
+.embedding-table-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.embedding-table-controls select {
+  margin-left: 4px;
+  font: inherit;
+  padding: 2px 4px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #1e293b;
+}
+
+.embedding-page-info {
+  margin-left: auto;
+}
+
+.reference-table .embedding-text-cell {
+  width: 480px;
+  min-width: 480px;
+  max-width: 480px;
+  white-space: pre-wrap;
+  vertical-align: top;
+}
+
 .reference-empty {
   margin: 0;
   padding: 12px;
@@ -1200,14 +1241,16 @@ main {
 .architecture-panel,
 .causal-panel,
 .collaboration-panel,
-.algorithms-panel {
+.algorithms-panel,
+.embedding-panel {
   grid-template-rows: none;
   grid-auto-rows: max-content;
 }
 
 .causal-panel .knowledge-table-caption,
 .collaboration-panel .knowledge-table-caption,
-.algorithms-panel .knowledge-table-caption {
+.algorithms-panel .knowledge-table-caption,
+.embedding-panel .knowledge-table-caption {
   margin: -6px 0 -4px;
   font-size: 11px;
   line-height: 1.4;

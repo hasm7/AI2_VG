@@ -32,7 +32,8 @@ type DataSource =
   | "Architecture"
   | "Causal"
   | "Collaboration"
-  | "Algorithms";
+  | "Algorithms"
+  | "Embeddings";
 
 type ReferenceEdge = {
   source_label: string;
@@ -114,23 +115,64 @@ type KnowledgeState = {
 };
 
 type EmbeddingLabelState = {
+  layer: string;
   label: string;
   total: number;
+  eligible: number;
   embedded: number;
+  outdated: number;
   missing: number;
 };
 
-type EmbeddingRunLabelReport = {
+type EmbeddingNodeStatus = "current" | "outdated" | "missing" | "empty";
+
+type EmbeddingNode = {
+  layer: string;
   label: string;
-  embedded: number;
-  skipped_unchanged: number;
-  skipped_empty: number;
-  failed: number;
+  display_name: string | null;
+  text: string;
+  group: string;
+  is_latest: boolean;
+  parts: number;
+  status: EmbeddingNodeStatus;
+  embedded_at: string | null;
+};
+
+type EmbeddingNodesPage = {
+  total: number;
+  offset: number;
+  limit: number;
+  nodes: EmbeddingNode[];
+  error?: string;
+};
+
+type EmbeddingPreview = {
+  forced: boolean;
+  nodes: number;
+  parts: number;
+  chunks: number;
+  characters: number;
+  estimated_tokens: number;
+  error?: string;
+};
+
+type EmbeddingIndex = {
+  name: string;
+  type: string;
+  labels: string[];
+  properties: string[];
+  state: string;
+};
+
+type EmbeddingExcludedPerson = {
+  person_name: string;
+  person_key: string;
+  reason: string;
 };
 
 type EmbeddingFailure = {
   label: string;
-  key: Record<string, string | number | null>;
+  key: string | null;
   error: string;
 };
 
@@ -139,26 +181,34 @@ type EmbeddingTokenUsage = {
 };
 
 type EmbeddingState = {
-  per_label: EmbeddingLabelState[];
+  provider: string;
+  model: string;
+  dimensions: number;
+  similarity: string;
+  version: string;
   models_in_use: string[];
-  configured_model: string;
-  configured_dimensions: number;
-  last_embedding_at: string | null;
+  counts: { eligible: number; embedded: number; outdated: number; missing: number; chunks: number };
+  per_label: EmbeddingLabelState[];
+  indexes: EmbeddingIndex[];
+  excluded_persons: EmbeddingExcludedPerson[];
   last_import_at: string | null;
+  last_extraction_at: string | null;
   last_layer_build_at: string | null;
-  last_architecture_build_at?: string | null;
-  last_causal_build_at?: string | null;
+  last_architecture_build_at: string | null;
+  last_causal_build_at: string | null;
+  last_collaboration_build_at: string | null;
+  last_algorithms_run_at: string | null;
+  last_embedding_at: string | null;
   needs_rerun: boolean;
   stale_reasons: string[];
   run_at?: string;
   forced?: boolean;
-  model?: string;
-  dimensions?: number;
-  per_label_run?: EmbeddingRunLabelReport[];
-  embedded?: number;
-  skipped?: number;
+  embedded_now?: number;
+  chunks_now?: number;
   skipped_unchanged?: number;
   skipped_empty?: number;
+  removed?: number;
+  removed_chunks?: number;
   failed?: number;
   failures?: EmbeddingFailure[];
   token_usage?: EmbeddingTokenUsage | null;
@@ -527,6 +577,7 @@ const sourceFilterDisplayName: Partial<Record<DataSource | "All", string>> = {
   All: "Full graph",
   Causal: "Causes",
   Collaboration: "Expertise",
+  Embeddings: "Chunks",
 };
 const graphApiUrl = "/api/graph";
 const nodeTypeOrder = [
@@ -799,8 +850,15 @@ const relationships: GraphRelationship[] = [
   { id: "rel-spoke-segment", source: "person-anna", target: "segment-001", label: "SPOKE_TEAMS_TRANSCRIPT_SEGMENT", sourceType: "Teams", properties: {} },
 ];
 
+// The embedding vector is 1536 numbers long, so it is listed last; otherwise it pushes
+// every other property far down the panel. Display order only.
+const PROPERTY_LISTED_LAST = "embedding";
+
 function propertyRows(properties: Record<string, string | number>) {
-  return Object.entries(properties).map(([key, value]) => [key, String(value)] as [string, string]);
+  return Object.entries(properties)
+    .filter(([key]) => key !== PROPERTY_LISTED_LAST)
+    .concat(Object.entries(properties).filter(([key]) => key === PROPERTY_LISTED_LAST))
+    .map(([key, value]) => [key, String(value)] as [string, string]);
 }
 
 const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
@@ -1627,6 +1685,17 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
           {isExpanded ? "Close" : "Expand"}
         </button>
         </div>
+      </div>
+      {/* Chunks of long texts (CHUNK_OF). Kept apart from the layer filters at the top, bottom left. */}
+      <div className="graph-footer-left">
+        <button
+          className={`graph-action-button source-filter-button${activeSource === "Embeddings" ? " graph-action-button-active" : ""}`}
+          type="button"
+          aria-pressed={activeSource === "Embeddings"}
+          onClick={() => filterBySource("Embeddings")}
+        >
+          {sourceFilterDisplayName.Embeddings}
+        </button>
       </div>
       <div className="graph-footer">
         <button
@@ -3513,7 +3582,23 @@ function GraphAlgorithmsPanel() {
   );
 }
 
-const EMBEDDING_MODEL_FALLBACK = "text-embedding-3-large";
+const EMBEDDING_PAGE_SIZE = 50;
+
+type EmbeddingNodeFilter = { layer: string; label: string; status: string };
+
+const embeddingStatusLabels: Record<EmbeddingNodeStatus, string> = {
+  current: "Up to date",
+  outdated: "Outdated",
+  missing: "Missing",
+  empty: "No text",
+};
+
+const embeddingIndexPurposes: Record<string, string> = {
+  searchable_embedding: "Search by meaning across every layer",
+  searchable_text: "Search by exact words across every layer",
+  entity_lookup: "Look up a person, issue, document, PR or topic by name",
+  issue_key_lookup: "Look up an issue by its key",
+};
 
 function EmbeddingPanel() {
   const [state, setState] = useState<EmbeddingState | null>(null);
@@ -3521,23 +3606,71 @@ function EmbeddingPanel() {
   const [error, setError] = useState("");
   const [justRan, setJustRan] = useState(false);
   const [confirmingReembed, setConfirmingReembed] = useState(false);
+  const [nodesPage, setNodesPage] = useState<EmbeddingNodesPage | null>(null);
+  const [nodeFilter, setNodeFilter] = useState<EmbeddingNodeFilter>({ layer: "", label: "", status: "" });
+  const [nodeOffset, setNodeOffset] = useState(0);
+  const [preview, setPreview] = useState<EmbeddingPreview | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
 
   const loadState = async () => {
     try {
       const response = await fetch("/api/embeddings");
       const data = (await response.json()) as EmbeddingState;
       if (!response.ok || data.error) {
-        throw new Error(data.error || "Could not read embedding coverage.");
+        throw new Error(data.error || "Could not read the embedding layer.");
       }
       setState(data);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not read embedding coverage.");
+      setError(loadError instanceof Error ? loadError.message : "Could not read the embedding layer.");
+    }
+  };
+
+  const loadNodes = async (filter: EmbeddingNodeFilter, offset: number) => {
+    const params = new URLSearchParams({ offset: String(offset), limit: String(EMBEDDING_PAGE_SIZE) });
+    if (filter.layer) params.set("layer", filter.layer);
+    if (filter.label) params.set("label", filter.label);
+    if (filter.status) params.set("status", filter.status);
+    try {
+      const response = await fetch(`/api/embeddings/nodes?${params.toString()}`);
+      const data = (await response.json()) as EmbeddingNodesPage;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read the embedded texts.");
+      }
+      setNodesPage(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read the embedded texts.");
+    }
+  };
+
+  const loadPreview = async () => {
+    setError("");
+    setIsPreviewing(true);
+    try {
+      const response = await fetch("/api/embeddings/preview");
+      const data = (await response.json()) as EmbeddingPreview;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not preview the next run.");
+      }
+      setPreview(data);
+    } catch (previewError) {
+      setError(previewError instanceof Error ? previewError.message : "Could not preview the next run.");
+    } finally {
+      setIsPreviewing(false);
     }
   };
 
   useEffect(() => {
     void loadState();
   }, []);
+
+  useEffect(() => {
+    void loadNodes(nodeFilter, nodeOffset);
+  }, [nodeFilter, nodeOffset]);
+
+  const changeNodeFilter = (change: Partial<EmbeddingNodeFilter>) => {
+    setNodeFilter((current) => ({ ...current, ...change }));
+    setNodeOffset(0);
+  };
 
   const runBuild = async (force: boolean) => {
     setError("");
@@ -3557,6 +3690,8 @@ function EmbeddingPanel() {
       }
       setState(data);
       setJustRan(true);
+      setPreview(null);
+      void loadNodes(nodeFilter, nodeOffset);
     } catch (runError) {
       setError(runError instanceof Error ? runError.message : "Embedding build failed.");
     } finally {
@@ -3565,9 +3700,22 @@ function EmbeddingPanel() {
   };
 
   const perLabel = state?.per_label ?? [];
+  const nodes = nodesPage?.nodes ?? [];
+  const nodesTotal = nodesPage?.total ?? 0;
+  const layerOptions = [...new Set(perLabel.map((row) => row.layer))];
+  const labelOptions = perLabel
+    .filter((row) => !nodeFilter.layer || row.layer === nodeFilter.layer)
+    .map((row) => row.label);
+  const indexes = state?.indexes ?? [];
+  const excludedPersons = state?.excluded_persons ?? [];
   const failures = state?.failures ?? [];
-  const mixedModels = (state?.models_in_use?.length ?? 0) > 1
-    || (state?.models_in_use?.length === 1 && state.models_in_use[0] !== state.configured_model);
+  const counts = state?.counts;
+  const formatIndexState = (value: string) => (value === "NOT CREATED" ? "Not created yet" : value);
+  const indexState = (name: string) =>
+    formatIndexState(indexes.find((index) => index.name === name)?.state ?? "NOT CREATED");
+  const mixedModels = state
+    ? state.models_in_use.length > 1 || (state.models_in_use.length === 1 && state.models_in_use[0] !== state.model)
+    : false;
 
   return (
     <div className="knowledge-panel embedding-panel">
@@ -3578,12 +3726,12 @@ function EmbeddingPanel() {
           disabled={isRunning}
           onClick={() => void runBuild(false)}
         >
-          {isRunning && !confirmingReembed ? "Building embeddings..." : "Build embeddings"}
+          {isRunning ? "Building embeddings..." : "Build embeddings"}
         </button>
 
         {confirmingReembed ? (
           <div className="embedding-confirm">
-            <span>Re-embed every node? This spends money proportional to corpus size.</span>
+            <span>Re-embed every node? This calls the OpenAI API for all of them.</span>
             <button
               className="embedding-secondary-button embedding-confirm-button"
               type="button"
@@ -3611,14 +3759,27 @@ function EmbeddingPanel() {
           </button>
         )}
 
+        <button
+          className="embedding-secondary-button"
+          type="button"
+          disabled={isRunning || isPreviewing}
+          onClick={() => void loadPreview()}
+        >
+          {isPreviewing ? "Previewing..." : "Preview next run"}
+        </button>
+
         <div className="reference-status">
-          <span>Model: <strong>{state?.configured_model ?? EMBEDDING_MODEL_FALLBACK}</strong> ({state?.configured_dimensions ?? "-"} dims)</span>
-          <span>Last embedding run: {formatTimestamp(state?.last_embedding_at ?? null)}</span>
           <span>Last import: {formatTimestamp(state?.last_import_at ?? null)}</span>
+          <span>Last reference extraction: {formatTimestamp(state?.last_extraction_at ?? null)}</span>
           <span>Last knowledge build: {formatTimestamp(state?.last_layer_build_at ?? null)}</span>
+          <span>Last architecture build: {formatTimestamp(state?.last_architecture_build_at ?? null)}</span>
+          <span>Last root cause &amp; impact build: {formatTimestamp(state?.last_causal_build_at ?? null)}</span>
+          <span>Last expertise &amp; collaboration build: {formatTimestamp(state?.last_collaboration_build_at ?? null)}</span>
+          <span>Last algorithms run: {formatTimestamp(state?.last_algorithms_run_at ?? null)}</span>
+          <span>Last embedding run: {formatTimestamp(state?.last_embedding_at ?? null)}</span>
           {state?.needs_rerun ? (
             <span className="reference-stale">
-              Import or knowledge build happened since the last embedding run. Run it again.
+              Upstream data has changed since the last run. Run it again.
               <ul>
                 {state.stale_reasons.map((reason, index) => (
                   <li key={index}>{reason}</li>
@@ -3632,61 +3793,355 @@ function EmbeddingPanel() {
         </div>
       </div>
 
-      {error ? <p className="reference-error">{error}</p> : null}
-      {justRan && !error ? (
-        <p className="reference-success">
-          {(state?.embedded ?? 0) === 0
-            ? "0 nodes embedded — everything is up to date."
-            : `Done. ${state?.embedded ?? 0} nodes embedded, ${state?.skipped ?? 0} skipped, ${state?.failed ?? 0} failed.`}
-          {state?.token_usage ? ` (${state.token_usage.total_tokens} tokens)` : ""}
+      <p className="reference-description">
+        Turns what every layer knows into searchable vectors, so a question can enter the graph at the right place.
+        Vectors are stored as properties on existing nodes.
+      </p>
+      {state ? (
+        <p className="reference-description">
+          Embedding model: <strong>{state.model}</strong> ({state.provider}) · {state.dimensions} dimensions ·{" "}
+          {state.similarity} similarity
         </p>
       ) : null}
 
-      <div className="reference-table-wrapper">
-        <table className="reference-table">
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Total nodes</th>
-              <th>Embedded</th>
-              <th>Missing</th>
-            </tr>
-          </thead>
-          <tbody>
-            {perLabel.map((row) => (
-              <tr key={row.label}>
-                <td>{row.label}</td>
-                <td>{row.total}</td>
-                <td>{row.embedded}</td>
-                <td>{row.missing}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {preview && preview.nodes === 0 ? (
+        <p className="reference-success">
+          Next run: nothing to embed, every node is up to date. Build embeddings would not call OpenAI.
+        </p>
+      ) : null}
+      {preview && preview.nodes > 0 ? (
+        <p className="reference-success">
+          Next run: <strong>{preview.nodes}</strong> nodes ({preview.parts} texts including {preview.chunks} chunks),
+          about <strong>{preview.estimated_tokens.toLocaleString("en-US")}</strong> tokens. Nothing has been sent
+          to OpenAI.
+        </p>
+      ) : null}
 
-      {failures.length > 0 ? (
-        <div className="embedding-failures">
-          <h4 className="knowledge-card-title">Failures from the last run</h4>
-          <table className="reference-table">
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Node key</th>
-                <th>Error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {failures.map((failure, index) => (
-                <tr key={`${failure.label}-${index}`}>
-                  <td>{failure.label}</td>
-                  <td><code>{JSON.stringify(failure.key)}</code></td>
-                  <td>{failure.error}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      {error ? <p className="reference-error">{error}</p> : null}
+      {justRan && !error ? (
+        <p className="reference-success">
+          {(state?.embedded_now ?? 0) === 0
+            ? "Done. 0 nodes embedded, everything is up to date."
+            : `Done. ${state?.embedded_now ?? 0} nodes embedded.`}
+        </p>
+      ) : null}
+
+      {counts ? <p className="reference-description reference-counts-heading">Written to existing nodes:</p> : null}
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">Embedded: <strong>{counts.embedded}</strong></span>
+          <span className="reference-count">Outdated: <strong>{counts.outdated}</strong></span>
+          <span className="reference-count">Missing: <strong>{counts.missing}</strong></span>
+          <span className="reference-count">Total eligible: <strong>{counts.eligible}</strong></span>
         </div>
+      ) : null}
+
+      {counts ? <p className="reference-description reference-counts-heading">Nodes and relationships:</p> : null}
+      {counts ? (
+        <div className="reference-counts">
+          <span className="reference-count">
+            Chunks (EmbeddingChunk, CHUNK_OF): <strong>{counts.chunks}</strong>
+          </span>
+        </div>
+      ) : null}
+
+      {state ? <p className="reference-description reference-counts-heading">Indexes:</p> : null}
+      {state ? (
+        <div className="reference-counts">
+          <span className="reference-count">
+            Vector index searchable_embedding: <strong>{indexState("searchable_embedding")}</strong>
+          </span>
+          <span className="reference-count">
+            Fulltext index searchable_text: <strong>{indexState("searchable_text")}</strong>
+          </span>
+        </div>
+      ) : null}
+
+      {justRan && !error && state ? (
+        <div className="reference-counts">
+          <span className="reference-count">Embedded now: <strong>{state.embedded_now ?? 0}</strong></span>
+          <span className="reference-count">Chunks now: <strong>{state.chunks_now ?? 0}</strong></span>
+          <span className="reference-count">
+            Skipped: <strong>{(state.skipped_unchanged ?? 0) + (state.skipped_empty ?? 0)}</strong>
+          </span>
+          <span className="reference-count">
+            Removed: <strong>{(state.removed ?? 0) + (state.removed_chunks ?? 0)}</strong>
+          </span>
+          <span className="reference-count">Failed: <strong>{state.failed ?? 0}</strong></span>
+          <span className="reference-count">
+            Tokens: <strong>{state.token_usage ? state.token_usage.total_tokens : "-"}</strong>
+          </span>
+        </div>
+      ) : null}
+
+      {counts && counts.embedded === 0 && counts.outdated === 0 ? (
+        <p className="reference-empty">No embeddings yet. Press the button to build them.</p>
+      ) : null}
+
+      {perLabel.length > 0 ? (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Coverage by layer <span className="knowledge-section-kind">(written to existing nodes)</span>
+          </h4>
+          <p className="knowledge-table-caption">
+            One row per embedded node label. Eligible excludes Person nodes that are mailboxes or ambiguous
+            identities. Outdated means the node has a vector, but its text, the model or the version has changed
+            since.
+          </p>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Layer</th>
+                  <th>
+                    Label <span className="knowledge-section-kind">(node label)</span>
+                  </th>
+                  <th>Nodes</th>
+                  <th>Eligible</th>
+                  <th>Embedded</th>
+                  <th>Outdated</th>
+                  <th>Missing</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perLabel.map((row) => (
+                  <tr key={row.label}>
+                    <td>{row.layer}</td>
+                    <td>{row.label}</td>
+                    <td className="reference-cell-center">{row.total}</td>
+                    <td className="reference-cell-center">{row.eligible}</td>
+                    <td className="reference-cell-center">{row.embedded}</td>
+                    <td className="reference-cell-center">{row.outdated}</td>
+                    <td className="reference-cell-center">{row.missing}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Embedded texts <span className="knowledge-section-kind">(property: embedding_text)</span>
+          </h4>
+          <div className="knowledge-table-caption">
+            <p>
+              The exact text each vector is made from, assembled from the node and what the other layers linked to it.
+              For outdated and missing nodes, it is the text the next run will embed.
+            </p>
+            <p>
+              <strong>Group</strong> names the source a node belongs to and <strong>Latest</strong> says whether it
+              is that source&apos;s newest version, so search can fold versions together. <strong>Parts</strong> is 1
+              unless the text is too long for the model; then it is split and the extra parts become EmbeddingChunk
+              nodes.
+            </p>
+          </div>
+          <div className="embedding-table-controls">
+            <label>
+              Layer{" "}
+              <select value={nodeFilter.layer} onChange={(event) => changeNodeFilter({ layer: event.target.value, label: "" })}>
+                <option value="">All</option>
+                {layerOptions.map((layer) => (
+                  <option key={layer} value={layer}>{layer}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Label{" "}
+              <select value={nodeFilter.label} onChange={(event) => changeNodeFilter({ label: event.target.value })}>
+                <option value="">All</option>
+                {labelOptions.map((label) => (
+                  <option key={label} value={label}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Status{" "}
+              <select value={nodeFilter.status} onChange={(event) => changeNodeFilter({ status: event.target.value })}>
+                <option value="">All</option>
+                <option value="current">Up to date</option>
+                <option value="outdated">Outdated</option>
+                <option value="missing">Missing</option>
+              </select>
+            </label>
+            <span className="embedding-page-info">
+              {nodesTotal === 0
+                ? "No nodes"
+                : `Showing ${nodeOffset + 1}–${Math.min(nodeOffset + EMBEDDING_PAGE_SIZE, nodesTotal)} of ${nodesTotal}`}
+            </span>
+            <button
+              className="embedding-secondary-button"
+              type="button"
+              disabled={nodeOffset === 0}
+              onClick={() => setNodeOffset(Math.max(0, nodeOffset - EMBEDDING_PAGE_SIZE))}
+            >
+              Previous
+            </button>
+            <button
+              className="embedding-secondary-button"
+              type="button"
+              disabled={nodeOffset + EMBEDDING_PAGE_SIZE >= nodesTotal}
+              onClick={() => setNodeOffset(nodeOffset + EMBEDDING_PAGE_SIZE)}
+            >
+              Next
+            </button>
+          </div>
+          <div className="reference-table-wrapper reference-table-wrapper-capped">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Layer</th>
+                  <th>
+                    Label <span className="knowledge-section-kind">(node label)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Node <span className="knowledge-section-kind">(property display_name)</span>
+                  </th>
+                  <th className="embedding-text-cell">
+                    Text <span className="knowledge-section-kind">(property embedding_text)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Group <span className="knowledge-section-kind">(property embedding_group)</span>
+                  </th>
+                  <th>
+                    Latest <span className="knowledge-section-kind">(property embedding_is_latest)</span>
+                  </th>
+                  <th>
+                    Parts <span className="knowledge-section-kind">(property embedding_parts)</span>
+                  </th>
+                  <th>Status</th>
+                  <th>
+                    Embedded at <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {nodes.map((node, index) => (
+                  <tr key={`${node.label}-${node.display_name}-${index}`}>
+                    <td>{node.layer}</td>
+                    <td>{node.label}</td>
+                    <td className="reference-cell-wrap">{node.display_name ?? "-"}</td>
+                    <td className="embedding-text-cell">{node.text}</td>
+                    <td className="reference-cell-wrap">{node.group}</td>
+                    <td className="reference-cell-center">{node.is_latest ? "Yes" : "No"}</td>
+                    <td className="reference-cell-center">{node.parts}</td>
+                    <td>{embeddingStatusLabels[node.status]}</td>
+                    <td>{formatTimestamp(node.embedded_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Indexes <span className="knowledge-section-kind">(vector and fulltext)</span>
+          </h4>
+          <div className="knowledge-table-caption">
+            <p>
+              <strong>Two kinds of index.</strong> A vector index finds nodes whose text means the same as the
+              question, even with different words. A fulltext index finds nodes that contain the exact words, such as
+              an issue key, a PR number, a file name or a person&apos;s name.
+            </p>
+            <p>
+              <strong>Search.</strong> searchable_embedding and searchable_text cover the same text on every embedded
+              node, in every layer. Used together (hybrid search), one finds what the question means and the other
+              what it names exactly.
+            </p>
+            <p>
+              <strong>Lookup.</strong> entity_lookup and issue_key_lookup resolve a name or key to its node, including
+              Issue and Document nodes, which are not embedded.
+            </p>
+          </div>
+          <div className={`reference-table-wrapper${excludedPersons.length === 0 && failures.length === 0 ? " layer-last-table" : ""}`}>
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Used for</th>
+                  <th>
+                    Label <span className="knowledge-section-kind">(node label)</span>
+                  </th>
+                  <th>Property</th>
+                  <th>State</th>
+                </tr>
+              </thead>
+              <tbody>
+                {indexes.map((index) => (
+                  <tr key={index.name}>
+                    <td>{index.name}</td>
+                    <td>{index.type}</td>
+                    <td>{embeddingIndexPurposes[index.name] ?? "-"}</td>
+                    <td>{index.labels.join(", ")}</td>
+                    <td>{index.properties.join(", ")}</td>
+                    <td>{formatIndexState(index.state)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {excludedPersons.length > 0 ? (
+            <>
+              <h4 className="knowledge-card-title knowledge-section-title">
+                Excluded persons <span className="knowledge-section-kind">(existing Person nodes)</span>
+              </h4>
+              <p className="knowledge-table-caption">
+                Not embedded: mailboxes are not people, and ambiguous identities could be matched to the wrong person.
+              </p>
+              <div className={`reference-table-wrapper${failures.length === 0 ? " layer-last-table" : ""}`}>
+                <table className="reference-table">
+                  <thead>
+                    <tr>
+                      <th>
+                        Person <span className="knowledge-section-kind">(property)</span>
+                      </th>
+                      <th>
+                        Person key <span className="knowledge-section-kind">(property)</span>
+                      </th>
+                      <th>
+                        Reason <span className="knowledge-section-kind">(computed from properties)</span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {excludedPersons.map((row) => (
+                      <tr key={row.person_key}>
+                        <td>{row.person_name}</td>
+                        <td>{row.person_key}</td>
+                        <td>{row.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+
+          {failures.length > 0 ? (
+            <>
+              <h4 className="knowledge-card-title knowledge-section-title">Failures from the last run</h4>
+              <div className="reference-table-wrapper layer-last-table">
+                <table className="reference-table">
+                  <thead>
+                    <tr>
+                      <th>Label</th>
+                      <th>Node</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {failures.map((failure, index) => (
+                      <tr key={`${failure.label}-${index}`}>
+                        <td>{failure.label}</td>
+                        <td>{failure.key ?? "-"}</td>
+                        <td className="reference-cell-wrap">{failure.error}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
@@ -4082,7 +4537,7 @@ function RightGraphicsPanel() {
 }
 
 function App() {
-  const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes">("message");
+  const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes" | "agent">("message");
   const graphViewRef = useRef<GraphViewHandle>(null);
 
   return (
@@ -4090,15 +4545,6 @@ function App() {
       <GraphView ref={graphViewRef} />
       <section className="center-panel" aria-label="Center workspace">
         <div className="center-tabs" role="tablist" aria-label="Center panel tabs">
-          <button
-            className={`center-tab${activeCenterTab === "message" ? " center-tab-active" : ""}`}
-            type="button"
-            role="tab"
-            aria-selected={activeCenterTab === "message"}
-            onClick={() => setActiveCenterTab("message")}
-          >
-            Communicate with AI
-          </button>
           <button
             className={`center-tab${activeCenterTab === "notes" ? " center-tab-active" : ""}`}
             type="button"
@@ -4108,9 +4554,28 @@ function App() {
           >
             Build graph layers
           </button>
+          <button
+            className={`center-tab${activeCenterTab === "agent" ? " center-tab-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeCenterTab === "agent"}
+            onClick={() => setActiveCenterTab("agent")}
+          >
+            Configure AI agent
+          </button>
+          <button
+            className={`center-tab${activeCenterTab === "message" ? " center-tab-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeCenterTab === "message"}
+            onClick={() => setActiveCenterTab("message")}
+          >
+            Chat with AI
+          </button>
         </div>
         <div className="center-tab-panel" role="tabpanel">
-          {activeCenterTab === "message" ? <ChatPanel graphViewRef={graphViewRef} /> : <BuildGraphLayersPanel />}
+          {activeCenterTab === "message" && <ChatPanel graphViewRef={graphViewRef} />}
+          {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
         </div>
       </section>
       <RightGraphicsPanel />

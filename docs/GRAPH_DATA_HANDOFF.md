@@ -122,6 +122,8 @@ Steps 4-7 are each gated on their prerequisites (see each layer's own handoff do
 | `last_collaboration_build_at` | Collaboration layer last rebuilt `Expertise`/`WORKS_WITH`. |
 | `last_algorithms_run_at` | Graph algorithm layer last ran. |
 | `last_embedding_at` | Embedding pass last ran. |
+| `last_embedding_failures` | Number of nodes that failed in the last embedding run (embedding layer's own marker). |
+| `embedding_config` | Fingerprint of the configuration the last embedding run used (embedding layer's own marker). |
 
 `PipelineState` is excluded from `/api/graph` visualization.
 
@@ -167,7 +169,7 @@ UPSTREAM_BY_STAGE = {
     "causal": ["knowledge", "architecture"],
     "collaboration": ["import", "knowledge", "architecture", "causal"],
     "algorithms": ["knowledge", "architecture", "causal", "collaboration"],
-    "embeddings": ["import", "knowledge", "architecture", "causal"],
+    "embeddings": ["import", "references", "knowledge", "architecture", "causal", "collaboration", "algorithms"],
 }
 
 STAGE_LABELS = {
@@ -244,25 +246,15 @@ Uniqueness constraints:
 | `expertise_key` | `Expertise` | `person_key`, `subject_label`, `subject_key` |
 | `community_key` | `Community` | `community_id` |
 
-Vector indexes currently online:
+Search indexes (owned by the Embedding layer, see `EMBEDDING_LAYER_HANDOFF.md`):
 
-- `mailmessage_embedding`
-- `slackmessage_embedding`
-- `teamstranscriptsegment_embedding`
-- `issueversion_embedding`
-- `issuecomment_embedding`
-- `documentversion_embedding`
-- `pullrequest_embedding`
-- `pullrequestreview_embedding`
-- `topic_embedding`
-- `event_embedding`
-- `component_embedding`
-- `rootcause_embedding`
+- `searchable_embedding`: vector index (1536, cosine) on `:Searchable(embedding)`, one index across all layers
+- `searchable_text`: fulltext index on `:Searchable(embedding_text)`
+- `entity_lookup`: fulltext on `Person`, `Issue`, `Document`, `PullRequest`, `Topic` properties `name`, `display_name`, `title`
+- `issue_key_lookup`: fulltext on `Issue.issue_key`
 
-Fulltext indexes currently online:
-
-- `entity_lookup` on `Person`, `Issue`, `Document`, `PullRequest`, `Topic` properties `name`, `display_name`, `title`
-- `issue_key_lookup` on `Issue.issue_key`
+All four are `ONLINE` (checked 2026-09-24). The first `embedding-v2` run dropped the twelve per-label v1 vector indexes
+(`mailmessage_embedding` ... `rootcause_embedding`).
 
 ## Shared `Person` Model
 
@@ -579,43 +571,24 @@ The layer deletes only nodes/relationships with `generated_by = "topic-event-ext
 
 ## Embedding Layer
 
-Implemented in `backend/embedding_pass.py`.
-
-Embeddings are present in the current graph. The previous "no embeddings yet" assumption is outdated.
-
-Configuration:
+Implemented in `backend/embedding_pass.py`. Full description: `EMBEDDING_LAYER_HANDOFF.md`.
 
 | Setting | Value |
 | --- | --- |
-| Version | `embedding-v1` |
-| Model | `text-embedding-3-large` |
+| Version | `embedding-v3` |
+| Provider / model | OpenAI `text-embedding-3-large` |
 | Dimensions | 1536 |
 | Similarity | cosine |
-| Batch size | 100 |
 
-Embedded labels:
-
-- `MailMessage`
-- `SlackMessage`
-- `TeamsTranscriptSegment`
-- `IssueVersion`
-- `IssueComment`
-- `DocumentVersion`
-- `PullRequestReview`
-- `PullRequest`
-- `Topic`
-- `Event`
-- `Component`
-- `RootCause`
-
-Each embedded node gets:
-
-- `embedding`
-- `embedding_model`
-- `embedding_source_hash`
-- `embedded_at`
-
-The pass is incremental: if the assembled text hash and model match, the node is skipped unless `force=True`.
+15 labels get a vector, so every layer has an entry point: the source retrieval units plus `CodeChange`, `Topic`,
+`Event`, `Component`, `RootCause`, eligible `Person` nodes and `Community`. Each text carries the node's context from the
+other layers (mentions, causal links with explanations, root causes, dependencies, expertise, collaboration, community,
+bus factor). Embedded nodes get the label `Searchable` and the properties `embedding`, `embedding_text`,
+`embedding_model`, `embedding_source_hash`, `embedding_version`, `embedding_group`, `embedding_is_latest`,
+`embedding_parts`, `embedded_at`. A text too long for the model is split, and its extra parts become the layer's own
+`EmbeddingChunk:Searchable` nodes, linked `(:EmbeddingChunk)-[:CHUNK_OF]->(source)` (none exist with the current data).
+The pass is incremental: a node is re-embedded only when its text, group, latest flag, the model or the version
+changed, unless `force=True`.
 
 ## Frontend Filter Mapping
 
@@ -636,6 +609,7 @@ The pass is incremental: if the assembled text hash and model match, the node is
 | `Causal` | `CAUSED`, `CROSS_TOPIC_CAUSED`, `HAS_ROOT_CAUSE`, `ROOT_CAUSE_IN_COMPONENT`, `ROOT_CAUSE_EVIDENCED_BY`, `CONTRIBUTED_TO`, `AFFECTED_COMPONENT` |
 | `Collaboration` | `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH` |
 | `Algorithms` | `MEMBER_OF_COMMUNITY` |
+| `Embeddings` | `CHUNK_OF` (chunk nodes of long texts; empty with the current data). Button labelled `Chunks`, in the graph panel's bottom row, left-aligned. |
 
 When a specific filter is selected, `/api/graph` returns nodes connected by those relationship types. Shared `Person` nodes can therefore appear in multiple filters.
 

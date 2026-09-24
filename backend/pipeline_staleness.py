@@ -37,7 +37,7 @@ UPSTREAM_BY_STAGE = {
     "causal": ["knowledge", "architecture"],
     "collaboration": ["import", "knowledge", "architecture", "causal"],
     "algorithms": ["knowledge", "architecture", "causal", "collaboration"],
-    "embeddings": ["import", "knowledge", "architecture", "causal"],
+    "embeddings": ["import", "references", "knowledge", "architecture", "causal", "collaboration", "algorithms"],
 }
 
 STAGE_LABELS = {

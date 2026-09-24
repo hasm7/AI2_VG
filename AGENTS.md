@@ -6,12 +6,12 @@ This project models simulated source material from a software engineering team.
 PostgreSQL is used as the source-preserving SQL layer before later import into a
 graph database / GraphRAG memory system.
 
-There are six logical data sources, even though the SQL schema has nine tables:
+There are six logical data sources, even though the SQL schema has ten tables:
 
 - Mail: `mail_messages`
 - Slack / project chat: `slack_messages`
 - Teams / meeting transcripts: `teams_meetings`, `teams_transcript_segments`
-- Issues / tickets: `issue_versions`, `issue_comments`
+- Issues / tickets: `issues`, `issue_versions`, `issue_comments`
 - Requirements and technical documentation: `document_versions`
 - Pull requests, code reviews, and code changes: `pr_versions`, `pr_reviews`
 
