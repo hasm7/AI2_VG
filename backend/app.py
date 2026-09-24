@@ -754,4 +754,13 @@ def api_viewer_stop():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.getenv("BACKEND_PORT", "8000")), debug=True)
+    # The auto-reloader is off by default: without the watchdog package it polls every Python file
+    # once a second, which costs CPU the whole time the app runs and adds a second backend process.
+    # Set BACKEND_RELOAD=1 in .env to turn it on while developing the backend.
+    use_reloader = os.getenv("BACKEND_RELOAD", "0") == "1"
+    app.run(
+        host="127.0.0.1",
+        port=int(os.getenv("BACKEND_PORT", "8000")),
+        debug=True,
+        use_reloader=use_reloader,
+    )

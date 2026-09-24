@@ -808,13 +808,15 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const graphRef = useRef<Core | null>(null);
   const viewerWindowRef = useRef<Window | null>(null);
   const viewerCloseTimerRef = useRef<number | null>(null);
-  const isMotionPausedRef = useRef(false);
+  const isMotionPausedRef = useRef(true);
+  // Restarts the float loop after a pause; the loop stops scheduling frames while motion is paused.
+  const resumeFloatingRef = useRef<(() => void) | null>(null);
   const motionLevelRef = useRef(1);
   const areLabelsVisibleRef = useRef(false);
   const pendingSelectionRef = useRef<{ type: string; displayName: string } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
-  const [isMotionPaused, setIsMotionPaused] = useState(false);
+  const [isMotionPaused, setIsMotionPaused] = useState(true);
   const [isMotionMenuOpen, setIsMotionMenuOpen] = useState(false);
   const [isLegendVisible, setIsLegendVisible] = useState(false);
   const [motionLevel, setMotionLevel] = useState(1);
@@ -1238,34 +1240,54 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       });
 
       const startedAt = performance.now();
+      // The float motion is slow, so ~30 updates per second look the same as 60 at half the redraws.
+      const frameIntervalMs = 1000 / 30;
+      let lastFrameAt = 0;
 
       const floatGraph = (now: number) => {
         const elapsed = (now - startedAt) / 1000;
 
-        if (!isMotionPausedRef.current) {
-          graph.batch(() => {
-            graph.nodes().forEach((node, index) => {
-              if (node.grabbed()) {
-                basePositions[node.id()] = { ...node.position() };
-                return;
-              }
-
-              const base = basePositions[node.id()];
-              if (!base) {
-                return;
-              }
-
-              const phase = index * 0.73;
-              const motion = motionLevelRef.current;
-              node.position({
-                x: base.x + Math.sin(elapsed * (0.14 + motion * 0.14) + phase) * (8 + motion * 15),
-                y: base.y + Math.cos(elapsed * (0.11 + motion * 0.11) + phase) * (7 + motion * 12),
-              });
-            });
-          });
+        // While paused, stop scheduling frames entirely; resumeFloatingRef starts the loop again.
+        if (isMotionPausedRef.current) {
+          animationFrame = 0;
+          return;
         }
 
+        // 2 ms of slack so small frame timing jitter does not skip two frames in a row.
+        if (now - lastFrameAt < frameIntervalMs - 2) {
+          animationFrame = window.requestAnimationFrame(floatGraph);
+          return;
+        }
+        lastFrameAt = now;
+
+        graph.batch(() => {
+          graph.nodes().forEach((node, index) => {
+            if (node.grabbed()) {
+              basePositions[node.id()] = { ...node.position() };
+              return;
+            }
+
+            const base = basePositions[node.id()];
+            if (!base) {
+              return;
+            }
+
+            const phase = index * 0.73;
+            const motion = motionLevelRef.current;
+            node.position({
+              x: base.x + Math.sin(elapsed * (0.14 + motion * 0.14) + phase) * (8 + motion * 15),
+              y: base.y + Math.cos(elapsed * (0.11 + motion * 0.11) + phase) * (7 + motion * 12),
+            });
+          });
+        });
+
         animationFrame = window.requestAnimationFrame(floatGraph);
+      };
+
+      resumeFloatingRef.current = () => {
+        if (animationFrame === 0) {
+          animationFrame = window.requestAnimationFrame(floatGraph);
+        }
       };
 
       animationFrame = window.requestAnimationFrame(floatGraph);
@@ -1284,6 +1306,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      resumeFloatingRef.current = null;
       graph.destroy();
       graphRef.current = null;
     };
@@ -1301,6 +1325,9 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
 
   useEffect(() => {
     isMotionPausedRef.current = isMotionPaused;
+    if (!isMotionPaused) {
+      resumeFloatingRef.current?.();
+    }
   }, [isMotionPaused]);
 
   useEffect(() => {

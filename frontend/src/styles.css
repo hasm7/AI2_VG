@@ -131,8 +131,10 @@ main {
   height: 24px;
   border: 1px solid rgba(37, 99, 235, 0.28);
   border-radius: 999px;
+  /* Nearly opaque instead of a backdrop blur: the blur had to be recomputed every frame while the
+     graph underneath moved. */
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(239, 246, 255, 0.58));
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(239, 246, 255, 0.86));
   color: #123f91;
   font: inherit;
   font-size: 11px;
@@ -140,7 +142,6 @@ main {
   line-height: 1;
   padding: 0 7px;
   cursor: pointer;
-  backdrop-filter: blur(14px) saturate(160%);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.95),
     inset 0 -1px 0 rgba(37, 99, 235, 0.08),
@@ -223,8 +224,7 @@ main {
   border: 1px solid rgba(37, 99, 235, 0.28);
   border-radius: 999px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(239, 246, 255, 0.58));
-  backdrop-filter: blur(14px) saturate(160%);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(239, 246, 255, 0.86));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.95),
     inset 0 -1px 0 rgba(37, 99, 235, 0.08),
@@ -236,7 +236,6 @@ main {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
-  backdrop-filter: none;
 }
 
 .graph-action-group .graph-action-button::before {
