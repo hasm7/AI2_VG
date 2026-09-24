@@ -143,6 +143,8 @@ Tables, in order, each with a lighter `knowledge-section-kind` suffix in its hea
 
 ## Graph Visualization Filter
 
+The filter button is labelled `Expertise` in the graph panel; the key sent to `/api/graph` is still `Collaboration`.
+
 ```python
 "Collaboration": [
     "HAS_EXPERTISE",

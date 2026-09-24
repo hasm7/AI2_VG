@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import React, { Fragment, forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import cytoscape, { type Core, type EventObject } from "cytoscape";
 import "./styles.css";
@@ -513,6 +513,21 @@ const dataSources: Array<DataSource | "All"> = [
   "Collaboration",
   "Algorithms",
 ];
+// The six raw data sources get a dot in the same color as their nodes in the graph.
+const sourceFilterColorLabel: Partial<Record<DataSource, string>> = {
+  Mail: "MailMessage",
+  Slack: "SlackMessage",
+  Teams: "TeamsMeeting",
+  Issues: "Issue",
+  Docs: "Document",
+  PRs: "PullRequest",
+};
+// Button text for filters whose backend key differs from the shown name (the key is still sent to the API).
+const sourceFilterDisplayName: Partial<Record<DataSource | "All", string>> = {
+  All: "Full graph",
+  Causal: "Causes",
+  Collaboration: "Expertise",
+};
 const graphApiUrl = "/api/graph";
 const nodeTypeOrder = [
   "Person",
@@ -801,7 +816,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isMotionPaused, setIsMotionPaused] = useState(false);
   const [isMotionMenuOpen, setIsMotionMenuOpen] = useState(false);
-  const [isLegendVisible, setIsLegendVisible] = useState(true);
+  const [isLegendVisible, setIsLegendVisible] = useState(false);
   const [motionLevel, setMotionLevel] = useState(1);
   const [spacingLevel, setSpacingLevel] = useState(1);
   const [areLabelsVisible, setAreLabelsVisible] = useState(false);
@@ -1461,18 +1476,30 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       aria-label="Neo4j graph visualization"
     >
       <div className="source-filters" aria-label="Data source filters">
-        {dataSources.map((source) => (
-          <button
-            className={`graph-action-button source-filter-button${activeSource === source ? " graph-action-button-active" : ""}`}
-            type="button"
-            key={source}
-            onClick={() => filterBySource(source)}
-          >
-            {source === "All" ? "Full graph" : source}
-          </button>
-        ))}
+        {dataSources.map((source) => {
+          const colorLabel = source === "All" ? undefined : sourceFilterColorLabel[source];
+          return (
+            <Fragment key={source}>
+            <button
+              className={`graph-action-button source-filter-button${activeSource === source ? " graph-action-button-active" : ""}`}
+              type="button"
+              aria-pressed={activeSource === source}
+              onClick={() => filterBySource(source)}
+            >
+              {colorLabel ? (
+                <span className="source-filter-dot" style={{ backgroundColor: nodeColor(colorLabel) }} />
+              ) : null}
+              {sourceFilterDisplayName[source] ?? source}
+            </button>
+            {source === "All" || source === "PRs" ? (
+              <span className="source-filters-break" aria-hidden="true" />
+            ) : null}
+            </Fragment>
+          );
+        })}
       </div>
       <div className="graph-actions">
+        <div className="graph-action-group" role="group" aria-label="View">
         <button
           className="graph-action-button"
           type="button"
@@ -1481,6 +1508,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         >
           Fit
         </button>
+        <span className="graph-action-divider" aria-hidden="true" />
         <button
           className="graph-action-button"
           type="button"
@@ -1489,6 +1517,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         >
           Center
         </button>
+        <span className="graph-action-divider" aria-hidden="true" />
         <button
           className="graph-action-button"
           type="button"
@@ -1497,12 +1526,26 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         >
           {isNeighborMode ? "All" : "Neighbors"}
         </button>
-        <button className="graph-action-button" type="button" onClick={() => setIsLegendVisible((current) => !current)}>
-          {isLegendVisible ? "Hide legend" : "Show legend"}
+        </div>
+        <div className="graph-action-group" role="group" aria-label="Display">
+        <button
+          className={`graph-action-button${isLegendVisible ? " graph-action-button-active" : ""}`}
+          type="button"
+          aria-pressed={isLegendVisible}
+          onClick={() => setIsLegendVisible((current) => !current)}
+        >
+          Legend
         </button>
-        <button className="graph-action-button" type="button" onClick={() => setAreLabelsVisible((current) => !current)}>
-          {areLabelsVisible ? "Hide labels" : "Show labels"}
+        <span className="graph-action-divider" aria-hidden="true" />
+        <button
+          className={`graph-action-button${areLabelsVisible ? " graph-action-button-active" : ""}`}
+          type="button"
+          aria-pressed={areLabelsVisible}
+          onClick={() => setAreLabelsVisible((current) => !current)}
+        >
+          Labels
         </button>
+        <span className="graph-action-divider" aria-hidden="true" />
         <div className="motion-control">
           <button
             className={`graph-action-button${isMotionMenuOpen ? " graph-action-button-active" : ""}`}
@@ -1546,6 +1589,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
             </div>
           ) : null}
         </div>
+        </div>
+        <div className="graph-action-group" role="group" aria-label="Window">
         <button
           className="graph-action-button"
           type="button"
@@ -1554,6 +1599,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         >
           {isExpanded ? "Close" : "Expand"}
         </button>
+        </div>
       </div>
       <div className="graph-footer">
         <button

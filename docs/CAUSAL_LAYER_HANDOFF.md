@@ -153,6 +153,8 @@ Tables, in order, each with a lighter `knowledge-section-kind` suffix in its hea
 
 ## Graph Visualization Filter
 
+The filter button is labelled `Causes` in the graph panel; the key sent to `/api/graph` is still `Causal`.
+
 ```python
 "Causal": [
     "CAUSED",
