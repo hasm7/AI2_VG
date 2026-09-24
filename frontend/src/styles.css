@@ -1033,6 +1033,17 @@ main {
   font-size: 11px;
 }
 
+.reference-description {
+  margin: 0;
+  color: #475569;
+  font-size: 12px;
+}
+
+.reference-counts-heading {
+  margin-top: 1em;
+  color: #1d4ed8;
+}
+
 .reference-stale {
   color: #92400e;
   font-weight: 700;
@@ -1073,6 +1084,17 @@ main {
   border: 1px solid #e2e8f0;
   border-radius: 6px;
   background: #f8fafc;
+}
+
+.reference-table .reference-cell-center {
+  text-align: center;
+}
+
+.reference-table .reference-cell-wrap {
+  width: 280px;
+  min-width: 280px;
+  max-width: 280px;
+  white-space: normal;
 }
 
 .reference-empty {
@@ -1119,6 +1141,15 @@ main {
   height: 100%;
   min-height: 0;
   overflow: auto;
+}
+
+.architecture-panel {
+  grid-template-rows: none;
+  grid-auto-rows: max-content;
+}
+
+.architecture-last-table {
+  margin-bottom: 20px;
 }
 
 .knowledge-build-button {
@@ -1219,6 +1250,13 @@ main {
 
 .knowledge-section-title {
   margin-top: 20px;
+}
+
+.knowledge-section-kind {
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  color: #64748b;
 }
 
 .knowledge-topic h3 {

@@ -158,7 +158,18 @@ Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/
 
 ### `GET /api/architecture`
 
-Returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `components`, `dependencies`, `files` tables described in the work order.
+Returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `repositories`, `modules`, `files`, `components`, `dependencies`, `relationships` tables.
+
+| Field | Row shape |
+| --- | --- |
+| `repositories` | `source_instance`, `name`, `module_count` (via `CONTAINS_MODULE`), `component_count` (via `PART_OF_REPOSITORY`) |
+| `modules` | `repository`, `path`, `file_count` (via `CONTAINS_FILE`) |
+| `files` | `repository`, `module`, `path`, `change_count`, `modified_by`, `components` |
+| `components` | `repository`, `slug`, `name`, `component_type`, `summary`, `files`, `evidence` |
+| `dependencies` | `from_name`, `to_name`, `dependency_type`, `explanation`, `evidence` |
+| `relationships` | `relationship_type`, `from_labels`, `to_labels`, `count` |
+
+`relationships` is one row per relationship type created by this layer (every relationship with `generated_by = "architecture-layer-v1"`), sorted by type. `from_labels` and `to_labels` are the distinct first labels of the start and end nodes, read from the graph rather than hard-coded, so `COMPONENT_EVIDENCED_BY` can list several target labels.
 
 ### `POST /api/architecture/build`
 
@@ -168,7 +179,22 @@ Errors: `409` if reference extraction has not run; `503` if `OPENAI_API_KEY` is 
 
 ## Frontend UI
 
-Tab `Architecture layer` inside `BuildGraphLayersPanel`, rendered by `ArchitectureLayerPanel`, third of seven inner tabs. Button text `Build architecture layer` / `Building architecture layer...`. Tables, in order: `Components`, `Dependencies`, `Files`. Empty state: `No architecture layer yet. Press the button to build it.`
+Tab `Architecture layer` inside `BuildGraphLayersPanel`, rendered by `ArchitectureLayerPanel`, third of seven inner tabs. Button text `Build architecture layer` / `Building architecture layer...`.
+
+Below the button and status row, a description line reads `Models how the code is structured and how its components depend on each other.` The counts row is preceded by the heading `Nodes and relationships:`. Both lines use `reference-description` (12px, `#475569`); the heading adds `reference-counts-heading` (blue `#1d4ed8`, extra space above).
+
+Tables, in order, each with a lighter `knowledge-section-kind` suffix in its heading:
+
+| Table | Heading suffix | Columns |
+| --- | --- | --- |
+| `Repositories` | `(node)` | Source instance (property), Repository (property), Modules (via CONTAINS_MODULE), Components (via PART_OF_REPOSITORY) |
+| `Modules` | `(node)` | Repository (property), Module (property), Files (via CONTAINS_FILE) |
+| `Files` | `(node)` | Repository (property), Module (via CONTAINS_FILE), File (property), Changes (property), Modified by (via MODIFIES_FILE), Components (via IMPLEMENTED_IN) |
+| `Components` | `(node)` | Repository (property), Component (property), Type (property), Summary (property), Files (via IMPLEMENTED_IN), Evidence (via COMPONENT_EVIDENCED_BY) |
+| `Relationships` | `(all relationship types)` | Relationship, From → To, Count |
+| `Dependencies` | `(relationship: DEPENDS_ON)` | From (start node), To (end node), Type (property), Explanation (property), Evidence (property) |
+
+Empty state: `No architecture layer yet. Press the button to build it.`
 
 ## Graph Visualization Filter
 

@@ -176,6 +176,19 @@ type ArchitectureCounts = {
   dependencies: number;
 };
 
+type ArchitectureRepository = {
+  source_instance: string;
+  name: string;
+  module_count: number;
+  component_count: number;
+};
+
+type ArchitectureModule = {
+  repository: string;
+  path: string;
+  file_count: number;
+};
+
 type ArchitectureComponent = {
   repository: string;
   slug: string;
@@ -203,6 +216,13 @@ type ArchitectureFile = {
   components: string[];
 };
 
+type ArchitectureRelationship = {
+  relationship_type: string;
+  from_labels: string[];
+  to_labels: string[];
+  count: number;
+};
+
 type ArchitectureState = {
   last_import_at: string | null;
   last_extraction_at: string | null;
@@ -210,9 +230,12 @@ type ArchitectureState = {
   needs_rerun: boolean;
   stale_reasons: string[];
   counts: ArchitectureCounts;
+  repositories: ArchitectureRepository[];
+  modules: ArchitectureModule[];
   components: ArchitectureComponent[];
   dependencies: ArchitectureDependency[];
   files: ArchitectureFile[];
+  relationships: ArchitectureRelationship[];
   built_at?: string;
   deleted_relationships?: number;
   deleted_nodes?: number;
@@ -1943,13 +1966,16 @@ function ArchitectureLayerPanel() {
     }
   };
 
+  const repositories = state?.repositories ?? [];
+  const modules = state?.modules ?? [];
   const components = state?.components ?? [];
   const dependencies = state?.dependencies ?? [];
   const files = state?.files ?? [];
+  const relationships = state?.relationships ?? [];
   const counts = state?.counts;
 
   return (
-    <div className="knowledge-panel">
+    <div className="knowledge-panel architecture-panel">
       <div className="reference-actions">
         <button
           className={`knowledge-build-button${state?.needs_rerun ? " knowledge-build-button-stale" : ""}`}
@@ -1976,6 +2002,8 @@ function ArchitectureLayerPanel() {
         </div>
       </div>
 
+      <p className="reference-description">Models how the code is structured and how its components depend on each other.</p>
+
       {error ? <p className="reference-error">{error}</p> : null}
       {justRan && !error ? (
         <p className="reference-success">
@@ -1983,6 +2011,7 @@ function ArchitectureLayerPanel() {
         </p>
       ) : null}
 
+      {counts ? <p className="reference-description reference-counts-heading">Nodes and relationships:</p> : null}
       {counts ? (
         <div className="reference-counts">
           <span className="reference-count">Repositories: <strong>{counts.repositories}</strong></span>
@@ -2012,71 +2041,95 @@ function ArchitectureLayerPanel() {
         <p className="reference-empty">No architecture layer yet. Press the button to build it.</p>
       ) : (
         <>
-          <h4 className="knowledge-card-title knowledge-section-title">Components</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Repositories <span className="knowledge-section-kind">(node)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Repository</th>
-                  <th>Component</th>
-                  <th>Type</th>
-                  <th>Summary</th>
-                  <th>Files</th>
-                  <th>Evidence</th>
+                  <th>
+                    Source instance <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Repository <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Modules <span className="knowledge-section-kind">(via CONTAINS_MODULE)</span>
+                  </th>
+                  <th>
+                    Components <span className="knowledge-section-kind">(via PART_OF_REPOSITORY)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {components.map((component) => (
-                  <tr key={`${component.repository}-${component.slug}`}>
-                    <td>{component.repository}</td>
-                    <td>{component.name}</td>
-                    <td>{component.component_type}</td>
-                    <td>{component.summary}</td>
-                    <td>{component.files.join(", ")}</td>
-                    <td>{component.evidence.join(", ")}</td>
+                {repositories.map((repository) => (
+                  <tr key={`${repository.source_instance}-${repository.name}`}>
+                    <td>{repository.source_instance}</td>
+                    <td>{repository.name}</td>
+                    <td>{repository.module_count}</td>
+                    <td>{repository.component_count}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Dependencies</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Modules <span className="knowledge-section-kind">(node)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Type</th>
-                  <th>Explanation</th>
-                  <th>Evidence</th>
+                  <th>
+                    Repository <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Module <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Files <span className="knowledge-section-kind">(via CONTAINS_FILE)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {dependencies.map((dependency, index) => (
-                  <tr key={`${dependency.from_name}-${dependency.to_name}-${index}`}>
-                    <td>{dependency.from_name}</td>
-                    <td>{dependency.to_name}</td>
-                    <td>{dependency.dependency_type}</td>
-                    <td>{dependency.explanation}</td>
-                    <td>{dependency.evidence.join(", ")}</td>
+                {modules.map((module) => (
+                  <tr key={`${module.repository}-${module.path}`}>
+                    <td>{module.repository}</td>
+                    <td>{module.path}</td>
+                    <td>{module.file_count}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
 
-          <h4 className="knowledge-card-title knowledge-section-title">Files</h4>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Files <span className="knowledge-section-kind">(node)</span>
+          </h4>
           <div className="reference-table-wrapper">
             <table className="reference-table">
               <thead>
                 <tr>
-                  <th>Repository</th>
-                  <th>Module</th>
-                  <th>File</th>
-                  <th>Changes</th>
-                  <th>Modified by</th>
-                  <th>Components</th>
+                  <th>
+                    Repository <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Module <span className="knowledge-section-kind">(via CONTAINS_FILE)</span>
+                  </th>
+                  <th>
+                    File <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-center">
+                    Changes <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Modified by <span className="knowledge-section-kind">(via MODIFIES_FILE)</span>
+                  </th>
+                  <th>
+                    Components <span className="knowledge-section-kind">(via IMPLEMENTED_IN)</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -2085,9 +2138,115 @@ function ArchitectureLayerPanel() {
                     <td>{file.repository}</td>
                     <td>{file.module}</td>
                     <td>{file.path}</td>
-                    <td>{file.change_count}</td>
-                    <td>{file.modified_by.join(", ")}</td>
+                    <td className="reference-cell-center">{file.change_count}</td>
+                    <td className="reference-cell-wrap">{file.modified_by.join(", ")}</td>
                     <td>{file.components.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Components <span className="knowledge-section-kind">(node)</span>
+          </h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>
+                    Repository <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Component <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Type <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Summary <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th>
+                    Files <span className="knowledge-section-kind">(via IMPLEMENTED_IN)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(via COMPONENT_EVIDENCED_BY)</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {components.map((component) => (
+                  <tr key={`${component.repository}-${component.slug}`}>
+                    <td>{component.repository}</td>
+                    <td>{component.name}</td>
+                    <td>{component.component_type}</td>
+                    <td className="reference-cell-wrap">{component.summary}</td>
+                    <td>{component.files.join(", ")}</td>
+                    <td className="reference-cell-wrap">{component.evidence.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Relationships <span className="knowledge-section-kind">(all relationship types)</span>
+          </h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Relationship</th>
+                  <th>From → To</th>
+                  <th>Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {relationships.map((relationship) => (
+                  <tr key={relationship.relationship_type}>
+                    <td>{relationship.relationship_type}</td>
+                    <td>
+                      {relationship.from_labels.join(", ")} → {relationship.to_labels.join(", ")}
+                    </td>
+                    <td>{relationship.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Dependencies <span className="knowledge-section-kind">(relationship: DEPENDS_ON)</span>
+          </h4>
+          <div className="reference-table-wrapper architecture-last-table">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>
+                    From <span className="knowledge-section-kind">(start node)</span>
+                  </th>
+                  <th>
+                    To <span className="knowledge-section-kind">(end node)</span>
+                  </th>
+                  <th>
+                    Type <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Explanation <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                  <th className="reference-cell-wrap">
+                    Evidence <span className="knowledge-section-kind">(property)</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {dependencies.map((dependency, index) => (
+                  <tr key={`${dependency.from_name}-${dependency.to_name}-${index}`}>
+                    <td>{dependency.from_name}</td>
+                    <td>{dependency.to_name}</td>
+                    <td>{dependency.dependency_type}</td>
+                    <td className="reference-cell-wrap">{dependency.explanation}</td>
+                    <td className="reference-cell-wrap">{dependency.evidence.join(", ")}</td>
                   </tr>
                 ))}
               </tbody>

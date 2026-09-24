@@ -619,6 +619,17 @@ def load_dependencies(tx):
     """)]
 
 
+def load_relationships(tx):
+    return [dict(row) for row in tx.run("""
+        MATCH (a)-[r]->(b) WHERE r.generated_by = $version
+        RETURN type(r) AS relationship_type,
+               collect(DISTINCT head(labels(a))) AS from_labels,
+               collect(DISTINCT head(labels(b))) AS to_labels,
+               count(r) AS count
+        ORDER BY relationship_type
+    """, {"version": ARCHITECTURE_VERSION})]
+
+
 def load_files(tx):
     return [dict(row) for row in tx.run("""
         MATCH (f:File)
@@ -643,6 +654,7 @@ def load_architecture_state(session):
             "components": load_components(tx),
             "dependencies": load_dependencies(tx),
             "files": load_files(tx),
+            "relationships": load_relationships(tx),
         }
 
     result = session.execute_read(_read)
@@ -660,6 +672,7 @@ def load_architecture_state(session):
         "components": result["components"],
         "dependencies": result["dependencies"],
         "files": result["files"],
+        "relationships": result["relationships"],
     }
 
 
