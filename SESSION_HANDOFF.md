@@ -146,6 +146,65 @@ Established across all layer tabs; the Embeddings tab follows them as well:
   `get_person_activity`, ...); Architecture, Root cause, Expertise and Algorithms are reachable only through free
   Cypher.
 
+## The user's goals for the next session
+
+In the user's words, the next session should:
+
+1. **Set up a suitable agent structure.**
+2. **Look at how the AI traverses and fetches from the graph, or alternatively chooses to run a Neo4j search**, and
+   decide when each is used.
+3. **Cost.** The last time the user used the existing agent, the costs were very high. That is not acceptable, so
+   cost must be designed in from the start, not fixed afterwards.
+4. **Look at the AI's flow and whether it can be controlled more**, for example from the `Configure AI agent` tab.
+
+## Likely causes of the high cost (read from the existing code)
+
+- **Everything is resent on every tool call.** The agents run a tool loop (`MAX_TOOL_ITERATIONS = 4` in `nodes.py`),
+  and each iteration resends the conversation, the system prompt and all earlier tool results. Cost grows faster than
+  the number of steps.
+- **Large tool results.** Up to `TOOL_OUTPUT_CHAR_BUDGET = 40_000` characters per tool result go into the context.
+- **The whole graph schema is in the graph agent's system prompt** (`GRAPH_SCHEMA_REFERENCE` in `prompts.py`), sent on
+  every iteration.
+- **Several LLM steps per question:** orchestrator, search agent, graph agent and synthesis, each re-reading much of
+  the same material.
+- **A more expensive model for the graph agent** (`GRAPH_MODEL = "gpt-5.6-sol"`; the others use `gpt-5.6-terra`).
+- **History:** `HISTORY_TURNS = 10` earlier turns are sent with every question.
+
+## Things to consider when building the agents
+
+1. **Let code fetch, let the AI think.** The cheapest and most predictable structure lets ordinary code do the
+   retrieval: hybrid search, fixed traversals through the layers, and ranking queries in Cypher. The LLM is called only
+   to interpret the question and to write the answer. Free Cypher written by the AI is a fallback only. This usually
+   cuts cost sharply compared with letting the AI search on its own in loops.
+2. **Cost control built in from the start.**
+   - Measure tokens and cost **per question and per step**. The old code already sums token usage per role
+     (`_merge_usage` in `nodes.py`); show it in the tab.
+   - A **budget per question** with a hard cap: the agent stops instead of continuing.
+   - A cheap model for routing and summarizing; an expensive one only where it makes a difference.
+   - Keep the start of every prompt stable (system prompt, tool definitions) so OpenAI's prompt caching applies and
+     repeated calls are cheaper.
+3. **Question types decide the route.** Different questions need different routes:
+   - **Lookup** ("what is AUTH-19?"): the lookup indexes (`entity_lookup`, `issue_key_lookup`); no search needed.
+   - **Meaning** ("why did mobile break?"): hybrid search, then the causal chain in the graph.
+   - **Ranking** ("who has the lowest bus factor?"): a direct Cypher query on the metric properties.
+   - **Small talk:** no graph work at all.
+4. **Swedish questions against English data.** Vector search handles the language switch; fulltext search does not.
+   Translate the question, or extract English keywords, before the fulltext search.
+5. **Traceability and control** (fits the `Configure AI agent` tab):
+   - A **trace per question**: which steps ran, which nodes were fetched, tokens, time and cost.
+   - **Settings**: model per step, search depth, maximum number of steps, budget, which tools are on.
+   - **Citations** in answers, so every claim points to a node in the graph.
+6. **Test questions with expected answers.** Start from the seven questions in section 12 of
+   `docs/EMBEDDING_LAYER_HANDOFF.md` and the project goals. Run them after every change and compare both answer quality
+   and cost.
+7. **Security.**
+   - Cypher must be read-only; this already exists in `backend/cypher_guard.py`.
+   - Timeouts on queries.
+   - Text in mail and Slack is data, not instructions: a source text can contain something that looks like an
+     instruction.
+8. **Staleness.** If Embeddings or a layer is stale, the agent should say so in its answer instead of silently
+   answering from old data. The staleness is available from `backend/pipeline_staleness.py`.
+
 ## Next steps (proposal; confirm the plan with the user first)
 
 1. Agree on what the `Configure AI agent` tab should hold: agent settings (models, search depth, which tools are on)
