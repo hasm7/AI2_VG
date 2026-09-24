@@ -66,6 +66,7 @@ type KnowledgeTopic = {
   topic_type: string;
   summary: string;
   event_count: number;
+  issues: string[];
 };
 
 type KnowledgeEvent = {
@@ -98,6 +99,7 @@ type KnowledgeState = {
   topics: KnowledgeTopic[];
   events: KnowledgeEvent[];
   causal_links: KnowledgeCausalLink[];
+  relationships: LayerRelationship[];
   last_extraction_at: string | null;
   last_layer_build_at: string | null;
   needs_layer_rerun: boolean;
@@ -1698,11 +1700,15 @@ function ReferenceExtractionPanel() {
         </div>
       </div>
 
+      <p className="reference-description">
+        Finds issue keys, PR numbers and document IDs in source text and links each mention to the existing node.
+      </p>
+
       {error ? <p className="reference-error">{error}</p> : null}
       {justRan && !error ? <p className="reference-success">Done. {state?.total ?? 0} edges created.</p> : null}
 
+      <p className="reference-description reference-counts-heading">Relationships created:</p>
       <div className="reference-counts">
-        <span className="reference-counts-label">Relationships created</span>
         {Object.keys(relationshipLabels).map((key) => (
           <span key={key} className="reference-count">
             {relationshipLabels[key]}: <strong>{state?.counts?.[key] ?? 0}</strong>
@@ -1713,6 +1719,12 @@ function ReferenceExtractionPanel() {
         </span>
       </div>
 
+      <h4 className="knowledge-card-title knowledge-section-title">
+        Extracted references{" "}
+        <span className="knowledge-section-kind">
+          (relationships: MENTIONS_ISSUE, MENTIONS_PULL_REQUEST, MENTIONS_DOCUMENT)
+        </span>
+      </h4>
       <div className="reference-table-wrapper">
         {edges.length === 0 ? (
           <p className="reference-empty">No references yet. Press the button to run the pass.</p>
@@ -1793,12 +1805,12 @@ function KnowledgeLayerPanel() {
   const topics = state?.topics ?? [];
   const events = state?.events ?? [];
   const causalLinks = state?.causal_links ?? [];
+  const relationships = state?.relationships ?? [];
 
-  const eventsByTopic = (topicSlug: string) => events.filter((event) => event.topic_slug === topicSlug);
-  const linksByTopic = (topicSlug: string) => causalLinks.filter((link) => link.topic_slug === topicSlug);
+  const topicNameBySlug = new Map(topics.map((topic) => [topic.slug, topic.name]));
 
   return (
-    <div className="knowledge-panel">
+    <div className="knowledge-panel knowledge-layer-panel">
       <div className="reference-actions">
         <button
           className={`knowledge-build-button${state?.needs_layer_rerun ? " knowledge-build-button-stale" : ""}`}
@@ -1824,6 +1836,11 @@ function KnowledgeLayerPanel() {
         </div>
       </div>
 
+      <p className="reference-description">
+        Uses a model to find what each issue is about, what happened, who was involved and which events caused which,
+        grounded in the source material.
+      </p>
+
       {error ? <p className="reference-error">{error}</p> : null}
       {justRan && !error ? (
         <p className="reference-success">
@@ -1831,7 +1848,16 @@ function KnowledgeLayerPanel() {
         </p>
       ) : null}
 
+      {state ? <p className="reference-description reference-counts-heading">Nodes and relationships:</p> : null}
       {state ? (
+        <div className="reference-counts">
+          <span className="reference-count">Topics: <strong>{topics.length}</strong></span>
+          <span className="reference-count">Events: <strong>{events.length}</strong></span>
+          <span className="reference-count">Causal links: <strong>{causalLinks.length}</strong></span>
+        </div>
+      ) : null}
+
+      {justRan && state && !error ? (
         <div className="reference-counts">
           <span className="reference-count">
             Model: <strong>{state.model ?? "-"}</strong>
@@ -1851,41 +1877,91 @@ function KnowledgeLayerPanel() {
         </div>
       ) : null}
 
-
       <div className="knowledge-topics">
         {topics.length === 0 ? (
           <p className="reference-empty">No knowledge layer yet. Press the button to build it.</p>
         ) : (
-          topics.map((topic) => (
-            <div className="knowledge-topic" key={topic.slug}>
-              <div className="knowledge-topic-card">
-                <h4 className="knowledge-card-title">Topic node created</h4>
-                <p className="knowledge-table-caption">
-                  (Type is one of: requirement, defect, incident, decision, other)
-                </p>
-                <p><strong>Topic name:</strong> {topic.name}</p>
-                <p>
-                  <strong>Type:</strong> <span className="knowledge-topic-type">{topic.topic_type}</span>
-                </p>
-                <p><strong>Topic summary:</strong> {topic.summary}</p>
-              </div>
-
-              <h4 className="knowledge-card-title knowledge-section-title">Event nodes created for this topic</h4>
+          <>
+            <div className="knowledge-topic">
+              <h4 className="knowledge-card-title">
+                Topics <span className="knowledge-section-kind">(node)</span>
+              </h4>
+              <p className="knowledge-table-caption">
+                (Type is one of: requirement, defect, incident, decision, other)
+              </p>
               <div className="knowledge-table-scroll">
               <table className="reference-table">
                 <thead>
                   <tr>
-                    <th>Event (what happened)</th>
-                    <th>Type (what kind of event)</th>
-                    <th>Occurred at</th>
-                    <th>Summary</th>
-                    <th>Actors (linked persons)</th>
-                    <th>Evidence (source nodes)</th>
+                    <th>
+                      Topic <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th>
+                      Type <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th className="reference-cell-wrap">
+                      Summary <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th className="reference-cell-center">
+                      Events <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                    </th>
+                    <th>
+                      Issues <span className="knowledge-section-kind">(via ABOUT_TOPIC)</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {eventsByTopic(topic.slug).map((event) => (
-                    <tr key={event.slug}>
+                  {topics.map((topic) => (
+                    <tr key={topic.slug}>
+                      <td>{topic.name}</td>
+                      <td>
+                        <span className="knowledge-topic-type">{topic.topic_type}</span>
+                      </td>
+                      <td className="reference-cell-wrap">{topic.summary}</td>
+                      <td className="reference-cell-center">{topic.event_count}</td>
+                      <td>{topic.issues.join(", ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              </div>
+            </div>
+
+            <div className="knowledge-topic">
+              <h4 className="knowledge-card-title knowledge-section-title">
+                Events <span className="knowledge-section-kind">(node)</span>
+              </h4>
+              <div className="knowledge-table-scroll">
+              <table className="reference-table">
+                <thead>
+                  <tr>
+                    <th>
+                      Topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                    </th>
+                    <th>
+                      Event <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th>
+                      Type <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th>
+                      Occurred at <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th>
+                      Summary <span className="knowledge-section-kind">(property)</span>
+                    </th>
+                    <th>
+                      Actors <span className="knowledge-section-kind">(via ACTED_IN_EVENT)</span>
+                    </th>
+                    <th>
+                      Evidence <span className="knowledge-section-kind">(via EVIDENCED_BY)</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((event) => (
+                    <tr key={`${event.topic_slug}-${event.slug}`}>
+                      <td>{topicNameBySlug.get(event.topic_slug) ?? event.topic_slug}</td>
                       <td>{event.name}</td>
                       <td>{event.event_type}</td>
                       <td>{formatTimestamp(event.occurred_at)}</td>
@@ -1897,26 +1973,69 @@ function KnowledgeLayerPanel() {
                 </tbody>
               </table>
               </div>
+            </div>
 
-              {linksByTopic(topic.slug).length > 0 ? (
-                <>
+            {relationships.length > 0 ? (
+              <div className="knowledge-topic knowledge-relationships">
                 <h4 className="knowledge-card-title knowledge-section-title">
-                  Relationships created between these events (CAUSED)
+                  Relationships <span className="knowledge-section-kind">(all relationship types)</span>
+                </h4>
+                <div className="reference-table-wrapper">
+                  <table className="reference-table">
+                    <thead>
+                      <tr>
+                        <th>Relationship</th>
+                        <th className="reference-cell-wrap">From → To</th>
+                        <th className="reference-cell-center">Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {relationships.map((relationship) => (
+                        <tr key={relationship.relationship_type}>
+                          <td>{relationship.relationship_type}</td>
+                          <td className="reference-cell-wrap">
+                            {relationship.from_labels.join(", ")} → {relationship.to_labels.join(", ")}
+                          </td>
+                          <td className="reference-cell-center">{relationship.count}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
+
+            {causalLinks.length > 0 ? (
+              <div className="knowledge-topic layer-last-table">
+                <h4 className="knowledge-card-title knowledge-section-title">
+                  Causal links <span className="knowledge-section-kind">(relationship: CAUSED)</span>
                 </h4>
                 <p className="knowledge-table-caption">(cause:Event)-[:CAUSED]-&gt;(effect:Event)</p>
                 <div className="knowledge-table-scroll">
                 <table className="reference-table">
                   <thead>
                     <tr>
-                      <th>Cause</th>
-                      <th>Effect</th>
-                      <th>Explanation (why cause led to effect)</th>
-                      <th>Evidence (source identifiers)</th>
+                      <th>
+                        Topic <span className="knowledge-section-kind">(via EVENT_OF_TOPIC)</span>
+                      </th>
+                      <th>
+                        Cause <span className="knowledge-section-kind">(start node)</span>
+                      </th>
+                      <th>
+                        Effect <span className="knowledge-section-kind">(end node)</span>
+                      </th>
+                      <th>
+                        Explanation <span className="knowledge-section-kind">(property)</span>
+                      </th>
+                      <th>
+                        Evidence <span className="knowledge-section-kind">(property)</span>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {linksByTopic(topic.slug).map((link) => (
-                      <tr key={`${link.cause_slug}-${link.effect_slug}`}>
+                    {causalLinks.map((link) => (
+                      <tr key={`${link.topic_slug}-${link.cause_slug}-${link.effect_slug}`}>
+                        <td>{topicNameBySlug.get(link.topic_slug) ?? link.topic_slug}</td>
                         <td>{link.cause_name}</td>
                         <td>{link.effect_name}</td>
                         <td>{link.explanation}</td>
@@ -1926,10 +2045,9 @@ function KnowledgeLayerPanel() {
                   </tbody>
                 </table>
                 </div>
-                </>
-              ) : null}
-            </div>
-          ))
+              </div>
+            ) : null}
+          </>
         )}
       </div>
     </div>

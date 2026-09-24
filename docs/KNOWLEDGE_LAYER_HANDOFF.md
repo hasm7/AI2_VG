@@ -359,6 +359,7 @@ Payload shape:
   "topics": [],
   "events": [],
   "causal_links": [],
+  "relationships": [],
   "last_extraction_at": "2026-09-23T18:08:36.712761+00:00",
   "last_layer_build_at": "2026-09-23T18:08:46.846709+00:00",
   "needs_layer_rerun": false,
@@ -375,6 +376,7 @@ Topic rows:
 | `topic_type` | Topic type. |
 | `summary` | Topic summary. |
 | `event_count` | Count of events linked by `EVENT_OF_TOPIC`. |
+| `issues` | Issue keys linked to the topic by `ABOUT_TOPIC`. |
 
 Event rows:
 
@@ -398,6 +400,17 @@ Causal-link rows:
 | `effect_slug`, `effect_name` | Effect event. |
 | `explanation` | Causal explanation. |
 | `evidence` | Evidence identifiers stored on the `CAUSED` relationship. |
+
+Relationship rows (`relationships`), one per relationship type this layer created (`generated_by = "topic-event-extraction-v1"`), sorted by type:
+
+| Field | Meaning |
+| --- | --- |
+| `relationship_type` | Relationship type, e.g. `EVIDENCED_BY`. |
+| `from_labels` | Distinct first labels of the start nodes, read from the graph. |
+| `to_labels` | Distinct first labels of the end nodes, read from the graph. |
+| `count` | Number of relationships of this type. |
+
+Known display limitation: event `evidence` is collected as `DISTINCT` display names, so two versions of the same source with the same display name (e.g. two `SlackMessage` versions) would be listed once. The `EVIDENCED_BY` relationships in the graph are unaffected, and no other layer reads this list. Checked on 2026-09-24: 30 `EVIDENCED_BY` relationships in the graph and 30 evidence entries shown, so it does not occur in the current data.
 
 ### `POST /api/knowledge/build`
 
@@ -445,11 +458,20 @@ The Knowledge tab provides:
 | Last reference extraction timestamp | `state.last_extraction_at`, formatted by `formatTimestamp`. |
 | Last knowledge build timestamp | `state.last_layer_build_at`, formatted by `formatTimestamp`. |
 | Stale warning | Shown when `state.needs_layer_rerun` is true, with each `state.stale_reasons` entry listed on its own line underneath. |
+| Description | `Uses a model to find what each issue is about, what happened, who was involved and which events caused which, grounded in the source material.` (`reference-description`), below the button and status row. |
 | Success message | `Done. X topics, Y events, Z causal links.` |
-| Metrics row | Model, Calls, Tokens, Discarded evidence. |
-| Topic cards | Shows topic name, type, and summary. |
-| Events table | Shows event name/type/time/summary/actors/evidence. |
-| Causal links table | Shows cause, effect, explanation, and evidence identifiers. |
+| Counts row | Heading `Nodes and relationships:` (`reference-description reference-counts-heading`), then Topics, Events, Causal links (lengths of `topics`, `events`, `causal_links`). |
+| Run metrics row | Model, Calls, Tokens, Discarded evidence. Shown only right after a successful build, since `GET /api/knowledge` does not return these fields. |
+| Topics table | Heading `Topics (node)` with caption `(Type is one of: requirement, defect, incident, decision, other)`. Columns: Topic, Type, Summary (all property), Events (via EVENT_OF_TOPIC, count), Issues (via ABOUT_TOPIC). One row per topic, so all topics are visible at once. |
+| Events table | Heading `Events (node)`. One table for all topics. Columns: Topic (via EVENT_OF_TOPIC), Event, Type, Occurred at, Summary (all property), Actors (via ACTED_IN_EVENT), Evidence (via EVIDENCED_BY). |
+| Causal links table | Heading `Causal links (relationship: CAUSED)`, caption `(cause:Event)-[:CAUSED]->(effect:Event)`. One table for all topics. Columns: Topic (via EVENT_OF_TOPIC), Cause (start node), Effect (end node), Explanation (property), Evidence (property). Hidden when there are no causal links. |
+| Relationships table | Between Events and Causal links, matching the other tabs (nodes, then the relationship overview, then relationship tables). Heading `Relationships (all relationship types)`; Relationship, From → To, Count, from `state.relationships`. |
+
+Table order: Topics, Events, Relationships, Causal links. Events, Relationships and Causal links headings use `knowledge-section-title` for extra space above; Causal links, the last table, has `layer-last-table` space below.
+
+The tables are flat (one table per node or relationship type, with a Topic column) rather than grouped per topic, matching the other layer tabs and scaling to many topics.
+
+The panel uses `knowledge-layer-panel` (flex column) so the topic list always fills the remaining height regardless of how many rows sit above it.
 
 If no layer exists, the panel shows:
 

@@ -655,8 +655,11 @@ def load_knowledge_state(tx):
     topics = [dict(row) for row in tx.run("""
         MATCH (t:Topic)
         OPTIONAL MATCH (t)<-[:EVENT_OF_TOPIC]-(e:Event)
+        WITH t, count(e) AS event_count
+        OPTIONAL MATCH (i:Issue)-[:ABOUT_TOPIC]->(t)
         RETURN t.slug AS slug, t.name AS name, t.topic_type AS topic_type,
-               t.summary AS summary, count(e) AS event_count
+               t.summary AS summary, event_count,
+               [key IN collect(DISTINCT i.issue_key) WHERE key IS NOT NULL] AS issues
         ORDER BY t.slug
     """)]
 
@@ -679,12 +682,22 @@ def load_knowledge_state(tx):
         ORDER BY topic_slug, cause_slug
     """)]
 
+    relationships = [dict(row) for row in tx.run("""
+        MATCH (a)-[r]->(b) WHERE r.generated_by = $version
+        RETURN type(r) AS relationship_type,
+               collect(DISTINCT head(labels(a))) AS from_labels,
+               collect(DISTINCT head(labels(b))) AS to_labels,
+               count(r) AS count
+        ORDER BY relationship_type
+    """, {"version": EXTRACTION_VERSION})]
+
     state = read_pipeline_state_full(tx)
     staleness = compute_staleness(state)["knowledge"]
     return {
         "topics": topics,
         "events": events,
         "causal_links": causal_links,
+        "relationships": relationships,
         "last_extraction_at": state["last_extraction_at"],
         "last_layer_build_at": state["last_layer_build_at"],
         "needs_layer_rerun": staleness["stale"],

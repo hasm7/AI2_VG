@@ -987,11 +987,19 @@ main {
 }
 
 .reference-panel {
-  display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   height: 100%;
   min-height: 0;
+}
+
+.reference-panel > * {
+  flex: 0 0 auto;
+}
+
+.reference-panel > .reference-table-wrapper {
+  flex: 1 1 auto;
 }
 
 .reference-actions {
@@ -1069,10 +1077,6 @@ main {
   flex-wrap: wrap;
   font-size: 12px;
   color: #234270;
-}
-
-.reference-counts-label {
-  font-weight: 600;
 }
 
 .reference-count strong {
@@ -1251,21 +1255,29 @@ main {
   overflow: auto;
 }
 
+.knowledge-layer-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.knowledge-layer-panel > * {
+  flex: 0 0 auto;
+}
+
+.knowledge-layer-panel > .knowledge-topics {
+  flex: 1 1 auto;
+  margin-top: 10px;
+}
+
+.knowledge-topic.knowledge-relationships .reference-table {
+  min-width: 0;
+}
+
 .knowledge-topic {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
-}
-
-.knowledge-topic-card {
-  min-width: 0;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-  background: #f8fafc;
-  padding: 10px 12px;
-  display: grid;
-  gap: 6px;
 }
 
 .knowledge-card-title {
@@ -1286,12 +1298,6 @@ main {
   letter-spacing: normal;
   text-transform: none;
   color: #64748b;
-}
-
-.knowledge-topic h3 {
-  margin: 0;
-  font-size: 13px;
-  color: #123f91;
 }
 
 .knowledge-topic p {

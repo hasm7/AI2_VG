@@ -235,9 +235,10 @@ The reference tab provides:
 | Last extraction timestamp | `state.last_extraction_at`, formatted by `formatTimestamp`. |
 | Last import timestamp | `state.last_import_at`, formatted by `formatTimestamp`. |
 | Stale warning | Shown when `state.needs_rerun` is true, with each `state.stale_reasons` entry listed on its own line underneath. |
+| Description | `Finds issue keys, PR numbers and document IDs in source text and links each mention to the existing node.` (`reference-description`), below the button and status row. |
 | Success message | `Done. X edges created.` after a successful run. |
-| Counts row | Shows `Issue`, `Pull request`, `Document`, and `Total`. |
-| Results table | Shows all `state.edges`. |
+| Counts row | Preceded by the heading `Relationships created:` (`reference-description reference-counts-heading`). Shows `Issue`, `Pull request`, `Document`, and `Total`, counted from the same edge list as the results table, so every relationship this layer creates is included. |
+| Results table | Heading `Extracted references (relationships: MENTIONS_ISSUE, MENTIONS_PULL_REQUEST, MENTIONS_DOCUMENT)`. Shows all `state.edges`. |
 
 Relationship labels in the count row:
 
