@@ -3208,28 +3208,6 @@ function RightGraphicsPanel() {
       </svg>
 
       <svg className="knowledge-layer-svg" viewBox="0 0 420 260" role="img" aria-label="Knowledge layer visualizer">
-        <defs>
-          <filter id="knowledgeSoftGlow" x="-80%" y="-80%" width="260%" height="260%">
-            <feGaussianBlur stdDeviation="3.5" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <radialGradient id="knowledgeCore" cx="42%" cy="36%" r="68%">
-            <stop offset="0%" stopColor="#fde68a" />
-            <stop offset="100%" stopColor="#fbbf24" />
-          </radialGradient>
-          <radialGradient id="knowledgeNode" cx="42%" cy="36%" r="68%">
-            <stop offset="0%" stopColor="#a5f3fc" />
-            <stop offset="100%" stopColor="#22d3ee" />
-          </radialGradient>
-          <radialGradient id="knowledgeBlueNode" cx="42%" cy="36%" r="68%">
-            <stop offset="0%" stopColor="#93c5fd" />
-            <stop offset="100%" stopColor="#3b82f6" />
-          </radialGradient>
-        </defs>
-
         <ellipse className="knowledge-orbit knowledge-orbit-main" cx="210" cy="132" rx="194" ry="72" />
 
         <g className="knowledge-cluster">
@@ -3246,15 +3224,15 @@ function RightGraphicsPanel() {
             <line x1="306" y1="142" x2="306" y2="104" className="knowledge-edge" />
             <line x1="284" y1="186" x2="306" y2="142" className="knowledge-edge" />
 
-            <circle cx="306" cy="142" r="22" fill="url(#knowledgeCore)" className="knowledge-node knowledge-core-node" />
-            <circle cx="120" cy="142" r="10" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
-            <circle cx="162" cy="126" r="7" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
-            <circle cx="218" cy="62" r="8" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
-            <circle cx="252" cy="34" r="8" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
-            <circle cx="214" cy="120" r="9" fill="url(#knowledgeNode)" className="knowledge-node" />
-            <circle cx="306" cy="104" r="9" fill="url(#knowledgeNode)" className="knowledge-node" />
-            <circle cx="284" cy="186" r="9" fill="url(#knowledgeNode)" className="knowledge-node" />
-            <circle cx="228" cy="228" r="9" fill="url(#knowledgeBlueNode)" className="knowledge-node" />
+            <circle cx="306" cy="142" r="22" fill="#fbbf24" className="knowledge-node knowledge-core-node" />
+            <circle cx="120" cy="142" r="10" fill="#3b82f6" className="knowledge-node" />
+            <circle cx="162" cy="126" r="7" fill="#3b82f6" className="knowledge-node" />
+            <circle cx="218" cy="62" r="8" fill="#3b82f6" className="knowledge-node" />
+            <circle cx="252" cy="34" r="8" fill="#3b82f6" className="knowledge-node" />
+            <circle cx="214" cy="120" r="9" fill="#22d3ee" className="knowledge-node" />
+            <circle cx="306" cy="104" r="9" fill="#22d3ee" className="knowledge-node" />
+            <circle cx="284" cy="186" r="9" fill="#22d3ee" className="knowledge-node" />
+            <circle cx="228" cy="228" r="9" fill="#3b82f6" className="knowledge-node" />
           </g>
         </g>
 

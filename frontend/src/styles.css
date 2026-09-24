@@ -641,6 +641,7 @@ main {
   border-radius: 14px;
   background:
     radial-gradient(circle at 50% 28%, rgba(34, 211, 238, 0.16), transparent 34%) padding-box,
+    radial-gradient(circle at 50% 78%, rgba(34, 211, 238, 0.16), transparent 34%) padding-box,
     linear-gradient(180deg, #0b1220 0%, #080b12 100%) padding-box,
     linear-gradient(145deg, #0ea5e9 0%, #60a5fa 52%, #1d4ed8 100%) border-box;
   box-sizing: border-box;
@@ -759,12 +760,9 @@ main {
   stroke: #3b6380;
   stroke-linecap: round;
   stroke-width: 1.5;
-  opacity: 0.58;
-  animation: knowledgeEdgePulse 4.8s ease-in-out infinite;
 }
 
 .knowledge-node {
-  filter: url("#knowledgeSoftGlow");
   transform-box: fill-box;
   transform-origin: center;
   animation: knowledgeNodePulse 4.8s ease-in-out infinite;
@@ -784,7 +782,7 @@ main {
 
 .knowledge-orbit {
   fill: none;
-  stroke: rgba(8, 145, 178, 0.58);
+  stroke: rgb(8, 145, 178);
   stroke-width: 1.35;
 }
 
@@ -795,8 +793,6 @@ main {
 }
 
 .knowledge-star {
-  filter: url("#knowledgeSoftGlow");
-  opacity: 0.9;
   animation: knowledgeStarPulse 4.2s ease-in-out infinite;
 }
 
@@ -835,24 +831,11 @@ main {
 @keyframes knowledgeNodePulse {
   0%,
   100% {
-    opacity: 0.9;
     transform: scale(0.96);
   }
 
   50% {
-    opacity: 1;
     transform: scale(1.08);
-  }
-}
-
-@keyframes knowledgeEdgePulse {
-  0%,
-  100% {
-    opacity: 0.42;
-  }
-
-  50% {
-    opacity: 0.7;
   }
 }
 
@@ -870,12 +853,10 @@ main {
 @keyframes knowledgeStarPulse {
   0%,
   100% {
-    opacity: 0.58;
     transform: scale(0.82);
   }
 
   50% {
-    opacity: 1;
     transform: scale(1.08);
   }
 }
