@@ -722,13 +722,15 @@ def api_neo4j_status():
 
 @app.route("/api/ai/chat", methods=["POST", "OPTIONS"])
 def api_ai_chat():
-    """Graph RAG agent, streamed as Server-Sent Events.
+    """Graph question-answering agent (`ai_agent`), streamed as Server-Sent Events.
 
     Body: {"message": str, "thread_id": str}. Event payloads (one JSON
     object per `data:` line): {"type": "status", "text": str},
-    {"type": "token", "text": str}, {"type": "sources", "citations": [...],
-    "dropped_citations": [...]}, {"type": "done", "answer": str,
-    "citations": [...], "dropped_citations": [...], "token_usage": {...}}.
+    {"type": "token", "text": str}, {"type": "tool_error", ...},
+    {"type": "sources", "citations": [...], "dropped_citations": [...]},
+    {"type": "done", "answer": str, "citations": [...], "dropped_citations": [...],
+    "token_usage": {...}, "usage": [...], "cost_usd": float, "plan": {...},
+    "entry_points": [...], "sufficiency": {...}, "trace": [...]}.
     """
     if request.method == "OPTIONS":
         return ("", 204)
@@ -746,7 +748,7 @@ def api_ai_chat():
     # from starting. The agent needs langgraph and openai, which the graph API
     # does not.
     try:
-        from langgraph_agent.agent import MissingApiKeyError, require_openai_client, stream_chat
+        from ai_agent.graph import MissingApiKeyError, require_openai_client, stream_chat
     except ImportError as error:
         return jsonify({
             "error": f"Chat agent is unavailable: {error}. "
@@ -778,6 +780,20 @@ def api_ai_chat():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.route("/api/ai/agent", methods=["GET"])
+def api_ai_agent():
+    """The agent graph for the `Configure AI agent` tab: nodes, edges, state fields, settings. Read-only."""
+    try:
+        from ai_agent.describe import describe_agent
+        from ai_agent.graph import get_compiled_graph
+    except ImportError as error:
+        return jsonify({"error": f"Chat agent is unavailable: {error}."}), 503
+    try:
+        return jsonify(describe_agent(get_compiled_graph()))
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
 
 
 @app.route("/api/viewer/start", methods=["POST", "OPTIONS"])

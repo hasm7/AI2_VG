@@ -1242,7 +1242,8 @@ main {
 .causal-panel,
 .collaboration-panel,
 .algorithms-panel,
-.embedding-panel {
+.embedding-panel,
+.agent-panel {
   grid-template-rows: none;
   grid-auto-rows: max-content;
 }
@@ -1250,7 +1251,8 @@ main {
 .causal-panel .knowledge-table-caption,
 .collaboration-panel .knowledge-table-caption,
 .algorithms-panel .knowledge-table-caption,
-.embedding-panel .knowledge-table-caption {
+.embedding-panel .knowledge-table-caption,
+.agent-panel .knowledge-table-caption {
   margin: -6px 0 -4px;
   font-size: 11px;
   line-height: 1.4;
@@ -1427,4 +1429,150 @@ main {
 
 .knowledge-topic .reference-table td {
   white-space: normal;
+}
+
+/* Configure AI agent: the agent flow drawing, node details and state highlighting. */
+.agent-flow-wrapper {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 6px;
+}
+
+.agent-flow-svg {
+  display: block;
+  width: 100%;
+  max-width: 880px;
+  height: auto;
+  margin: 0 auto;
+  font-family: inherit;
+}
+
+.agent-flow-edge {
+  fill: none;
+  stroke: #94a3b8;
+  stroke-width: 1.5;
+}
+
+.agent-flow-edge-conditional {
+  stroke-dasharray: 5 4;
+}
+
+.agent-flow-edge-lit {
+  stroke: #d97706;
+  stroke-width: 2.6;
+}
+
+.agent-flow-edge-label-bg {
+  fill: #ffffff;
+  stroke: #e2e8f0;
+}
+
+.agent-flow-edge-label {
+  fill: #475569;
+  font-size: 9px;
+}
+
+.agent-flow-node {
+  cursor: pointer;
+}
+
+.agent-flow-node rect {
+  stroke-width: 1.5;
+}
+
+.agent-flow-node-code rect {
+  fill: #e0f2fe;
+  stroke: #0284c7;
+}
+
+.agent-flow-node-model rect {
+  fill: #ede9fe;
+  stroke: #7c3aed;
+}
+
+.agent-flow-node-code-model rect {
+  fill: #dcfce7;
+  stroke: #16a34a;
+}
+
+.agent-flow-node-start rect,
+.agent-flow-node-end rect {
+  fill: #1e293b;
+  stroke: #1e293b;
+}
+
+.agent-flow-node-start .agent-flow-node-title,
+.agent-flow-node-end .agent-flow-node-title {
+  fill: #f8fafc;
+}
+
+.agent-flow-node-disabled {
+  opacity: 0.4;
+}
+
+.agent-flow-node-ran rect {
+  stroke: #d97706;
+  stroke-width: 3;
+}
+
+.agent-flow-node-selected rect {
+  stroke: #1d4ed8;
+  stroke-width: 3.5;
+}
+
+.agent-flow-node:focus-visible {
+  outline: none;
+}
+
+.agent-flow-node-title {
+  fill: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-flow-node-sub {
+  fill: #475569;
+  font-size: 10px;
+}
+
+.agent-flow-node-run {
+  fill: #b45309;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.agent-node-details {
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: #eff6ff;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #1e293b;
+}
+
+.agent-node-details p {
+  margin: 0 0 6px;
+}
+
+.agent-node-details p:last-child {
+  margin-bottom: 0;
+}
+
+.agent-node-details-title {
+  font-weight: 700;
+  color: #123f91;
+}
+
+.agent-node-details code,
+.agent-panel .reference-table code {
+  background: #e0e7ff;
+  border-radius: 3px;
+  padding: 1px 4px;
+  margin-right: 4px;
+  font-size: 11px;
+}
+
+.agent-state-row-used td {
+  background: #fef3c7;
 }

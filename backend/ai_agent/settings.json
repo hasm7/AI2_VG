@@ -1,0 +1,45 @@
+{
+  "models": {
+    "planner": "gpt-4o",
+    "specialists": "gpt-4o",
+    "explorer": "gpt-4o",
+    "answer": "gpt-4o"
+  },
+  "history_turns": 3,
+  "budget_usd_per_question": 0.05,
+  "specialists": {
+    "sources": true,
+    "causes": true,
+    "architecture": true,
+    "people": true
+  },
+  "specialist_followup": {
+    "enabled": true,
+    "max_rounds": 1,
+    "max_calls_per_round": 2,
+    "max_extra_nodes": 4
+  },
+  "explorer": {
+    "enabled": true,
+    "max_queries": 3,
+    "max_rows": 25,
+    "max_result_chars": 4000,
+    "max_extra_nodes": 6
+  },
+  "search": {
+    "vector_k": 10,
+    "fulltext_k": 10,
+    "lookup_k": 3,
+    "entry_points": 8
+  },
+  "evidence": {
+    "max_nodes_per_specialist": 8,
+    "max_text_chars": 1200
+  },
+  "query_timeout_seconds": 10,
+  "prices_usd_per_million_tokens": {
+    "gpt-4o": {"input": 2.5, "cached_input": 1.25, "output": 10.0},
+    "gpt-4o-mini": {"input": 0.15, "cached_input": 0.075, "output": 0.6},
+    "text-embedding-3-large": {"input": 0.13, "cached_input": 0.13, "output": 0.0}
+  }
+}

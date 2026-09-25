@@ -533,8 +533,80 @@ type ChatSseEvent =
       citations?: ChatCitation[];
       dropped_citations?: string[];
       token_usage?: ChatTokenUsage;
+      usage?: AgentUsageEntry[];
+      cost_usd?: number;
+      plan?: AgentPlan | null;
+      entry_points?: AgentEntryPoint[];
+      sufficiency?: { ok: boolean; reason: string } | null;
+      trace?: AgentTraceEntry[];
       error?: string;
     };
+
+type AgentNodeKind = "start" | "end" | "code" | "model" | "code + model";
+
+type AgentGraphNode = {
+  id: string;
+  title: string;
+  kind: AgentNodeKind;
+  model: string | null;
+  enabled: boolean;
+  description: string;
+  reads: string[];
+  writes: string[];
+};
+
+type AgentGraphEdge = { source: string; target: string; conditional: boolean; label: string };
+
+type AgentStateField = {
+  name: string;
+  type: string;
+  merge: "appended" | "overwrite";
+  description: string;
+  written_by: string[];
+  read_by: string[];
+};
+
+type AgentDescription = {
+  nodes: AgentGraphNode[];
+  edges: AgentGraphEdge[];
+  state: AgentStateField[];
+  settings: Record<string, unknown>;
+};
+
+type AgentUsageEntry = {
+  node: string;
+  model: string;
+  input_tokens: number;
+  cached_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  priced: boolean;
+};
+
+type AgentTraceEntry = { node: string; ms: number; summary: string };
+
+type AgentPlan = {
+  route: string;
+  question_types: string[];
+  language: string;
+  entities: string[];
+  keywords_en: string[];
+  specialists: string[];
+  reason: string;
+};
+
+type AgentEntryPoint = { id: string; label: string; name: string; score: number; via: string[] };
+
+// The last question answered in the chat, shown on the agent flow in `Configure AI agent`.
+type AgentRun = {
+  question: string;
+  trace: AgentTraceEntry[];
+  usage: AgentUsageEntry[];
+  cost_usd: number;
+  plan: AgentPlan | null;
+  entry_points: AgentEntryPoint[];
+  sufficiency: { ok: boolean; reason: string } | null;
+};
 
 type Neo4jStatus = "checking" | "connected" | "disconnected";
 
@@ -4289,7 +4361,13 @@ async function* readSseEvents(response: Response): AsyncGenerator<ChatSseEvent> 
   }
 }
 
-function ChatPanel({ graphViewRef }: { graphViewRef: React.RefObject<GraphViewHandle | null> }) {
+function ChatPanel({
+  graphViewRef,
+  onRunComplete,
+}: {
+  graphViewRef: React.RefObject<GraphViewHandle | null>;
+  onRunComplete?: (run: AgentRun) => void;
+}) {
   const [threadId] = useState(getOrCreateThreadId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -4365,6 +4443,15 @@ function ChatPanel({ graphViewRef }: { graphViewRef: React.RefObject<GraphViewHa
               content: event.answer,
               citations: event.citations ?? [],
               droppedCitations: event.dropped_citations ?? [],
+            });
+            onRunComplete?.({
+              question: message,
+              trace: event.trace ?? [],
+              usage: event.usage ?? [],
+              cost_usd: event.cost_usd ?? 0,
+              plan: event.plan ?? null,
+              entry_points: event.entry_points ?? [],
+              sufficiency: event.sufficiency ?? null,
             });
           }
           setStatus("");
@@ -4588,8 +4675,586 @@ function RightGraphicsPanel() {
   );
 }
 
+const AGENT_START = "__start__";
+const AGENT_END = "__end__";
+const AGENT_VIEW_WIDTH = 880;
+const AGENT_RANK_HEIGHT = 88;
+const AGENT_NODE_WIDTH = 132;
+const AGENT_NODE_HEIGHT = 42;
+const AGENT_PILL_WIDTH = 76;
+const AGENT_PILL_HEIGHT = 28;
+const AGENT_SIDE_MARGIN = 40; // lane of the outermost edge that skips rows
+const AGENT_LANE_STEP = 24; // distance between side lanes
+const AGENT_CORNER = 10;
+
+const agentKindLabels: Record<AgentNodeKind, string> = {
+  start: "start",
+  end: "end",
+  code: "code",
+  model: "model call",
+  "code + model": "code + bounded model follow-up",
+};
+
+type AgentLayout = {
+  position: Record<string, { x: number; y: number; width: number; height: number }>;
+  rank: Record<string, number>;
+  height: number;
+};
+
+// Top-down layered layout: a node's rank is the longest path from the start, so every edge points downward and
+// parallel nodes (the specialists) share one row. The graph is small and acyclic, so a simple relaxation is enough.
+function layoutAgentGraph(nodes: AgentGraphNode[], edges: AgentGraphEdge[]): AgentLayout {
+  const rank: Record<string, number> = Object.fromEntries(nodes.map((node) => [node.id, 0]));
+  for (let pass = 0; pass < nodes.length; pass += 1) {
+    for (const edge of edges) {
+      rank[edge.target] = Math.max(rank[edge.target] ?? 0, (rank[edge.source] ?? 0) + 1);
+    }
+  }
+  const rows = new Map<number, AgentGraphNode[]>();
+  for (const node of nodes) {
+    rows.set(rank[node.id], [...(rows.get(rank[node.id]) ?? []), node]);
+  }
+  const position: AgentLayout["position"] = {};
+  for (const [row, rowNodes] of rows) {
+    const spacing = Math.min(160, (AGENT_VIEW_WIDTH - 40) / rowNodes.length);
+    rowNodes.forEach((node, index) => {
+      const isPill = node.kind === "start" || node.kind === "end";
+      position[node.id] = {
+        x: AGENT_VIEW_WIDTH / 2 + (index - (rowNodes.length - 1) / 2) * spacing,
+        y: 34 + row * AGENT_RANK_HEIGHT,
+        width: isPill ? AGENT_PILL_WIDTH : AGENT_NODE_WIDTH,
+        height: isPill ? AGENT_PILL_HEIGHT : AGENT_NODE_HEIGHT,
+      };
+    });
+  }
+  const maxRank = Math.max(0, ...Object.values(rank));
+  return { position, rank, height: 34 + maxRank * AGENT_RANK_HEIGHT + 40 };
+}
+
+type AgentEdgeRoute = { path: string; labelX: number; labelY: number; vertical: boolean };
+
+// Edge shapes. An edge to the next row is an S-curve. An edge that skips rows runs in its own lane along the side
+// (right, left, right, ...; the longest one outermost) with rounded corners, so it never crosses a node.
+function routeAgentEdges(edges: AgentGraphEdge[], layout: AgentLayout): Record<string, AgentEdgeRoute> {
+  const routes: Record<string, AgentEdgeRoute> = {};
+  const span = (edge: AgentGraphEdge) => layout.rank[edge.target] - layout.rank[edge.source];
+  const longEdges = edges.filter((edge) => span(edge) > 1).sort((a, b) => span(b) - span(a));
+
+  for (const edge of edges) {
+    const from = layout.position[edge.source];
+    const to = layout.position[edge.target];
+    if (!from || !to) {
+      continue;
+    }
+    const startY = from.y + from.height / 2;
+    const endY = to.y - to.height / 2;
+    const longIndex = longEdges.indexOf(edge);
+    if (longIndex === -1) {
+      const middleY = (startY + endY) / 2;
+      routes[`${edge.source}->${edge.target}`] = {
+        path: `M ${from.x} ${startY} C ${from.x} ${middleY}, ${to.x} ${middleY}, ${to.x} ${endY}`,
+        labelX: (from.x + to.x) / 2,
+        labelY: middleY,
+        vertical: false,
+      };
+      continue;
+    }
+    const side = longIndex % 2 === 0 ? 1 : -1;
+    const lane = Math.floor(longIndex / 2);
+    const sideX = side === 1 ? AGENT_VIEW_WIDTH - AGENT_SIDE_MARGIN - lane * AGENT_LANE_STEP : AGENT_SIDE_MARGIN + lane * AGENT_LANE_STEP;
+    const r = AGENT_CORNER;
+    const y1 = startY + 12 + lane * 8;
+    const y2 = endY - 12 - lane * 8;
+    const fromDir = sideX > from.x ? 1 : -1;
+    const toDir = sideX > to.x ? 1 : -1;
+    routes[`${edge.source}->${edge.target}`] = {
+      path: [
+        `M ${from.x} ${startY}`,
+        `L ${from.x} ${y1 - r}`,
+        `Q ${from.x} ${y1} ${from.x + fromDir * r} ${y1}`,
+        `L ${sideX - fromDir * r} ${y1}`,
+        `Q ${sideX} ${y1} ${sideX} ${y1 + r}`,
+        `L ${sideX} ${y2 - r}`,
+        `Q ${sideX} ${y2} ${sideX - toDir * r} ${y2}`,
+        `L ${to.x + toDir * r} ${y2}`,
+        `Q ${to.x} ${y2} ${to.x} ${y2 + r}`,
+        `L ${to.x} ${endY}`,
+      ].join(" "),
+      labelX: sideX,
+      labelY: (y1 + y2) / 2,
+      vertical: true,
+    };
+  }
+  return routes;
+}
+
+// Which edges the last question travelled: both ends ran, and no other node that ran lies on a path between them
+// (so `planner -> answer` is not lit when `entry` ran, and `check -> answer` is not lit when the explorer ran).
+function traversedAgentEdges(edges: AgentGraphEdge[], ran: Set<string>): Set<string> {
+  const next = new Map<string, string[]>();
+  for (const edge of edges) {
+    next.set(edge.source, [...(next.get(edge.source) ?? []), edge.target]);
+  }
+  const reaches = (from: string, to: string): boolean => {
+    const stack = [...(next.get(from) ?? [])];
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      if (current === to) {
+        return true;
+      }
+      if (!seen.has(current)) {
+        seen.add(current);
+        stack.push(...(next.get(current) ?? []));
+      }
+    }
+    return false;
+  };
+  const lit = new Set<string>();
+  for (const edge of edges) {
+    if (!ran.has(edge.source) || !ran.has(edge.target)) {
+      continue;
+    }
+    const bypassed = [...ran].some(
+      (middle) =>
+        middle !== edge.source && middle !== edge.target && reaches(edge.source, middle) && reaches(middle, edge.target),
+    );
+    if (!bypassed) {
+      lit.add(`${edge.source}->${edge.target}`);
+    }
+  }
+  return lit;
+}
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(value < 0.01 ? 4 : 3)}`;
+}
+
+function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
+  const [description, setDescription] = useState<AgentDescription | null>(null);
+  const [error, setError] = useState("");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isCancelled = false;
+    fetch("/api/ai/agent")
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || `Request failed (${response.status}).`);
+        }
+        if (!isCancelled) {
+          setDescription(data as AgentDescription);
+        }
+      })
+      .catch((fetchError: unknown) => {
+        if (!isCancelled) {
+          setError(fetchError instanceof Error ? fetchError.message : "Could not load the agent graph.");
+        }
+      });
+    return () => {
+      isCancelled = true;
+    };
+  }, []);
+
+  const layout = useMemo(
+    () => (description ? layoutAgentGraph(description.nodes, description.edges) : null),
+    [description],
+  );
+
+  const ranNodes = useMemo(() => {
+    if (!lastRun || lastRun.trace.length === 0) {
+      return new Set<string>();
+    }
+    const ran = new Set(lastRun.trace.map((step) => step.node));
+    ran.add(AGENT_START);
+    if (ran.has("answer")) {
+      ran.add(AGENT_END);
+    }
+    return ran;
+  }, [lastRun]);
+
+  const litEdges = useMemo(
+    () => (description ? traversedAgentEdges(description.edges, ranNodes) : new Set<string>()),
+    [description, ranNodes],
+  );
+
+  const runByNode = useMemo(() => {
+    const byNode: Record<string, { ms: number; cost: number; summary: string }> = {};
+    for (const step of lastRun?.trace ?? []) {
+      byNode[step.node] = { ms: step.ms, cost: 0, summary: step.summary };
+    }
+    for (const entry of lastRun?.usage ?? []) {
+      if (byNode[entry.node]) {
+        byNode[entry.node].cost += entry.cost_usd;
+      }
+    }
+    return byNode;
+  }, [lastRun]);
+
+  const selectedNode = description?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const settings = description?.settings as
+    | {
+        models?: Record<string, string>;
+        budget_usd_per_question?: number;
+        history_turns?: number;
+        specialists?: Record<string, boolean>;
+        specialist_followup?: Record<string, number | boolean>;
+        explorer?: Record<string, number | boolean>;
+        search?: Record<string, number>;
+        evidence?: Record<string, number>;
+      }
+    | undefined;
+
+  if (error) {
+    return (
+      <div className="knowledge-panel agent-panel">
+        <p className="reference-error">{error}</p>
+      </div>
+    );
+  }
+  if (!description || !layout) {
+    return (
+      <div className="knowledge-panel agent-panel">
+        <p className="reference-empty">Loading the agent graph...</p>
+      </div>
+    );
+  }
+
+  const edgeRoutes = routeAgentEdges(description.edges, layout);
+  const shownEdgeLabels = new Set<string>();
+
+  return (
+    <div className="knowledge-panel agent-panel">
+      <p className="reference-description">
+        How a question flows through the AI agent: plan once, fetch from the graph layers in parallel, check the
+        evidence, answer once. Nodes, edges and state are read from the running LangGraph graph.
+      </p>
+
+      <h4 className="knowledge-card-title knowledge-section-title">
+        Agent flow <span className="knowledge-section-kind">(LangGraph nodes and edges)</span>
+      </h4>
+      <div className="knowledge-table-caption">
+        <p>
+          <strong>Nodes:</strong> blue runs code only, violet makes one model call, green runs code and may make one
+          bounded model follow-up. A faded node is turned off in the settings. Click a node for details.
+        </p>
+        <p>
+          <strong>Edges:</strong> a solid edge is always taken; a dashed edge is a choice made at run time (its label
+          says when). The specialists on one row run in parallel.
+        </p>
+        <p>
+          <strong>Last run:</strong> after a question in Chat with AI, the path it took is highlighted in amber, with
+          the time and cost of each node.
+        </p>
+      </div>
+      <div className="agent-flow-wrapper">
+        <svg
+          className="agent-flow-svg"
+          viewBox={`0 0 ${AGENT_VIEW_WIDTH} ${layout.height}`}
+          role="img"
+          aria-label="Agent flow graph"
+        >
+          <defs>
+            <marker id="agentArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
+            </marker>
+            <marker id="agentArrowLit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#d97706" />
+            </marker>
+          </defs>
+
+          {description.edges.map((edge) => {
+            const key = `${edge.source}->${edge.target}`;
+            const route = edgeRoutes[key];
+            if (!route) {
+              return null;
+            }
+            const isLit = litEdges.has(key);
+            // One label per source and text: the four parallel Send edges share one label.
+            const labelKey = `${edge.source}:${edge.label}`;
+            const showLabel = edge.label !== "" && !shownEdgeLabels.has(labelKey);
+            if (showLabel) {
+              shownEdgeLabels.add(labelKey);
+            }
+            return (
+              <g key={key}>
+                <path
+                  className={`agent-flow-edge${edge.conditional ? " agent-flow-edge-conditional" : ""}${isLit ? " agent-flow-edge-lit" : ""}`}
+                  d={route.path}
+                  markerEnd={`url(#${isLit ? "agentArrowLit" : "agentArrow"})`}
+                />
+                {showLabel ? (
+                  <g transform={`translate(${route.labelX} ${route.labelY})${route.vertical ? " rotate(-90)" : ""}`}>
+                    <rect
+                      className="agent-flow-edge-label-bg"
+                      x={-(edge.label.length * 5.4) / 2 - 4}
+                      y={-9}
+                      width={edge.label.length * 5.4 + 8}
+                      height={16}
+                      rx={4}
+                    />
+                    <text className="agent-flow-edge-label" textAnchor="middle" y={3}>
+                      {edge.label}
+                    </text>
+                  </g>
+                ) : null}
+              </g>
+            );
+          })}
+
+          {description.nodes.map((node) => {
+            const box = layout.position[node.id];
+            const run = runByNode[node.id];
+            const kindClass = node.kind.replace(/[^a-z]+/g, "-");
+            const classes = [
+              "agent-flow-node",
+              `agent-flow-node-${kindClass}`,
+              node.enabled ? "" : "agent-flow-node-disabled",
+              ranNodes.has(node.id) ? "agent-flow-node-ran" : "",
+              selectedNodeId === node.id ? "agent-flow-node-selected" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            const isPill = node.kind === "start" || node.kind === "end";
+            return (
+              <g
+                key={node.id}
+                className={classes}
+                transform={`translate(${box.x - box.width / 2} ${box.y - box.height / 2})`}
+                onClick={() => setSelectedNodeId(node.id === selectedNodeId ? null : node.id)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    setSelectedNodeId(node.id === selectedNodeId ? null : node.id);
+                  }
+                }}
+              >
+                <title>{`${node.title} (${agentKindLabels[node.kind]})\n${node.description}`}</title>
+                <rect width={box.width} height={box.height} rx={isPill ? box.height / 2 : 8} />
+                <text x={box.width / 2} y={isPill ? box.height / 2 + 4 : 17} textAnchor="middle" className="agent-flow-node-title">
+                  {isPill ? node.title : node.id}
+                </text>
+                {!isPill ? (
+                  <text x={box.width / 2} y={32} textAnchor="middle" className="agent-flow-node-sub">
+                    {node.model ?? "code"}
+                    {node.enabled ? "" : " · off"}
+                  </text>
+                ) : null}
+                {run && !isPill ? (
+                  <text x={box.width / 2} y={box.height + 11} textAnchor="middle" className="agent-flow-node-run">
+                    {run.ms} ms{run.cost > 0 ? ` · ${formatUsd(run.cost)}` : ""}
+                  </text>
+                ) : null}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {selectedNode ? (
+        <div className="agent-node-details">
+          <p className="agent-node-details-title">
+            {selectedNode.title} <span className="knowledge-section-kind">({agentKindLabels[selectedNode.kind]})</span>
+          </p>
+          <p>{selectedNode.description}</p>
+          <p>
+            <strong>Model:</strong> {selectedNode.model ?? "none (code only)"}
+            {selectedNode.enabled ? "" : " · turned off in the settings"}
+          </p>
+          <p>
+            <strong>Reads from state:</strong>{" "}
+            {selectedNode.reads.length > 0 ? selectedNode.reads.map((field) => <code key={field}>{field}</code>) : "nothing"}
+          </p>
+          <p>
+            <strong>Writes to state:</strong>{" "}
+            {selectedNode.writes.length > 0 ? selectedNode.writes.map((field) => <code key={field}>{field}</code>) : "nothing"}
+          </p>
+          {runByNode[selectedNode.id] ? (
+            <p>
+              <strong>Last run:</strong> {runByNode[selectedNode.id].summary || "ran"}
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="reference-description">Click a node to see what it does and which state fields it uses.</p>
+      )}
+
+      <h4 className="knowledge-card-title knowledge-section-title">
+        State <span className="knowledge-section-kind">(AgentState, one per question)</span>
+      </h4>
+      <div className="knowledge-table-caption">
+        <p>
+          The data that flows between the nodes. <strong>Overwrite</strong>: a node's value replaces the previous one.{" "}
+          <strong>Appended</strong>: values are added to a list, so the parallel specialists never overwrite each
+          other. Rows used by the selected node are highlighted.
+        </p>
+      </div>
+      <div className="reference-table-wrapper">
+        <table className="reference-table">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Type</th>
+              <th>Merge</th>
+              <th className="reference-cell-wrap">Written by</th>
+              <th className="reference-cell-wrap">Read by</th>
+              <th className="reference-cell-wrap">Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            {description.state.map((field) => {
+              const isUsed =
+                selectedNode !== null && (selectedNode.reads.includes(field.name) || selectedNode.writes.includes(field.name));
+              return (
+                <tr key={field.name} className={isUsed ? "agent-state-row-used" : undefined}>
+                  <td>
+                    <code>{field.name}</code>
+                  </td>
+                  <td>{field.type}</td>
+                  <td>{field.merge}</td>
+                  <td className="reference-cell-wrap">{field.written_by.join(", ") || "-"}</td>
+                  <td className="reference-cell-wrap">{field.read_by.join(", ") || "-"}</td>
+                  <td className="reference-cell-wrap">{field.description}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <h4 className="knowledge-card-title knowledge-section-title">
+        Last run <span className="knowledge-section-kind">(the latest question in Chat with AI)</span>
+      </h4>
+      {lastRun ? (
+        <>
+          <div className="knowledge-table-caption">
+            <p>
+              <strong>Question:</strong> {lastRun.question}
+            </p>
+            {lastRun.plan ? (
+              <p>
+                <strong>Plan:</strong> {lastRun.plan.route === "smalltalk" ? "small talk" : "graph question"}; types{" "}
+                {lastRun.plan.question_types.join(", ")}; specialists {lastRun.plan.specialists.join(", ") || "-"};
+                keywords {lastRun.plan.keywords_en.join(", ") || "-"}
+              </p>
+            ) : null}
+            {lastRun.sufficiency ? (
+              <p>
+                <strong>Check:</strong> {lastRun.sufficiency.ok ? "enough evidence" : "not enough"} ({lastRun.sufficiency.reason})
+              </p>
+            ) : null}
+            <p>
+              <strong>Total cost:</strong> {formatUsd(lastRun.cost_usd)}
+            </p>
+          </div>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Node</th>
+                  <th className="reference-cell-center">Time (ms)</th>
+                  <th>Model</th>
+                  <th className="reference-cell-center">Tokens in</th>
+                  <th className="reference-cell-center">Cached</th>
+                  <th className="reference-cell-center">Tokens out</th>
+                  <th className="reference-cell-center">Cost</th>
+                  <th className="reference-cell-wrap">What happened</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lastRun.trace.map((step) => {
+                  const calls = lastRun.usage.filter((entry) => entry.node === step.node);
+                  const sum = (field: "input_tokens" | "cached_tokens" | "output_tokens") =>
+                    calls.reduce((total, entry) => total + entry[field], 0);
+                  return (
+                    <tr key={step.node}>
+                      <td>{step.node}</td>
+                      <td className="reference-cell-center">{step.ms}</td>
+                      <td>{calls.length > 0 ? [...new Set(calls.map((entry) => entry.model))].join(", ") : "-"}</td>
+                      <td className="reference-cell-center">{calls.length > 0 ? sum("input_tokens") : "-"}</td>
+                      <td className="reference-cell-center">{calls.length > 0 ? sum("cached_tokens") : "-"}</td>
+                      <td className="reference-cell-center">{calls.length > 0 ? sum("output_tokens") : "-"}</td>
+                      <td className="reference-cell-center">
+                        {calls.length > 0 ? formatUsd(calls.reduce((total, entry) => total + entry.cost_usd, 0)) : "-"}
+                      </td>
+                      <td className="reference-cell-wrap">{step.summary}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        <p className="reference-empty">No question asked yet. Ask one in Chat with AI and come back here.</p>
+      )}
+
+      <h4 className="knowledge-card-title knowledge-section-title">
+        Settings <span className="knowledge-section-kind">(backend/ai_agent/settings.json)</span>
+      </h4>
+      <div className="knowledge-table-caption">
+        <p>Read at the start of every question. Shown here read-only; editing from this tab comes in a later step.</p>
+      </div>
+      <div className="reference-table-wrapper layer-last-table">
+        <table className="reference-table">
+          <thead>
+            <tr>
+              <th>Setting</th>
+              <th className="reference-cell-wrap">Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(settings?.models ?? {}).map(([node, model]) => (
+              <tr key={`model-${node}`}>
+                <td>Model: {node}</td>
+                <td className="reference-cell-wrap">{model}</td>
+              </tr>
+            ))}
+            <tr>
+              <td>Budget per question</td>
+              <td className="reference-cell-wrap">{formatUsd(Number(settings?.budget_usd_per_question ?? 0))}</td>
+            </tr>
+            <tr>
+              <td>History turns</td>
+              <td className="reference-cell-wrap">{String(settings?.history_turns ?? "-")}</td>
+            </tr>
+            <tr>
+              <td>Specialists on</td>
+              <td className="reference-cell-wrap">
+                {Object.entries(settings?.specialists ?? {})
+                  .map(([name, isOn]) => `${name} ${isOn ? "on" : "off"}`)
+                  .join(", ")}
+              </td>
+            </tr>
+            {(
+              [
+                ["Specialist follow-up", settings?.specialist_followup],
+                ["Explorer", settings?.explorer],
+                ["Search", settings?.search],
+                ["Evidence", settings?.evidence],
+              ] as Array<[string, Record<string, number | boolean> | undefined]>
+            ).map(([label, group]) => (
+              <tr key={label}>
+                <td>{label}</td>
+                <td className="reference-cell-wrap">
+                  {Object.entries(group ?? {})
+                    .map(([key, value]) => `${key}: ${String(value)}`)
+                    .join(", ")}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes" | "agent">("message");
+  const [lastAgentRun, setLastAgentRun] = useState<AgentRun | null>(null);
   const graphViewRef = useRef<GraphViewHandle>(null);
 
   return (
@@ -4626,8 +5291,9 @@ function App() {
           </button>
         </div>
         <div className="center-tab-panel" role="tabpanel">
-          {activeCenterTab === "message" && <ChatPanel graphViewRef={graphViewRef} />}
+          {activeCenterTab === "message" && <ChatPanel graphViewRef={graphViewRef} onRunComplete={setLastAgentRun} />}
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
+          {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} />}
         </div>
       </section>
       <RightGraphicsPanel />
