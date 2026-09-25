@@ -871,6 +871,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const resumeFloatingRef = useRef<(() => void) | null>(null);
   const motionLevelRef = useRef(1);
   const areLabelsVisibleRef = useRef(false);
+  const areEntryPointsVisibleRef = useRef(false);
   const pendingSelectionRef = useRef<{ type: string; displayName: string } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -880,6 +881,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const [motionLevel, setMotionLevel] = useState(1);
   const [spacingLevel, setSpacingLevel] = useState(1);
   const [areLabelsVisible, setAreLabelsVisible] = useState(false);
+  const [areEntryPointsVisible, setAreEntryPointsVisible] = useState(false);
   const [isNeighborMode, setIsNeighborMode] = useState(false);
   const [activeSource, setActiveSource] = useState<DataSource | "All">("All");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -1022,6 +1024,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
             id: node.id,
             label: node.label,
             nodeType: node.type,
+            // Embedded (Searchable) nodes are the AI's entry points; the Entry points button rings them.
+            isEmbedded: Boolean(node.properties?.embedding_model),
             properties: node.properties,
             summary: node.summary ?? "",
           },
@@ -1206,6 +1210,13 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
           },
         },
         {
+          selector: "node.entry-point",
+          style: {
+            "border-color": "#ec4899",
+            "border-width": 6,
+          },
+        },
+        {
           selector: "node:selected",
           style: {
             "border-color": "#1d4ed8",
@@ -1287,6 +1298,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
 
     graphRef.current = graph;
     graph.elements().toggleClass("labels-hidden", !areLabelsVisibleRef.current);
+    graph.nodes("[?isEmbedded]").toggleClass("entry-point", areEntryPointsVisibleRef.current);
 
     let animationFrame = 0;
     let basePositions: Record<string, { x: number; y: number }> = {};
@@ -1404,6 +1416,19 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
 
     graph.elements().toggleClass("labels-hidden", !areLabelsVisible);
   }, [areLabelsVisible, elements]);
+
+  useEffect(() => {
+    areEntryPointsVisibleRef.current = areEntryPointsVisible;
+  }, [areEntryPointsVisible]);
+
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph) {
+      return;
+    }
+
+    graph.nodes("[?isEmbedded]").toggleClass("entry-point", areEntryPointsVisible);
+  }, [areEntryPointsVisible, elements]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1695,6 +1720,15 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
           onClick={() => filterBySource("Embeddings")}
         >
           {sourceFilterDisplayName.Embeddings}
+        </button>
+        {/* Rings the embedded (Searchable) nodes, the AI's entry points, in whatever filter is shown. */}
+        <button
+          className={`graph-action-button source-filter-button${areEntryPointsVisible ? " graph-action-button-active" : ""}`}
+          type="button"
+          aria-pressed={areEntryPointsVisible}
+          onClick={() => setAreEntryPointsVisible((current) => !current)}
+        >
+          Entry points
         </button>
       </div>
       <div className="graph-footer">

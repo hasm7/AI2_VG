@@ -613,6 +613,12 @@ changed, unless `force=True`.
 
 When a specific filter is selected, `/api/graph` returns nodes connected by those relationship types. Shared `Person` nodes can therefore appear in multiple filters.
 
+`Entry points` button (bottom row, left, next to `Chunks`): a toggle, not a filter. When on, every embedded node (the AI's
+entry points, label `Searchable`) in the current filter gets a thick pink ring (`#ec4899`, 6 px); when off, no rings.
+It does not change `activeSource` and sends nothing to the backend. The frontend detects embedded nodes by the
+`embedding_model` property (`isEmbedded` in the Cytoscape element data) and toggles the class `entry-point` on them,
+the same way `Labels` toggles `labels-hidden`. A selected node keeps its blue border (`#1d4ed8`, 4 px).
+
 ## Backend API
 
 | Endpoint | Method | Purpose |

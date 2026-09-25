@@ -367,6 +367,10 @@ the graph panel's bottom row, left-aligned (`graph-footer-left`), apart from the
 Viewer button and the Neo4j status on the right are unchanged. With the current data it
 shows an empty graph (checked: `/api/graph?source=Embeddings` returns 0 nodes, 0 relationships), since no chunks exist.
 
+`Entry points` button (next to `Chunks`): a toggle that rings every embedded node (any node with `embedding_model`, chunks
+included) in whatever filter is shown, so the entry points are seen in context. Rings show only while the button is
+on. Display only; see `docs/GRAPH_DATA_HANDOFF.md` (Frontend Filter Mapping).
+
 ## 7. Indexes
 
 | Index | Type | On | Purpose |
