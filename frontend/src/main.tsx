@@ -4784,7 +4784,10 @@ function layoutAgentGraph(nodes: AgentGraphNode[], edges: AgentGraphEdge[]): Age
   return { position, rank, height: 34 + maxRank * AGENT_RANK_HEIGHT + 40 };
 }
 
-type AgentEdgeRoute = { path: string; labelX: number; labelY: number; vertical: boolean };
+type AgentEdgeRoute = { path: string; labelX: number; labelY: number };
+
+const AGENT_LABEL_CHAR_WIDTH = 6.3; // approximate width of one character of an edge label at 11px
+const AGENT_SIDE_LABEL_INSET = 62; // a side edge's label sits this far inside its lane, on its first horizontal run
 
 // Edge shapes. An edge to the next row is an S-curve. An edge that skips rows runs in its own lane along the side
 // (right, left, right, ...; the longest one outermost) with rounded corners, so it never crosses a node.
@@ -4808,7 +4811,6 @@ function routeAgentEdges(edges: AgentGraphEdge[], layout: AgentLayout): Record<s
         path: `M ${from.x} ${startY} C ${from.x} ${middleY}, ${to.x} ${middleY}, ${to.x} ${endY}`,
         labelX: (from.x + to.x) / 2,
         labelY: middleY,
-        vertical: false,
       };
       continue;
     }
@@ -4833,9 +4835,9 @@ function routeAgentEdges(edges: AgentGraphEdge[], layout: AgentLayout): Record<s
         `Q ${to.x} ${y2} ${to.x} ${y2 + r}`,
         `L ${to.x} ${endY}`,
       ].join(" "),
-      labelX: sideX,
-      labelY: (y1 + y2) / 2,
-      vertical: true,
+      // Horizontal, on the run from the source out to the lane, in the free space between two rows.
+      labelX: sideX - side * AGENT_SIDE_LABEL_INSET,
+      labelY: y1,
     };
   }
   return routes;
@@ -4971,7 +4973,9 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
     <div className="knowledge-panel agent-panel">
       <p className="reference-description">
         How a question flows through the AI agent: plan once, fetch from the graph layers in parallel, check the
-        evidence, answer once. Nodes, edges and state are read from the running LangGraph graph.
+        evidence, answer once.
+        <br />
+        Nodes, edges and state are read from the running LangGraph graph.
       </p>
 
       <h4 className="knowledge-card-title knowledge-section-title">
@@ -5028,16 +5032,16 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
                   markerEnd={`url(#${isLit ? "agentArrowLit" : "agentArrow"})`}
                 />
                 {showLabel ? (
-                  <g transform={`translate(${route.labelX} ${route.labelY})${route.vertical ? " rotate(-90)" : ""}`}>
+                  <g transform={`translate(${route.labelX} ${route.labelY})`}>
                     <rect
                       className="agent-flow-edge-label-bg"
-                      x={-(edge.label.length * 5.4) / 2 - 4}
-                      y={-9}
-                      width={edge.label.length * 5.4 + 8}
-                      height={16}
+                      x={-(edge.label.length * AGENT_LABEL_CHAR_WIDTH) / 2 - 5}
+                      y={-10}
+                      width={edge.label.length * AGENT_LABEL_CHAR_WIDTH + 10}
+                      height={19}
                       rx={4}
                     />
-                    <text className="agent-flow-edge-label" textAnchor="middle" y={3}>
+                    <text className="agent-flow-edge-label" textAnchor="middle" y={4}>
                       {edge.label}
                     </text>
                   </g>
@@ -5086,7 +5090,7 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
                   </text>
                 ) : null}
                 {run && !isPill ? (
-                  <text x={box.width / 2} y={box.height + 11} textAnchor="middle" className="agent-flow-node-run">
+                  <text x={box.width / 2} y={box.height + 14} textAnchor="middle" className="agent-flow-node-run">
                     {run.ms} ms{run.cost > 0 ? ` · ${formatUsd(run.cost)}` : ""}
                   </text>
                 ) : null}

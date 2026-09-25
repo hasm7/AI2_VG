@@ -120,7 +120,7 @@ restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the
 | `search.vector_k`, `fulltext_k`, `lookup_k`, `entry_points` | 10, 10, 3, 8 | Hits per search and entry points kept |
 | `evidence.max_nodes_per_specialist`, `max_text_chars` | 8, 1200 | Size of each evidence packet from the code fetch |
 | `query_timeout_seconds` | 10 | Timeout on every Neo4j query |
-| `prices_usd_per_million_tokens` | `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-large` | Used for `cost_usd`. **Check against OpenAI's current price list**; a model missing here is counted as 0 with `priced: false` |
+| `prices_usd_per_million_tokens` | `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-large` | Used for `cost_usd`. Checked 2026-09-26 against OpenAI's pricing page (developers.openai.com/api/docs/pricing), Standard tier, which the agent uses: all match. Not updated automatically; a model missing here is counted as 0 with `priced: false` |
 
 The query embedding always uses the embedding layer's model and dimensions (`EMBEDDING_MODEL`,
 `EMBEDDING_DIMENSIONS` from `embedding_pass.py`); it is not a setting, since vector search needs the same model.
@@ -232,6 +232,38 @@ at every window width. The test set has one run per model setup, so a single pas
 
 Ideas for later: more test questions (and running each several times to see the spread); a smaller evidence text for
 the answer call to cut cost; a newer model once it has a price in `settings.json`.
+
+### Open issue: questions outside the project run every specialist
+
+**Not decided. It has not been decided whether this will be fixed; the options below are proposals only.**
+
+Observed 2026-09-26: the question "Vad är Sveriges huvudstad?" (general knowledge, nothing to do with the project) ran
+all four specialists. Probable cause, from the code (the run itself was not inspected):
+
+1. The planner prompt allows small talk only for greetings, thanks and questions about the assistant (tightened after
+   the test run where "Vilka grupper finns i teamet?" was routed as small talk). There is no route for questions
+   outside the project, so the question is treated as a graph question.
+2. The planner then names no specialist, since none fits. The safety rule in `planner` (`nodes.py`) runs every enabled
+   specialist when a graph question has none ("ask every enabled one rather than miss the answer"). The rule is meant
+   for an uncertain planner on a project question, but here it sends an irrelevant question to all four.
+
+The rest of the flow works as designed: hybrid search always finds some loosely similar nodes, the specialists fetch
+around them (with a follow-up each), and the answer says the evidence does not cover the question. The cost is
+unnecessary, roughly two to three times a small-talk question (not measured).
+
+Proposals (not decided):
+
+- **A separate route for off-topic questions.** A question type such as `off_topic` in `PlanOut`; `route_after_planner`
+  sends it straight to `answer`, like small talk, and the answer prompt says the assistant only answers questions about
+  the project. Cheapest, but the planner must tell off-topic questions apart from project questions reliably; the test
+  set would need an off-topic question, and q07 ("Vilka grupper finns i teamet?") shows the risk of the planner
+  wrongly skipping the graph.
+- **Limit the safety rule.** Run every specialist only when the planner gave a project question type (`why`, `who`,
+  `timeline`, `impact`, `lookup`, `ranking`); for `other` with no specialist, run none and let `check` and the answer
+  say that nothing was found. Smaller change, keeps the graph route, still pays for the planner, entry search and
+  answer. Note: with no evidence, `check` answers "not enough" and the explorer would run, so `route_after_check`
+  would also have to skip the explorer in this case, or the cost only moves there.
+- **Both**, with the second as a guard when the planner misses the first.
 
 ## 12. Code Map
 
