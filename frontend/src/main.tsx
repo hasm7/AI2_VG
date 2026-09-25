@@ -4466,6 +4466,19 @@ function ChatPanel({ graphViewRef }: { graphViewRef: React.RefObject<GraphViewHa
   );
 }
 
+// Branches of the layer tree in the right panel (viewBox 420 x 360, centered on x = 210). Each gap between two rows
+// holds two branches per side, spreading a little wider per gap. A branch leaves its row vertically and bends outward.
+const layerTreeBranch = (offsetTop: number, offsetBottom: number, yTop: number, yBottom: number) =>
+  `M${210 + offsetTop} ${yTop} Q${210 + offsetTop} ${(yTop + yBottom) / 2} ${210 + offsetBottom} ${yBottom}`;
+const layerTreeGaps: Array<{ yTop: number; yBottom: number; offsets: Array<[number, number]> }> = [
+  { yTop: 96, yBottom: 138, offsets: [[-16, -26], [-40, -56], [16, 26], [40, 56]] },
+  { yTop: 176, yBottom: 218, offsets: [[-18, -30], [-44, -62], [18, 30], [44, 62]] },
+  { yTop: 256, yBottom: 298, offsets: [[-20, -32], [-48, -68], [20, 32], [48, 68]] },
+];
+const layerTreeBranches = layerTreeGaps.flatMap(({ yTop, yBottom, offsets }) =>
+  offsets.map(([offsetTop, offsetBottom]) => layerTreeBranch(offsetTop, offsetBottom, yTop, yBottom)),
+);
+
 function RightGraphicsPanel() {
   const [isMotionOn, setIsMotionOn] = useState(true);
 
@@ -4493,23 +4506,29 @@ function RightGraphicsPanel() {
           </filter>
         </defs>
 
-        {/* Shift the ladder left so the brackets and the longest label are centered in the 420-wide viewBox. */}
-        <g transform="translate(-30 0)">
-        <path className="layer-map-line" d="M110 76 Q88 76 88 90 V100 Q88 108 80 108 Q88 108 88 116 V126 Q88 140 110 140" />
-        <path className="layer-map-line" d="M110 148 Q88 148 88 162 V172 Q88 180 80 180 Q88 180 88 188 V198 Q88 212 110 212" />
-        <path className="layer-map-line" d="M110 222 Q88 222 88 236 V244 Q88 252 80 252 Q88 252 88 260 V270 Q88 284 110 284" />
-        <path className="layer-map-beam" pathLength={100} d="M110 76 Q88 76 88 90 V100 Q88 108 80 108 Q88 108 88 116 V126 Q88 140 110 140" />
-        <path className="layer-map-beam" pathLength={100} style={{ animationDelay: "-1.1s" }} d="M110 148 Q88 148 88 162 V172 Q88 180 80 180 Q88 180 88 188 V198 Q88 212 110 212" />
-        <path className="layer-map-beam" pathLength={100} style={{ animationDelay: "-2.2s" }} d="M110 222 Q88 222 88 236 V244 Q88 252 80 252 Q88 252 88 260 V270 Q88 284 110 284" />
+        {/* Tree branches between the layers, widening downward; each has a light beam running along it. */}
+        {layerTreeBranches.map((d) => (
+          <path key={`line-${d}`} className="layer-map-line" d={d} />
+        ))}
+        {layerTreeBranches.map((d, index) => (
+          <path
+            key={`beam-${d}`}
+            className="layer-map-beam"
+            pathLength={100}
+            style={{ animationDelay: `${-index * 0.55}s` }}
+            d={d}
+          />
+        ))}
 
-        <g className="layer-map-node" transform="translate(126 58)">
+        {/* Each row (icon + label) is centered on x = 210; x offsets assume the monospace label font. */}
+        <g className="layer-map-node" transform="translate(75 58)">
           <circle className="layer-map-dot" cx="0" cy="18" r="5" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="16" cy="10" r="4" />
           <line className="layer-map-icon-line" x1="0" y1="18" x2="16" y2="10" />
           <text x="40" y="22">Expertise &amp; collaboration layer</text>
         </g>
 
-        <g className="layer-map-node" transform="translate(126 124)">
+        <g className="layer-map-node" transform="translate(98 138)">
           <path className="layer-map-icon-line" d="M0 20 H22" />
           <path className="layer-map-icon-line" d="M17 14 L24 20 L17 26" />
           <circle className="layer-map-dot" cx="0" cy="20" r="4" />
@@ -4517,18 +4536,17 @@ function RightGraphicsPanel() {
           <text x="40" y="24">Root cause &amp; impact layer</text>
         </g>
 
-        <g className="layer-map-node" transform="translate(126 202)">
+        <g className="layer-map-node" transform="translate(124 218)">
           <rect className="layer-map-icon-box" x="-2" y="6" width="24" height="20" rx="3" />
           <path className="layer-map-icon-line" d="M4 13 H18 M4 19 H13" />
           <text x="40" y="23">Architecture layer</text>
         </g>
 
-        <g className="layer-map-node" transform="translate(126 268)">
+        <g className="layer-map-node" transform="translate(135 298)">
           <circle className="layer-map-icon-orbit" cx="12" cy="18" r="15" />
           <circle className="layer-map-dot" cx="12" cy="18" r="4" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="25" cy="12" r="3" />
           <text x="40" y="23">Knowledge layer</text>
-        </g>
         </g>
       </svg>
 
