@@ -796,6 +796,64 @@ def api_ai_agent():
         return jsonify({"error": str(error)}), 500
 
 
+@app.route("/api/ai/agent/settings", methods=["POST", "OPTIONS"])
+def api_ai_agent_settings():
+    """Saves the agent settings edited in the `Configure AI agent` tab. Body: a partial settings object."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    try:
+        from ai_agent.settings import SettingsError, save_settings
+    except ImportError as error:
+        return jsonify({"error": f"Chat agent is unavailable: {error}."}), 503
+    try:
+        return jsonify({"settings": save_settings(request.get_json(silent=True) or {})})
+    except SettingsError as error:
+        return jsonify({"error": str(error)}), 400
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+
+@app.route("/api/ai/agent/evaluation", methods=["GET", "POST", "OPTIONS"])
+def api_ai_agent_evaluation():
+    """GET: the test questions, the last run and the run history. POST: runs every test question (calls OpenAI),
+    streamed as Server-Sent Events: {"type": "progress", "index", "total", "result"} per question, then
+    {"type": "done", "run": {...}}."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    try:
+        from ai_agent.evaluation import evaluation_state, run_evaluation
+        from ai_agent.graph import MissingApiKeyError, require_openai_client
+    except ImportError as error:
+        return jsonify({"error": f"Chat agent is unavailable: {error}."}), 503
+
+    if request.method == "GET":
+        try:
+            return jsonify(evaluation_state())
+        except Exception as error:
+            return jsonify({"error": str(error)}), 500
+
+    try:
+        client = require_openai_client()
+        uri, user, password, database = neo4j_connection_settings()
+    except MissingApiKeyError as error:
+        return jsonify({"error": str(error)}), 503
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
+
+    def generate():
+        try:
+            for event in run_evaluation(client, uri, user, password, database):
+                yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+        except Exception as error:
+            yield f"data: {json.dumps({'type': 'error', 'error': str(error)}, ensure_ascii=False)}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.route("/api/viewer/start", methods=["POST", "OPTIONS"])
 def api_viewer_start():
     if request.method == "OPTIONS":

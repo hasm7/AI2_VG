@@ -4,10 +4,11 @@ This document describes the graph question-answering agent behind `Chat with AI`
 It is implemented in `backend/ai_agent/`, exposed as `POST /api/ai/chat` and `GET /api/ai/agent` in `backend/app.py`,
 and used by `ChatPanel` and `ConfigureAgentPanel` in `frontend/src/main.tsx`.
 
-**Status (2026-09-25):** steps 1-3 of the plan are done (section 9): the full flow runs, the specialists have their
-bounded model follow-up, the explorer runs read-only Cypher, and `Configure AI agent` draws the flow, the state and the
-last run. All models are `gpt-4o` to test the flow cheaply. The previous agent in `backend/langgraph_agent/` is kept,
-unused, for comparison until the new one replaces it.
+**Status (2026-09-25):** all five steps of the plan are done (section 11): the full flow runs, the specialists have
+their bounded model follow-up, the explorer runs read-only Cypher, `Configure AI agent` draws the flow, the state and
+the last run, edits the settings, and runs a test set of 14 questions scored in code. Chosen models after comparing
+them on the test set (section 9): `gpt-4o` for the planner and the answer, `gpt-4o-mini` for the specialists and the
+explorer; 14 of 14 pass at about $0.008 per question. The previous agent (`backend/langgraph_agent/`) was removed.
 
 ## 1. Design Principles
 
@@ -105,11 +106,12 @@ payload to a specialist carries the `usage` so far, so each parallel specialist 
 ## 6. Settings
 
 `backend/ai_agent/settings.json`, read at the start of every question (an edit applies to the next question, no
-restart). Missing keys fall back to `DEFAULTS` in `settings.py`.
+restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the tab through
+`POST /api/ai/agent/settings` (section 8), or in the file.
 
 | Key | Current | Meaning |
 | --- | --- | --- |
-| `models.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-4o` | Model per model step |
+| `models.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o` | Model per model step; only models with a price can be chosen |
 | `history_turns` | 3 | Earlier turns the planner and the answer see |
 | `budget_usd_per_question` | 0.05 | Above this, optional steps (follow-ups, explorer) are skipped; the answer always runs |
 | `specialists.<name>` | all `true` | Turn a specialist off |
@@ -142,7 +144,15 @@ connections and 0 running transactions one second after.
 
 `GET /api/ai/agent` (read-only, `describe.py`): `nodes` (`id`, `title`, `kind`, `model`, `enabled`, `description`,
 `reads`, `writes`), `edges` (`source`, `target`, `conditional`, `label`), `state` (`name`, `type`, `merge`,
-`description`, `written_by`, `read_by`) and `settings`. Nodes and edges come from `get_compiled_graph().get_graph()`,
+`description`, `written_by`, `read_by`), `settings` and `available_models`.
+
+`POST /api/ai/agent/settings` (`settings.save_settings`): a partial settings object. Every value is checked before
+anything is written: known groups and keys only, whole numbers where required, ranges (`EDITABLE_NUMBERS`), booleans
+for on/off, specialists by name, models only from `available_models` (those with a price). Prices cannot be changed
+here. A wrong value answers `400` with the reason and leaves the file unchanged.
+
+`GET /api/ai/agent/evaluation`: the test questions, the last run and the run history. `POST` runs every test question
+(calls OpenAI), streamed as Server-Sent Events: `progress` per question with its result, then `done` with the run. Nodes and edges come from `get_compiled_graph().get_graph()`,
 so the drawing matches what runs; state fields and merge rules come from `AgentState`; descriptions, reads and writes
 come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 
@@ -154,11 +164,45 @@ come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 | Node details | Title, kind, model, description, the state fields it reads and writes, and its last-run summary |
 | State | Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
 | Last run | Question, plan, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
-| Settings | The current `settings.json`, read-only |
+| Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models |
+| Settings | An editable form (`AgentSettingsForm`): models per step, budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
 
 The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRunComplete` when a `done` event arrives.
 
-## 9. Verification (2026-09-25)
+`ChatPanel` stays mounted and is only hidden while another center tab is open, so the conversation (and an answer
+still streaming) survives switching to `Configure AI agent` and back. The thread id is made once per page load
+(`newThreadId`), so a reload starts a new conversation in the chat window and in the backend's history alike.
+
+## 9. Test Questions and Model Choice
+
+`backend/ai_agent/test_questions.json`, run by `evaluation.py`. 14 questions: the seven layer questions of section 12
+of `EMBEDDING_LAYER_HANDOFF.md` (in Swedish), one ranking question, the project goals (documents behind a requirement,
+who said something before a decision, sources describing the same event, missing or contradictory information), who
+took part in a meeting, and small talk. Each question has an expected route, groups of expected evidence nodes (label
+plus exact name or part of the name), expected facts and expected words in the answer. Scored in code: a question
+passes when the route, every evidence group, every fact group and every word group are right. Whether an expected node
+was also cited is shown but does not decide the pass. Every question runs without history.
+
+The expected answers were written from the graph (read-only queries) and must be updated when an LLM layer is rebuilt
+and renames events, root causes or components. The last run is saved to `evaluation_last.json` and a summary per run to
+`evaluation_history.json` (both ignored by git).
+
+Model comparison on 2026-09-25 (one run each; model answers vary a little between runs):
+
+| Planner | Specialists, explorer | Answer | Passed | Cost for 14 | Notes |
+| --- | --- | --- | ---: | ---: | --- |
+| gpt-4o | gpt-4o | gpt-4o | 13/14 | $0.131 | The miss was a test too narrow (q12's answer was right from other sources; test widened) |
+| gpt-4o-mini | gpt-4o-mini | gpt-4o | 12-13/14 | $0.081-0.094 | The cheap planner routed "Vilka grupper finns i teamet?" as small talk and missed that knowledge risk is a ranking question |
+| gpt-4o-mini | gpt-4o-mini | gpt-4o-mini | 11/14 | $0.009 | The answer attributed Priya's statement to Erik, besides the planner misses |
+| **gpt-4o** | **gpt-4o-mini** | **gpt-4o** | **14/14** | **$0.112** | Chosen. Run after the fixes below |
+
+Fixes that came out of the runs: the planner prompt now says what small talk is and that knowledge risk and bus
+factor questions are ranking; the answer prompt says how to attribute `Previous line (name)` and `Reply to:` lines
+(the answer had attributed Priya Raman's words, quoted in Erik Nilsson's segment, to Erik); q10's expected evidence was
+tightened to the statements actually made by Priya Raman. Most of the cost is the answer call (it reads all the
+evidence), so `evidence.max_text_chars` and `max_nodes_per_specialist` are the main levers left.
+
+## 10. Verification (2026-09-25)
 
 | Check | Result |
 | --- | --- |
@@ -170,23 +214,26 @@ The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRu
 | Explorer, called directly: "Who took part in the sprint review meeting?" | One query, 3 rows, the three persons as evidence; $0.007 |
 | Neo4j connections | Section 7 |
 | `GET /api/ai/agent` through the Vite proxy | 12 nodes, 17 edges, 15 state fields |
+| Settings validation | Six invalid updates rejected (unknown model, out of range, not a boolean, prices, not a whole number, unknown specialist) with the file unchanged; valid model changes saved through the proxy |
+| Test set through `POST /api/ai/agent/evaluation` | Section 9 |
 | `tsc --noEmit`, `py_compile` | Pass |
 
 Known weak points: the follow-up model sometimes passes a Swedish word from the question as a tool argument (returns
 nothing, costs little); answers in Swedish are somewhat stiff with `gpt-4o`. The tab has not been checked for layout
-at every window width.
+at every window width. The test set has one run per model setup, so a single pass or miss can be chance.
 
-## 10. Next Steps
+## 11. Plan
 
 1. ~~Skeleton with a cheap model~~.
 2. ~~Draw nodes, edges and state in `Configure AI agent`~~.
 3. ~~Specialist follow-ups and the explorer~~.
-4. Test questions with expected answers (section 12 of `EMBEDDING_LAYER_HANDOFF.md` plus the project goals), with
-   answer quality and cost per question.
-5. Edit settings from the tab (model per node, budget, specialists on/off), choose models per step, fine-tuning. Then
-   remove `langgraph_agent/`.
+4. ~~Test questions with expected answers, with answer quality and cost per question~~.
+5. ~~Edit settings from the tab, choose models per step, remove `langgraph_agent/`~~.
 
-## 11. Code Map
+Ideas for later: more test questions (and running each several times to see the spread); a smaller evidence text for
+the answer call to cut cost; a newer model once it has a price in `settings.json`.
+
+## 12. Code Map
 
 | File | Holds |
 | --- | --- |
@@ -196,15 +243,16 @@ at every window width.
 | `backend/ai_agent/specialists.py` | The four specialists' code fetches, participation items, rankings, `run_specialist` (own session per specialist) |
 | `backend/ai_agent/followup.py` | Follow-up tools per specialist, `run_followup`, `run_explorer` |
 | `backend/ai_agent/describe.py` | `NODE_INFO`, `EDGE_LABELS`, `STATE_DESCRIPTIONS`, `describe_agent` for `GET /api/ai/agent` |
+| `backend/ai_agent/evaluation.py`, `test_questions.json` | Test questions, scoring in code, `run_evaluation`, saved last run and history |
 | `backend/ai_agent/db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text` |
 | `backend/ai_agent/state.py` | `AgentState` |
 | `backend/ai_agent/prompts.py` | `PLANNER_PROMPT`, `ANSWER_PROMPT`, `followup_prompt`, `EXPLORER_PROMPT` |
-| `backend/ai_agent/settings.py`, `settings.json` | Settings and defaults |
+| `backend/ai_agent/settings.py`, `settings.json` | Settings and defaults, `available_models`, `save_settings` with validation (`EDITABLE_NUMBERS`, `EDITABLE_FLAGS`) |
 | `backend/ai_agent/usage.py` | Usage entries, cost, totals |
-| `frontend/src/main.tsx` | Agent types, `layoutAgentGraph`, `routeAgentEdges`, `traversedAgentEdges`, `ConfigureAgentPanel`; `ChatPanel` `onRunComplete`; `App` `lastAgentRun` |
-| `frontend/src/styles.css` | `agent-panel` (many-table group), `agent-flow-*`, `agent-node-details`, `agent-state-row-used` |
+| `frontend/src/main.tsx` | Agent types, `layoutAgentGraph`, `routeAgentEdges`, `traversedAgentEdges`, `ConfigureAgentPanel`, `AgentTestQuestions`, `AgentSettingsForm`; `ChatPanel` `onRunComplete`; `App` `lastAgentRun`; `readSseEvents` is generic |
+| `frontend/src/styles.css` | `agent-panel` (many-table group), `agent-flow-*`, `agent-node-details`, `agent-state-row-used`, `agent-settings-*`, `agent-test-*` |
 
-## 12. Important Boundaries
+## 13. Important Boundaries
 
 - Reads Neo4j only (read sessions, read transactions); never writes to Neo4j or PostgreSQL.
 - Model-written Cypher goes through `cypher_guard` and a read transaction: two independent guards.

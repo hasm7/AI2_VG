@@ -1,0 +1,118 @@
+{
+  "about": "Test questions for the agent. expected_evidence: groups of node specs; a group passes when any spec matches a node in the evidence (label, plus name or a case-insensitive part of the name). expected_terms: groups of words; a group passes when any variant appears in the answer (case-insensitive). expected_facts: the same, on the facts in the evidence. Names of events, root causes and components come from the LLM layers and can change when those layers are rebuilt; update this file then.",
+  "questions": [
+    {
+      "id": "q01",
+      "question": "Varför blockerades AUTH-17?",
+      "goal": "Knowledge layer: the reason behind an event",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "Event", "contains": "blocked"}]],
+      "expected_terms": [["säkerhet", "security"]]
+    },
+    {
+      "id": "q02",
+      "question": "Vilken kod ändrades för mobilfixen?",
+      "goal": "Sources: code changes",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "CodeChange", "contains": "mobile_refresh.py"}]],
+      "expected_terms": [["mobile_refresh.py"]]
+    },
+    {
+      "id": "q03",
+      "question": "Vilka komponenter använder Session lifetime policy?",
+      "goal": "Architecture: dependencies",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "Component", "contains": "session lifetime policy"}]],
+      "expected_terms": [["Mobile session refresh endpoint"], ["Web session refresh endpoint"]]
+    },
+    {
+      "id": "q04",
+      "question": "Vad var grundorsaken till mobilregressionen?",
+      "goal": "Root cause & impact: root causes",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "RootCause", "contains": "mobile"}]],
+      "expected_terms": []
+    },
+    {
+      "id": "q05",
+      "question": "Vem kan mest om Mobile session refresh endpoint?",
+      "goal": "Expertise: expert on a component",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "Person", "name": "Erik Nilsson"}, {"label": "Component", "contains": "mobile session refresh endpoint"}]],
+      "expected_terms": [["Erik Nilsson"]]
+    },
+    {
+      "id": "q06",
+      "question": "Var finns det en kunskapsrisk om någon slutar?",
+      "goal": "Graph algorithms: bus factor",
+      "expected_route": "graph",
+      "expected_evidence": [],
+      "expected_terms": [["Mobile session refresh endpoint"]]
+    },
+    {
+      "id": "q07",
+      "question": "Vilka grupper finns i teamet?",
+      "goal": "Graph algorithms: communities",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "Community"}]],
+      "expected_terms": [["Anna Berg"], ["Priya Raman"]]
+    },
+    {
+      "id": "q08",
+      "question": "Vem har högst betweenness i teamet?",
+      "goal": "Ranking on a metric",
+      "expected_route": "graph",
+      "expected_evidence": [],
+      "expected_facts": [["betweenness"]],
+      "expected_terms": [["Anna Berg"]]
+    },
+    {
+      "id": "q09",
+      "question": "Vilka dokument beskriver kravet REQ-AUTH-SESSION och hur ändrades det?",
+      "goal": "Project goal: documents behind a requirement, and what changed",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "DocumentVersion", "name": "doc-001 v1"}], [{"label": "DocumentVersion", "name": "doc-001 v2"}]],
+      "expected_terms": [["inaktiv", "inactivity"]]
+    },
+    {
+      "id": "q10",
+      "question": "Vem sa att en fast 60-minutersgräns inte räckte innan kravet skrevs om?",
+      "goal": "Project goal: who discussed a decision before it was made",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "TeamsTranscriptSegment", "name": "seg-003"}, {"label": "SlackMessage", "name": "slack-005"}, {"label": "PullRequestReview", "name": "backend-api#42 review-001"}, {"label": "IssueComment", "name": "comment-002"}]],
+      "expected_terms": [["Priya Raman"]]
+    },
+    {
+      "id": "q11",
+      "question": "Vilka källor beskriver att AUTH-17 blockerades?",
+      "goal": "Project goal: sources that describe the same event",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "IssueVersion", "name": "AUTH-17 v3"}, {"label": "IssueComment", "name": "comment-002"}, {"label": "SlackMessage", "name": "slack-006"}, {"label": "TeamsTranscriptSegment", "name": "seg-003"}]],
+      "expected_terms": [["AUTH-17 v3", "comment-002", "slack-006", "seg-003"]]
+    },
+    {
+      "id": "q12",
+      "question": "Täcker fixen i backend-api#42 även mobilen?",
+      "goal": "Project goal: where information is missing or contradictory",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "PullRequestReview", "name": "backend-api#42 review-005"}, {"label": "Event", "contains": "limited to web"}, {"label": "RootCause", "contains": "mobile"}, {"label": "SlackMessage", "name": "slack-010"}, {"label": "SlackMessage", "name": "slack-011"}, {"label": "IssueComment", "name": "comment-005"}]],
+      "expected_terms": [["webb", "web"]]
+    },
+    {
+      "id": "q13",
+      "question": "Vilka var med på sprint review-mötet?",
+      "goal": "Who took part in a meeting",
+      "expected_route": "graph",
+      "expected_evidence": [[{"label": "TeamsMeeting", "name": "meet-002"}]],
+      "expected_terms": [["Anna Berg"], ["Anna Lindqvist"], ["Erik Nilsson"]]
+    },
+    {
+      "id": "q14",
+      "question": "Hej!",
+      "goal": "Small talk: no graph work",
+      "expected_route": "smalltalk",
+      "expected_evidence": [],
+      "expected_terms": []
+    }
+  ]
+}

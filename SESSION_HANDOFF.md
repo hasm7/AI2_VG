@@ -128,23 +128,11 @@ Established across all layer tabs; the Embeddings tab follows them as well:
   - `db.index.vector.queryNodes` works but is **deprecated** in the installed Neo4j; new code should use the Cypher
     `SEARCH` clause. Check the syntax against the installed version before relying on it.
 
-## Existing chat agent (to be replaced or rebuilt)
+## Chat agent
 
-- Code: `backend/langgraph_agent/` (`agent.py`, `nodes.py`, `tools.py`, `prompts.py`, `state.py`,
-  `schema_reference.py`). Endpoint `POST /api/ai/chat` in `backend/app.py` (streams events); frontend `ChatPanel` in
-  `frontend/src/main.tsx`.
-- Shape: LangGraph `StateGraph`, supervisor pattern: `orchestrator` routes to `direct` (small talk) or to
-  `search_agent` -> `graph_agent` -> `synthesis`. Models `gpt-5.6-terra` (orchestrator, search, synthesis) and
-  `gpt-5.6-sol` (graph agent), OpenAI Responses API with tool calls. `schema_reference.py` introspects the live Neo4j
-  schema once at import (so it only sees layers that existed when the backend started). `cypher_guard.py` enforces
-  read-only Cypher for the free `run_cypher` tool.
-- **It does not start today.** `tools.py` fails at import: `_LABEL_DESCRIPTIONS` has no entry for `Component` /
-  `RootCause` (`KeyError: 'Component'`), and it builds one `search_<label>` tool per v1 per-label vector index, which no
-  longer exist (`LabelConfig` has no `index_name`). It was built in a hurry; the user wants the agents rebuilt properly
-  on top of the embedding layer, not patched to fit the old design.
-- Its fixed tools cover sources and the Knowledge layer only (`get_event_evidence`, `get_issue_history`,
-  `get_person_activity`, ...); Architecture, Root cause, Expertise and Algorithms are reachable only through free
-  Cypher.
+**Update (2026-09-25):** the agent was rebuilt as `backend/ai_agent/` (plan-and-execute with parallel layer
+specialists) and the old `backend/langgraph_agent/` was removed. Design, settings, test questions and checks:
+`docs/AI_AGENT_HANDOFF.md`. The notes below on cost causes and design considerations were the starting point.
 
 ## The user's goals for the next session
 

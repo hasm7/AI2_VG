@@ -1576,3 +1576,90 @@ main {
 .agent-state-row-used td {
   background: #fef3c7;
 }
+
+/* Configure AI agent: settings form and test questions. */
+.agent-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 10px;
+}
+
+.agent-settings-group {
+  margin: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  padding: 6px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #234270;
+}
+
+.agent-settings-group legend {
+  padding: 0 4px;
+  font-weight: 700;
+  color: #123f91;
+}
+
+.agent-settings-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-settings-field input,
+.agent-settings-field select {
+  width: 110px;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.agent-settings-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.agent-test-pass {
+  color: #15803d;
+  font-weight: 700;
+}
+
+.agent-test-fail {
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.agent-test-note {
+  color: #92400e;
+  font-size: 10px;
+}
+
+.agent-test-ok {
+  color: #166534;
+}
+
+.agent-test-missing {
+  color: #b91c1c;
+}
+
+.reference-table .agent-test-answer-cell {
+  min-width: 360px;
+  max-width: 480px;
+  white-space: pre-wrap;
+}

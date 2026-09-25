@@ -1,8 +1,8 @@
 {
   "models": {
     "planner": "gpt-4o",
-    "specialists": "gpt-4o",
-    "explorer": "gpt-4o",
+    "specialists": "gpt-4o-mini",
+    "explorer": "gpt-4o-mini",
     "answer": "gpt-4o"
   },
   "history_turns": 3,
@@ -38,8 +38,20 @@
   },
   "query_timeout_seconds": 10,
   "prices_usd_per_million_tokens": {
-    "gpt-4o": {"input": 2.5, "cached_input": 1.25, "output": 10.0},
-    "gpt-4o-mini": {"input": 0.15, "cached_input": 0.075, "output": 0.6},
-    "text-embedding-3-large": {"input": 0.13, "cached_input": 0.13, "output": 0.0}
+    "gpt-4o": {
+      "input": 2.5,
+      "cached_input": 1.25,
+      "output": 10.0
+    },
+    "gpt-4o-mini": {
+      "input": 0.15,
+      "cached_input": 0.075,
+      "output": 0.6
+    },
+    "text-embedding-3-large": {
+      "input": 0.13,
+      "cached_input": 0.13,
+      "output": 0.0
+    }
   }
 }

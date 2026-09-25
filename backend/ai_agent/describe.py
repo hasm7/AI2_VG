@@ -7,7 +7,7 @@ described here; keep `NODE_INFO` in step with `nodes.py`.
 
 import typing
 
-from .settings import load_settings
+from .settings import available_models, load_settings
 from .state import AgentState
 
 START, END = "__start__", "__end__"
@@ -144,4 +144,7 @@ def describe_agent(compiled_graph) -> dict:
          "label": EDGE_LABELS.get((edge.source, edge.target), "")}
         for edge in drawable.edges
     ]
-    return {"nodes": nodes, "edges": edges, "state": _state_fields(), "settings": settings}
+    return {
+        "nodes": nodes, "edges": edges, "state": _state_fields(), "settings": settings,
+        "available_models": available_models(settings),
+    }

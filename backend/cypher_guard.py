@@ -3,7 +3,7 @@
 A code-level guard, not a prompt instruction: a prompt can be talked around,
 a regex check that runs before the query ever reaches the driver cannot. It
 stays in place permanently, including after a read-only Neo4j role exists —
-two layers cost nothing (see `WORK_ORDER_GRAPH_RAG_AGENT.md` section 4).
+two layers cost nothing. Used by the agent's explorer (`ai_agent/followup.py`).
 
 The check strips string literals and comments first, then matches write
 keywords on word boundaries. Stripping first is what keeps a property named

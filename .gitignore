@@ -60,6 +60,10 @@ data/
 backups/
 dumps/
 
+# Agent test runs (results change with every run)
+backend/ai_agent/evaluation_last.json
+backend/ai_agent/evaluation_history.json
+
 # Neo4j local files
 neo4j/data/
 neo4j/logs/

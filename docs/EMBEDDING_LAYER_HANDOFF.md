@@ -56,9 +56,9 @@ History: `embedding-v1` embedded 12 labels with mostly bare text, used one vecto
 vectors of `Topic`, `Event`, `Component` and `RootCause` when those layers were rebuilt. `embedding-v2` introduced the
 design in this document; `embedding-v3` added what larger data needs, with the same texts.
 
-Known issue outside this layer: the chat agent (`backend/langgraph_agent/tools.py`) does not start. It fails at import
-with `KeyError: 'Component'`, and it also expects the v1 per-label vector indexes. The agent is planned to be rebuilt on
-top of this layer, so it is left as-is.
+The chat agent that uses this layer (`backend/ai_agent/`, hybrid search on `searchable_embedding` and
+`searchable_text`) is described in `docs/AI_AGENT_HANDOFF.md`. The earlier agent (`backend/langgraph_agent/`), which
+expected the v1 per-label vector indexes, was removed on 2026-09-25.
 
 ## 3. Model and Configuration
 

@@ -566,12 +566,69 @@ type AgentStateField = {
   read_by: string[];
 };
 
+type AgentSettings = {
+  models: Record<string, string>;
+  history_turns: number;
+  budget_usd_per_question: number;
+  query_timeout_seconds: number;
+  specialists: Record<string, boolean>;
+  specialist_followup: { enabled: boolean; max_rounds: number; max_calls_per_round: number; max_extra_nodes: number };
+  explorer: { enabled: boolean; max_queries: number; max_rows: number; max_result_chars: number; max_extra_nodes: number };
+  search: { vector_k: number; fulltext_k: number; lookup_k: number; entry_points: number };
+  evidence: { max_nodes_per_specialist: number; max_text_chars: number };
+};
+
 type AgentDescription = {
   nodes: AgentGraphNode[];
   edges: AgentGraphEdge[];
   state: AgentStateField[];
-  settings: Record<string, unknown>;
+  settings: AgentSettings;
+  available_models: string[];
 };
+
+type AgentEvalNodeSpec = { label?: string; name?: string; contains?: string };
+
+type AgentEvalResult = {
+  id: string;
+  question: string;
+  goal: string;
+  passed: boolean;
+  route?: string;
+  route_ok?: boolean;
+  evidence: Array<{ expected: AgentEvalNodeSpec[]; found: string[]; cited: string[] }>;
+  facts: Array<{ expected: string[]; found: boolean }>;
+  terms: Array<{ expected: string[]; found: boolean }>;
+  specialists?: string[];
+  explorer_ran?: boolean;
+  errors: Array<{ node: string; error: string }>;
+  answer: string;
+  citations: string[];
+  cost_usd: number;
+  ms: number;
+  model_calls?: number;
+};
+
+type AgentEvalSummary = {
+  run_at: string;
+  models: Record<string, string>;
+  passed: number;
+  total: number;
+  cost_usd: number;
+  ms: number;
+};
+
+type AgentEvalRun = AgentEvalSummary & { results: AgentEvalResult[] };
+
+type AgentEvalState = {
+  questions: Array<{ id: string; question: string; goal: string }>;
+  last_run: AgentEvalRun | null;
+  history: AgentEvalSummary[];
+};
+
+type AgentEvalEvent =
+  | { type: "progress"; index: number; total: number; result: AgentEvalResult }
+  | { type: "done"; run: AgentEvalRun }
+  | { type: "error"; error: string };
 
 type AgentUsageEntry = {
   node: string;
@@ -4304,23 +4361,13 @@ function BuildGraphLayersPanel() {
   );
 }
 
-function getOrCreateThreadId(): string {
-  const storageKey = "ai-chat-thread-id";
-  try {
-    const existing = window.sessionStorage.getItem(storageKey);
-    if (existing) {
-      return existing;
-    }
-    const created = crypto.randomUUID();
-    window.sessionStorage.setItem(storageKey, created);
-    return created;
-  } catch {
-    // Private browsing / blocked storage: fall back to an in-memory id for this page load.
-    return crypto.randomUUID();
-  }
+// One conversation per page load: a reload starts a new conversation, both in the chat window and in the backend's
+// history (which is kept per thread id).
+function newThreadId(): string {
+  return crypto.randomUUID();
 }
 
-async function* readSseEvents(response: Response): AsyncGenerator<ChatSseEvent> {
+async function* readSseEvents<T = ChatSseEvent>(response: Response): AsyncGenerator<T> {
   const body = response.body;
   if (!body) {
     return;
@@ -4346,7 +4393,7 @@ async function* readSseEvents(response: Response): AsyncGenerator<ChatSseEvent> 
             const jsonText = line.slice(5).trim();
             if (jsonText) {
               try {
-                yield JSON.parse(jsonText) as ChatSseEvent;
+                yield JSON.parse(jsonText) as T;
               } catch {
                 // Ignore a malformed event rather than breaking the stream.
               }
@@ -4364,11 +4411,13 @@ async function* readSseEvents(response: Response): AsyncGenerator<ChatSseEvent> 
 function ChatPanel({
   graphViewRef,
   onRunComplete,
+  isVisible,
 }: {
   graphViewRef: React.RefObject<GraphViewHandle | null>;
   onRunComplete?: (run: AgentRun) => void;
+  isVisible: boolean;
 }) {
-  const [threadId] = useState(getOrCreateThreadId);
+  const [threadId] = useState(newThreadId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
@@ -4377,8 +4426,11 @@ function ChatPanel({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, status]);
+    // Also when the tab is shown again: a hidden element has no layout, so its scroll position may be lost.
+    if (isVisible) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [messages, status, isVisible]);
 
   const sendMessage = async () => {
     const message = input.trim();
@@ -4479,7 +4531,8 @@ function ChatPanel({
   };
 
   return (
-    <div className="chat-panel">
+    // Hidden, not removed, while another tab is open: the conversation and an answer still streaming are kept.
+    <div className="chat-panel" style={isVisible ? undefined : { display: "none" }}>
       <div className="chat-messages">
         {messages.length === 0 ? (
           <p className="reference-empty">Ask a question about the graph, or just say hello.</p>
@@ -4834,6 +4887,8 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
   const [description, setDescription] = useState<AgentDescription | null>(null);
   const [error, setError] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Bumped after the settings are saved, so the drawing shows the new models and on/off states.
+  const [descriptionVersion, setDescriptionVersion] = useState(0);
 
   useEffect(() => {
     let isCancelled = false;
@@ -4855,7 +4910,7 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
     return () => {
       isCancelled = true;
     };
-  }, []);
+  }, [descriptionVersion]);
 
   const layout = useMemo(
     () => (description ? layoutAgentGraph(description.nodes, description.edges) : null),
@@ -4893,18 +4948,6 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
   }, [lastRun]);
 
   const selectedNode = description?.nodes.find((node) => node.id === selectedNodeId) ?? null;
-  const settings = description?.settings as
-    | {
-        models?: Record<string, string>;
-        budget_usd_per_question?: number;
-        history_turns?: number;
-        specialists?: Record<string, boolean>;
-        specialist_followup?: Record<string, number | boolean>;
-        explorer?: Record<string, number | boolean>;
-        search?: Record<string, number>;
-        evidence?: Record<string, number>;
-      }
-    | undefined;
 
   if (error) {
     return (
@@ -5191,64 +5234,497 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
         <p className="reference-empty">No question asked yet. Ask one in Chat with AI and come back here.</p>
       )}
 
+      <AgentTestQuestions />
+
+      <AgentSettingsForm
+        settings={description.settings}
+        availableModels={description.available_models}
+        onSaved={() => setDescriptionVersion((version) => version + 1)}
+      />
+    </div>
+  );
+}
+
+function AgentNumberField({
+  label,
+  value,
+  step = 1,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="agent-settings-field">
+      <span>{label}</span>
+      <input type="number" step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+    </label>
+  );
+}
+
+function AgentCheckField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return (
+    <label className="agent-settings-check">
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+// Edits settings.json through POST /api/ai/agent/settings. The backend checks every value (known keys, ranges,
+// models that have a price) and answers 400 with the reason when one is wrong.
+function AgentSettingsForm({
+  settings,
+  availableModels,
+  onSaved,
+}: {
+  settings: AgentSettings;
+  availableModels: string[];
+  onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState<AgentSettings>(settings);
+  const [isSaving, setIsSaving] = useState(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    setDraft(settings);
+  }, [settings]);
+
+  const isChanged = JSON.stringify(draft) !== JSON.stringify(settings);
+
+  const update = <K extends keyof AgentSettings>(key: K, value: AgentSettings[K]) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+    setMessage(null);
+  };
+
+  const save = async () => {
+    setIsSaving(true);
+    setMessage(null);
+    try {
+      const { models, history_turns, budget_usd_per_question, query_timeout_seconds, specialists } = draft;
+      const response = await fetch("/api/ai/agent/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          models,
+          history_turns,
+          budget_usd_per_question,
+          query_timeout_seconds,
+          specialists,
+          specialist_followup: draft.specialist_followup,
+          explorer: draft.explorer,
+          search: draft.search,
+          evidence: draft.evidence,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `Request failed (${response.status}).`);
+      }
+      setMessage({ ok: true, text: "Saved. The next question uses these settings." });
+      onSaved();
+    } catch (saveError) {
+      setMessage({ ok: false, text: saveError instanceof Error ? saveError.message : "Could not save the settings." });
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <>
       <h4 className="knowledge-card-title knowledge-section-title">
         Settings <span className="knowledge-section-kind">(backend/ai_agent/settings.json)</span>
       </h4>
       <div className="knowledge-table-caption">
-        <p>Read at the start of every question. Shown here read-only; editing from this tab comes in a later step.</p>
+        <p>
+          Read at the start of every question, so a change applies to the next question without a restart. A model
+          can be chosen when it has a price in settings.json, so its cost can be counted; prices are edited in the file.
+        </p>
       </div>
-      <div className="reference-table-wrapper layer-last-table">
-        <table className="reference-table">
-          <thead>
-            <tr>
-              <th>Setting</th>
-              <th className="reference-cell-wrap">Value</th>
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(settings?.models ?? {}).map(([node, model]) => (
-              <tr key={`model-${node}`}>
-                <td>Model: {node}</td>
-                <td className="reference-cell-wrap">{model}</td>
-              </tr>
+      <div className="agent-settings layer-last-table">
+        <div className="agent-settings-grid">
+          <fieldset className="agent-settings-group">
+            <legend>Models</legend>
+            {Object.entries(draft.models).map(([step, model]) => (
+              <label key={step} className="agent-settings-field">
+                <span>{step}</span>
+                <select value={model} onChange={(event) => update("models", { ...draft.models, [step]: event.target.value })}>
+                  {availableModels.map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ))}
-            <tr>
-              <td>Budget per question</td>
-              <td className="reference-cell-wrap">{formatUsd(Number(settings?.budget_usd_per_question ?? 0))}</td>
-            </tr>
-            <tr>
-              <td>History turns</td>
-              <td className="reference-cell-wrap">{String(settings?.history_turns ?? "-")}</td>
-            </tr>
-            <tr>
-              <td>Specialists on</td>
-              <td className="reference-cell-wrap">
-                {Object.entries(settings?.specialists ?? {})
-                  .map(([name, isOn]) => `${name} ${isOn ? "on" : "off"}`)
-                  .join(", ")}
-              </td>
-            </tr>
-            {(
-              [
-                ["Specialist follow-up", settings?.specialist_followup],
-                ["Explorer", settings?.explorer],
-                ["Search", settings?.search],
-                ["Evidence", settings?.evidence],
-              ] as Array<[string, Record<string, number | boolean> | undefined]>
-            ).map(([label, group]) => (
-              <tr key={label}>
-                <td>{label}</td>
-                <td className="reference-cell-wrap">
-                  {Object.entries(group ?? {})
-                    .map(([key, value]) => `${key}: ${String(value)}`)
-                    .join(", ")}
-                </td>
-              </tr>
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Cost and history</legend>
+            <AgentNumberField
+              label="Budget per question (USD)"
+              step={0.01}
+              value={draft.budget_usd_per_question}
+              onChange={(value) => update("budget_usd_per_question", value)}
+            />
+            <AgentNumberField label="History turns" value={draft.history_turns} onChange={(value) => update("history_turns", value)} />
+            <AgentNumberField
+              label="Query timeout (s)"
+              value={draft.query_timeout_seconds}
+              onChange={(value) => update("query_timeout_seconds", value)}
+            />
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Specialists</legend>
+            {Object.entries(draft.specialists).map(([name, isOn]) => (
+              <AgentCheckField
+                key={name}
+                label={name}
+                checked={isOn}
+                onChange={(value) => update("specialists", { ...draft.specialists, [name]: value })}
+              />
             ))}
-          </tbody>
-        </table>
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Specialist follow-up</legend>
+            <AgentCheckField
+              label="On"
+              checked={draft.specialist_followup.enabled}
+              onChange={(value) => update("specialist_followup", { ...draft.specialist_followup, enabled: value })}
+            />
+            <AgentNumberField
+              label="Rounds"
+              value={draft.specialist_followup.max_rounds}
+              onChange={(value) => update("specialist_followup", { ...draft.specialist_followup, max_rounds: value })}
+            />
+            <AgentNumberField
+              label="Tool calls per round"
+              value={draft.specialist_followup.max_calls_per_round}
+              onChange={(value) => update("specialist_followup", { ...draft.specialist_followup, max_calls_per_round: value })}
+            />
+            <AgentNumberField
+              label="Extra nodes"
+              value={draft.specialist_followup.max_extra_nodes}
+              onChange={(value) => update("specialist_followup", { ...draft.specialist_followup, max_extra_nodes: value })}
+            />
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Explorer</legend>
+            <AgentCheckField
+              label="On"
+              checked={draft.explorer.enabled}
+              onChange={(value) => update("explorer", { ...draft.explorer, enabled: value })}
+            />
+            <AgentNumberField
+              label="Queries"
+              value={draft.explorer.max_queries}
+              onChange={(value) => update("explorer", { ...draft.explorer, max_queries: value })}
+            />
+            <AgentNumberField
+              label="Rows per query"
+              value={draft.explorer.max_rows}
+              onChange={(value) => update("explorer", { ...draft.explorer, max_rows: value })}
+            />
+            <AgentNumberField
+              label="Characters per result"
+              step={500}
+              value={draft.explorer.max_result_chars}
+              onChange={(value) => update("explorer", { ...draft.explorer, max_result_chars: value })}
+            />
+            <AgentNumberField
+              label="Extra nodes"
+              value={draft.explorer.max_extra_nodes}
+              onChange={(value) => update("explorer", { ...draft.explorer, max_extra_nodes: value })}
+            />
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Search and evidence</legend>
+            <AgentNumberField
+              label="Vector hits"
+              value={draft.search.vector_k}
+              onChange={(value) => update("search", { ...draft.search, vector_k: value })}
+            />
+            <AgentNumberField
+              label="Fulltext hits"
+              value={draft.search.fulltext_k}
+              onChange={(value) => update("search", { ...draft.search, fulltext_k: value })}
+            />
+            <AgentNumberField
+              label="Lookup hits per name"
+              value={draft.search.lookup_k}
+              onChange={(value) => update("search", { ...draft.search, lookup_k: value })}
+            />
+            <AgentNumberField
+              label="Entry points"
+              value={draft.search.entry_points}
+              onChange={(value) => update("search", { ...draft.search, entry_points: value })}
+            />
+            <AgentNumberField
+              label="Nodes per specialist"
+              value={draft.evidence.max_nodes_per_specialist}
+              onChange={(value) => update("evidence", { ...draft.evidence, max_nodes_per_specialist: value })}
+            />
+            <AgentNumberField
+              label="Characters per node"
+              step={100}
+              value={draft.evidence.max_text_chars}
+              onChange={(value) => update("evidence", { ...draft.evidence, max_text_chars: value })}
+            />
+          </fieldset>
+        </div>
+        <div className="agent-settings-actions">
+          <button className="knowledge-build-button" type="button" disabled={!isChanged || isSaving} onClick={() => void save()}>
+            {isSaving ? "Saving..." : "Save settings"}
+          </button>
+          <button
+            className="knowledge-build-button"
+            type="button"
+            disabled={!isChanged || isSaving}
+            onClick={() => {
+              setDraft(settings);
+              setMessage(null);
+            }}
+          >
+            Undo changes
+          </button>
+          {message ? <p className={message.ok ? "reference-success" : "reference-error"}>{message.text}</p> : null}
+        </div>
       </div>
-    </div>
+    </>
+  );
+}
+
+function textChecks(result: AgentEvalResult): Array<{ kind: string; expected: string[]; found: boolean }> {
+  return [
+    ...result.terms.map((group) => ({ ...group, kind: "word" })),
+    ...result.facts.map((group) => ({ ...group, kind: "fact" })),
+  ];
+}
+
+function describeNodeSpec(spec: AgentEvalNodeSpec): string {
+  const name = spec.name ? ` ${spec.name}` : spec.contains ? ` "…${spec.contains}…"` : "";
+  return `${spec.label ?? "node"}${name}`;
+}
+
+// Runs the fixed test questions (backend/ai_agent/test_questions.json) through the agent and shows how each one did.
+// Scored in code: route, expected evidence, expected facts and expected words in the answer.
+function AgentTestQuestions() {
+  const [evaluation, setEvaluation] = useState<AgentEvalState | null>(null);
+  const [liveResults, setLiveResults] = useState<AgentEvalResult[] | null>(null);
+  const [progress, setProgress] = useState<{ index: number; total: number } | null>(null);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = async () => {
+    try {
+      const response = await fetch("/api/ai/agent/evaluation");
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `Request failed (${response.status}).`);
+      }
+      setEvaluation(data as AgentEvalState);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not load the test questions.");
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const run = async () => {
+    setIsConfirming(false);
+    setError("");
+    setLiveResults([]);
+    setProgress({ index: 0, total: evaluation?.questions.length ?? 0 });
+    try {
+      const response = await fetch("/api/ai/agent/evaluation", { method: "POST" });
+      if (!response.ok) {
+        const data = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error || `Request failed (${response.status}).`);
+      }
+      for await (const event of readSseEvents<AgentEvalEvent>(response)) {
+        if (event.type === "progress") {
+          setProgress({ index: event.index, total: event.total });
+          setLiveResults((current) => [...(current ?? []), event.result]);
+        } else if (event.type === "error") {
+          throw new Error(event.error);
+        }
+      }
+      await load();
+      setLiveResults(null);
+    } catch (runError) {
+      setError(runError instanceof Error ? runError.message : "The test run failed.");
+    } finally {
+      setProgress(null);
+    }
+  };
+
+  const isRunning = progress !== null;
+  const lastRun = evaluation?.last_run ?? null;
+  const results = liveResults ?? lastRun?.results ?? [];
+  const questionCount = evaluation?.questions.length ?? 0;
+  const estimate = lastRun ? lastRun.cost_usd : questionCount * 0.015;
+
+  return (
+    <>
+      <h4 className="knowledge-card-title knowledge-section-title">
+        Test questions <span className="knowledge-section-kind">(backend/ai_agent/test_questions.json)</span>
+      </h4>
+      <div className="knowledge-table-caption">
+        <p>
+          A fixed set of questions with expected answers, one or more per graph layer plus the project goals. Each
+          question runs on its own, without conversation history. Scored in code, not by a model: the route, the
+          expected nodes in the evidence, the expected facts, and the expected words in the answer. Cited shows
+          whether an expected node was also cited in the answer.
+        </p>
+        <p>
+          <strong>Cost:</strong> every run calls OpenAI once per model step and question, with the current settings.
+        </p>
+      </div>
+      <div className="reference-actions">
+        {isConfirming ? (
+          <>
+            <span className="reference-description">
+              Run {questionCount} questions? About {formatUsd(estimate)} with the current settings.
+            </span>
+            <button className="knowledge-build-button" type="button" onClick={() => void run()}>
+              Run
+            </button>
+            <button className="knowledge-build-button" type="button" onClick={() => setIsConfirming(false)}>
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button className="knowledge-build-button" type="button" disabled={isRunning || !evaluation} onClick={() => setIsConfirming(true)}>
+            {isRunning ? `Running ${progress?.index ?? 0} of ${progress?.total ?? 0}...` : "Run test questions"}
+          </button>
+        )}
+        {lastRun && !isRunning ? (
+          <span className="reference-description">
+            Last run {formatTimestamp(lastRun.run_at)}: <strong>{lastRun.passed} of {lastRun.total} passed</strong>, total{" "}
+            {formatUsd(lastRun.cost_usd)}, {(lastRun.ms / 1000).toFixed(0)} s. Models:{" "}
+            {Object.entries(lastRun.models)
+              .map(([step, model]) => `${step} ${model}`)
+              .join(", ")}
+          </span>
+        ) : null}
+      </div>
+      {error ? <p className="reference-error">{error}</p> : null}
+
+      {results.length > 0 ? (
+        <div className="reference-table-wrapper reference-table-wrapper-capped">
+          <table className="reference-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th className="reference-cell-wrap">Question</th>
+                <th className="reference-cell-center">Result</th>
+                <th className="reference-cell-wrap">Evidence (expected nodes found / cited)</th>
+                <th className="reference-cell-wrap">Answer words and facts</th>
+                <th>Specialists</th>
+                <th className="reference-cell-center">Cost</th>
+                <th className="reference-cell-center">Time (s)</th>
+                <th className="agent-test-answer-cell">Answer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((result) => (
+                <tr key={result.id}>
+                  <td>{result.id}</td>
+                  <td className="reference-cell-wrap">
+                    {result.question}
+                    <br />
+                    <span className="knowledge-section-kind">{result.goal}</span>
+                  </td>
+                  <td className="reference-cell-center">
+                    <span className={result.passed ? "agent-test-pass" : "agent-test-fail"}>{result.passed ? "pass" : "fail"}</span>
+                    {result.route_ok === false ? <div className="agent-test-note">wrong route ({result.route})</div> : null}
+                  </td>
+                  <td className="reference-cell-wrap">
+                    {result.evidence.length === 0
+                      ? "-"
+                      : result.evidence.map((group, index) => (
+                          <div key={index} className={group.found.length > 0 ? "agent-test-ok" : "agent-test-missing"}>
+                            {group.found.length > 0 ? "✓" : "✗"} {group.expected.map(describeNodeSpec).join(" or ")}
+                            {group.found.length > 0 ? ` · cited: ${group.cited.length > 0 ? "yes" : "no"}` : ""}
+                          </div>
+                        ))}
+                  </td>
+                  <td className="reference-cell-wrap">
+                    {textChecks(result).length === 0
+                      ? "-"
+                      : textChecks(result).map((group, index) => (
+                          <div key={index} className={group.found ? "agent-test-ok" : "agent-test-missing"}>
+                            {group.found ? "✓" : "✗"} {group.kind}: {group.expected.join(" or ")}
+                          </div>
+                        ))}
+                    {result.errors.length > 0 ? (
+                      <div className="agent-test-missing">error: {result.errors.map((e) => e.error).join("; ")}</div>
+                    ) : null}
+                  </td>
+                  <td>
+                    {(result.specialists ?? []).join(", ") || "-"}
+                    {result.explorer_ran ? " + explorer" : ""}
+                  </td>
+                  <td className="reference-cell-center">{formatUsd(result.cost_usd)}</td>
+                  <td className="reference-cell-center">{(result.ms / 1000).toFixed(1)}</td>
+                  <td className="agent-test-answer-cell">{result.answer}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="reference-empty">No test run yet.</p>
+      )}
+
+      {evaluation && evaluation.history.length > 0 ? (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Test runs <span className="knowledge-section-kind">(latest first)</span>
+          </h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th className="reference-cell-center">Passed</th>
+                  <th className="reference-cell-center">Cost</th>
+                  <th className="reference-cell-center">Cost per question</th>
+                  <th className="reference-cell-center">Time (s)</th>
+                  <th className="reference-cell-wrap">Models</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...evaluation.history].reverse().map((summary) => (
+                  <tr key={summary.run_at}>
+                    <td>{formatTimestamp(summary.run_at)}</td>
+                    <td className="reference-cell-center">
+                      {summary.passed} / {summary.total}
+                    </td>
+                    <td className="reference-cell-center">{formatUsd(summary.cost_usd)}</td>
+                    <td className="reference-cell-center">{formatUsd(summary.cost_usd / Math.max(summary.total, 1))}</td>
+                    <td className="reference-cell-center">{(summary.ms / 1000).toFixed(0)}</td>
+                    <td className="reference-cell-wrap">
+                      {Object.entries(summary.models)
+                        .map(([step, model]) => `${step} ${model}`)
+                        .join(", ")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -5291,7 +5767,7 @@ function App() {
           </button>
         </div>
         <div className="center-tab-panel" role="tabpanel">
-          {activeCenterTab === "message" && <ChatPanel graphViewRef={graphViewRef} onRunComplete={setLastAgentRun} />}
+          <ChatPanel graphViewRef={graphViewRef} onRunComplete={setLastAgentRun} isVisible={activeCenterTab === "message"} />
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
           {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} />}
         </div>
