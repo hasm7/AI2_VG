@@ -1588,6 +1588,23 @@ main {
   background: #fef3c7;
 }
 
+/* Divider above and below the settings form in Configure AI agent. */
+.agent-section-divider {
+  width: 100%;
+  margin: 16px 0;
+  border: 0;
+  border-top: 1px solid #000000;
+}
+
+.agent-section-divider-below-settings {
+  margin-top: 32px;
+}
+
+/* Conversation cost: scrolls once the conversation grows; the total stays above it. */
+.agent-session-costs {
+  max-height: 280px;
+}
+
 /* Configure AI agent: settings form and test questions. */
 .agent-settings-grid {
   display: grid;

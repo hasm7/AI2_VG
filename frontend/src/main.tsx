@@ -665,6 +665,12 @@ type AgentRun = {
   sufficiency: { ok: boolean; reason: string } | null;
 };
 
+// One answered chat question in this page load, for the conversation cost table. A reload starts a new list,
+// just as it starts a new conversation.
+type AgentSessionCost = { question: string; cost_usd: number; asked_at: string };
+
+const SESSION_QUESTION_MAX_CHARS = 120;
+
 type Neo4jStatus = "checking" | "connected" | "disconnected";
 
 type Selection = {
@@ -4885,7 +4891,7 @@ function formatUsd(value: number): string {
   return `$${value.toFixed(value < 0.01 ? 4 : 3)}`;
 }
 
-function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
+function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | null; sessionCosts: AgentSessionCost[] }) {
   const [description, setDescription] = useState<AgentDescription | null>(null);
   const [error, setError] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -5238,13 +5244,59 @@ function ConfigureAgentPanel({ lastRun }: { lastRun: AgentRun | null }) {
         <p className="reference-empty">No question asked yet. Ask one in Chat with AI and come back here.</p>
       )}
 
-      <AgentTestQuestions />
+      <h4 className="knowledge-card-title knowledge-section-title">
+        Conversation cost <span className="knowledge-section-kind">(every question in Chat with AI since the page was loaded)</span>
+      </h4>
+      {sessionCosts.length > 0 ? (
+        <>
+          <p className="reference-description">
+            <strong>
+              Total: {formatUsd(sessionCosts.reduce((total, entry) => total + entry.cost_usd, 0))} for {sessionCosts.length}{" "}
+              {sessionCosts.length === 1 ? "question" : "questions"}
+            </strong>
+          </p>
+          <div className="reference-table-wrapper agent-session-costs">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Time</th>
+                  <th className="reference-cell-wrap">Question</th>
+                  <th className="reference-cell-center">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessionCosts.map((entry, index) => (
+                  <tr key={index}>
+                    <td>{index + 1}</td>
+                    <td>{new Date(entry.asked_at).toLocaleTimeString()}</td>
+                    <td className="reference-cell-wrap" title={entry.question}>
+                      {entry.question.length > SESSION_QUESTION_MAX_CHARS
+                        ? `${entry.question.slice(0, SESSION_QUESTION_MAX_CHARS)}…`
+                        : entry.question}
+                    </td>
+                    <td className="reference-cell-center">{formatUsd(entry.cost_usd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : (
+        <p className="reference-empty">No questions asked in this session yet.</p>
+      )}
+
+      <hr className="agent-section-divider" />
 
       <AgentSettingsForm
         settings={description.settings}
         availableModels={description.available_models}
         onSaved={() => setDescriptionVersion((version) => version + 1)}
       />
+
+      <hr className="agent-section-divider agent-section-divider-below-settings" />
+
+      <AgentTestQuestions />
     </div>
   );
 }
@@ -5347,7 +5399,7 @@ function AgentSettingsForm({
           can be chosen when it has a price in settings.json, so its cost can be counted; prices are edited in the file.
         </p>
       </div>
-      <div className="agent-settings layer-last-table">
+      <div className="agent-settings">
         <div className="agent-settings-grid">
           <fieldset className="agent-settings-group">
             <legend>Models</legend>
@@ -5575,6 +5627,8 @@ function AgentTestQuestions() {
   const results = liveResults ?? lastRun?.results ?? [];
   const questionCount = evaluation?.questions.length ?? 0;
   const estimate = lastRun ? lastRun.cost_usd : questionCount * 0.015;
+  // The test questions are the last part of the tab, so their last table gets the bottom space.
+  const hasHistory = Boolean(evaluation && evaluation.history.length > 0);
 
   return (
     <>
@@ -5623,7 +5677,7 @@ function AgentTestQuestions() {
       {error ? <p className="reference-error">{error}</p> : null}
 
       {results.length > 0 ? (
-        <div className="reference-table-wrapper reference-table-wrapper-capped">
+        <div className={`reference-table-wrapper reference-table-wrapper-capped${hasHistory ? "" : " layer-last-table"}`}>
           <table className="reference-table">
             <thead>
               <tr>
@@ -5686,15 +5740,15 @@ function AgentTestQuestions() {
           </table>
         </div>
       ) : (
-        <p className="reference-empty">No test run yet.</p>
+        <p className={`reference-empty${hasHistory ? "" : " layer-last-table"}`}>No test run yet.</p>
       )}
 
-      {evaluation && evaluation.history.length > 0 ? (
+      {hasHistory ? (
         <>
           <h4 className="knowledge-card-title knowledge-section-title">
             Test runs <span className="knowledge-section-kind">(latest first)</span>
           </h4>
-          <div className="reference-table-wrapper">
+          <div className="reference-table-wrapper layer-last-table">
             <table className="reference-table">
               <thead>
                 <tr>
@@ -5707,7 +5761,7 @@ function AgentTestQuestions() {
                 </tr>
               </thead>
               <tbody>
-                {[...evaluation.history].reverse().map((summary) => (
+                {[...(evaluation?.history ?? [])].reverse().map((summary) => (
                   <tr key={summary.run_at}>
                     <td>{formatTimestamp(summary.run_at)}</td>
                     <td className="reference-cell-center">
@@ -5735,7 +5789,16 @@ function AgentTestQuestions() {
 function App() {
   const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes" | "agent">("message");
   const [lastAgentRun, setLastAgentRun] = useState<AgentRun | null>(null);
+  const [sessionCosts, setSessionCosts] = useState<AgentSessionCost[]>([]);
   const graphViewRef = useRef<GraphViewHandle>(null);
+
+  const handleRunComplete = (run: AgentRun) => {
+    setLastAgentRun(run);
+    setSessionCosts((previous) => [
+      ...previous,
+      { question: run.question, cost_usd: run.cost_usd, asked_at: new Date().toISOString() },
+    ]);
+  };
 
   return (
     <main>
@@ -5771,9 +5834,9 @@ function App() {
           </button>
         </div>
         <div className="center-tab-panel" role="tabpanel">
-          <ChatPanel graphViewRef={graphViewRef} onRunComplete={setLastAgentRun} isVisible={activeCenterTab === "message"} />
+          <ChatPanel graphViewRef={graphViewRef} onRunComplete={handleRunComplete} isVisible={activeCenterTab === "message"} />
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
-          {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} />}
+          {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} sessionCosts={sessionCosts} />}
         </div>
       </section>
       <RightGraphicsPanel />

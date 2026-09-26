@@ -164,10 +164,12 @@ come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 | Node details | Title, kind, model, description, the state fields it reads and writes, and its last-run summary |
 | State | Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
 | Last run | Question, plan, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
-| Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models |
-| Settings | An editable form (`AgentSettingsForm`): models per step, budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
+| Conversation cost | Every chat question since the page was loaded: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). A reload empties it, as it starts a new conversation. Test questions are not counted. A question that ends in an error is not listed |
+| Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
+| Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models. The last part of the tab, so its last table has `layer-last-table` |
 
 The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRunComplete` when a `done` event arrives.
+The same callback (`handleRunComplete`) appends the question and its cost to `sessionCosts` in `App`.
 
 `ChatPanel` stays mounted and is only hidden while another center tab is open, so the conversation (and an answer
 still streaming) survives switching to `Configure AI agent` and back. The thread id is made once per page load
