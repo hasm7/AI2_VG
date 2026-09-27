@@ -11,7 +11,7 @@
     "planner": "low",
     "specialists": "low",
     "explorer": "low",
-    "answer": "medium"
+    "answer": "low"
   },
   "history_turns": 3,
   "conversation_summary": {

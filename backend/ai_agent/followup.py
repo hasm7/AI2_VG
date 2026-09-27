@@ -22,6 +22,7 @@ from .usage import response_usage
 
 ELEMENT_ID_PATTERN = re.compile(r"^\d+:[0-9a-f-]{36}:\d+$")
 SNIPPET_CHARS = 160
+FACT_CUT_MARK = " [... cut to fit the evidence limit]"
 
 # ---------------------------------------------------------------------------
 # Tool queries. Each returns rows with `id` (nodes to add as evidence) or `fact` (a line of text).
@@ -321,6 +322,18 @@ def run_followup(name: str, session, client, question: str, packet: dict, settin
     return usage
 
 
+def _cut_result(text: str, row_count: int, config: dict) -> str:
+    """A query result as the explorer sees it, at most `max_result_chars` characters plus a note that says when it is
+    incomplete (cut, or stopped at the row limit), so the model knows it has not seen everything."""
+    notes = []
+    if len(text) > config["max_result_chars"]:
+        text = text[: config["max_result_chars"]]
+        notes.append(f"result cut at {config['max_result_chars']} characters")
+    if row_count >= config["max_rows"]:
+        notes.append(f"row limit of {config['max_rows']} reached, there may be more rows")
+    return text + (f" [... {'; '.join(notes)}]" if notes else "")
+
+
 def run_explorer(session, client, question: str, evidence: list[dict], reason: str, settings: dict) -> tuple[dict, list[dict]]:
     """Returns (evidence packet, usage entries)."""
     config = settings["explorer"]
@@ -358,7 +371,7 @@ def run_explorer(session, client, question: str, evidence: list[dict], reason: s
         query = json.loads(call.arguments or "{}").get("query", "")
         try:
             rows = read(session, enforce_read_only(query, config["max_rows"]), None, timeout)[: config["max_rows"]]
-            output = json.dumps(rows, ensure_ascii=False, default=str)[: config["max_result_chars"]]
+            output = _cut_result(json.dumps(rows, ensure_ascii=False, default=str), len(rows), config)
             for row in rows:
                 for value in row.values():
                     if isinstance(value, str) and ELEMENT_ID_PATTERN.match(value) and value not in ids:
@@ -379,12 +392,19 @@ def run_explorer(session, client, question: str, evidence: list[dict], reason: s
          "priority": 3, "text": node_text(rows_by_id[i], settings["evidence"]["max_text_chars"])}
         for i in extra_ids if i in rows_by_id
     ]
+    # All results together stay within max_result_chars. The space is filled from the latest query backwards, since a
+    # later query usually narrows or corrects an earlier one; the one that does not fit is shortened, not dropped.
+    # The kept results go to the answer in the order the queries ran.
     total_chars, kept_facts = 0, []
-    for fact in facts:
-        if total_chars + len(fact) > config["max_result_chars"]:
+    for fact in reversed(facts):
+        room = config["max_result_chars"] - total_chars
+        if len(fact) > room:
+            if room > len(FACT_CUT_MARK) + 100:
+                kept_facts.append(fact[: room - len(FACT_CUT_MARK)] + FACT_CUT_MARK)
             break
         kept_facts.append(fact)
         total_chars += len(fact)
+    kept_facts.reverse()
     packet = {"specialist": "explorer", "nodes": nodes, "facts": kept_facts, "candidates": len(ids), "errors": [],
               "followup": log or ["no query made"]}
     return packet, usage

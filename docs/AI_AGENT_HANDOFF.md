@@ -88,8 +88,15 @@ A failed follow-up only means no extra evidence; it is not an error.
 **Explorer.** A model (`models.explorer`) with one tool, `run_cypher`. Every query goes through
 `cypher_guard.enforce_read_only` (rejects writes, adds a LIMIT of `max_rows`) and runs in a read transaction with the
 query timeout. At most `max_queries` queries; each result is cut to `max_rows` rows and `max_result_chars` characters
-before the model sees it; errors are shown to the model so it can correct the query. Element ids in the rows become
-evidence nodes (at most `max_extra_nodes`), the rows become facts. Its prompt holds a compact, fixed schema (labels,
+before the model sees it (`_cut_result`), and a cut result ends with a note saying so, including when the row limit
+was reached, so the model knows it has not seen everything and can narrow the query (the prompt says how); errors are
+shown to the model so it can correct the query. Element ids in the rows become evidence nodes (at most
+`max_extra_nodes`, taken from all rows before any cut), the rows become facts. All facts together stay within
+`max_result_chars`. The space is filled from the latest query backwards, since a later query usually narrows or
+corrects an earlier one (for example after a cut result); the result that does not fit is shortened with a note, not
+dropped, and the kept results reach the answer in the order the queries ran. (Before 2026-09-27 a cut
+result was a few characters over the limit and was dropped entirely, so the largest results reached the answer as no
+fact at all.) Its prompt holds a compact, fixed schema (labels,
 key properties, every relationship type written as `-[:TYPE]->`) and asks for case-insensitive text matching.
 The executed queries are listed in the trace.
 
@@ -149,7 +156,7 @@ restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the
 | Key | Current | Meaning |
 | --- | --- | --- |
 | `models.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-6-luna`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-sol` (since 2026-09-27; not yet run on the test set, which passed 14/14 with `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o`) | Model per model step; only models with a price can be chosen |
-| `reasoning_effort.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `none`, `low`, `low`, `low`, `medium` (defaults in `settings.py`: `none`, `none`, `none`, `low`, `low`) | `reasoning.effort` per model step, one of `none`, `low`, `medium`, `high`. Sent only when the step's model is a reasoning model (`is_reasoning_model`: name starts with `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`); other models reject the parameter, so it has no effect on them. Reasoning tokens are billed as output tokens. Every reasoning model given a price must accept all four values (the `gpt-6` and `gpt-5.6` models do; plain `gpt-5` and the o-series do not accept `none`) |
+| `reasoning_effort.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `none`, `low`, `low`, `low`, `low` (defaults in `settings.py`: `none`, `none`, `none`, `low`, `low`) | `reasoning.effort` per model step, one of `none`, `low`, `medium`, `high`. Sent only when the step's model is a reasoning model (`is_reasoning_model`: name starts with `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`); other models reject the parameter, so it has no effect on them. Reasoning tokens are billed as output tokens. Every reasoning model given a price must accept all four values (the `gpt-6` and `gpt-5.6` models do; plain `gpt-5` and the o-series do not accept `none`) |
 | `history_turns` | 3 | Earlier turns the planner and the answer see word for word |
 | `conversation_summary.enabled`, `.max_chars` | `true`, 1500 | Running summary of the turns before those (section 5.1); model `models.summarize` (`gpt-6-luna`, effort `none`) |
 | `budget_usd_per_question` | 0.05 | Above this, optional steps (follow-ups, explorer) are skipped; the answer always runs |

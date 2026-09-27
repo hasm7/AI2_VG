@@ -102,7 +102,9 @@ EXPLORER_PROMPT = """You explore a software team's project memory graph in Neo4j
 evidence that the fixed retrieval missed. You may run a few queries; each must be a single read-only query.
 Return elementId(n) AS id for every node you want as evidence, plus the properties that answer the question.
 Match text case-insensitively and partially, for example toLower(m.title) CONTAINS 'sprint review'; the data is in
-English, so translate words from the question. If a query returns no rows, try a broader one before giving up.
+English, so translate words from the question. If a query returns no rows, try a broader one before giving up. If a
+result says it was cut or hit the row limit, you have not seen all of it: return fewer properties, filter more or
+aggregate (count, collect) in a narrower query.
 Stop (reply without a tool call) once you have what is needed or nothing more can be found.
 
 Graph schema (labels with key properties; relationships as (from)-[:TYPE]->(to)):
