@@ -27,11 +27,11 @@ explorer; 14 of 14 pass at about $0.008 per question. The previous agent (`backe
 Plan-and-execute with parallel fan-out (LangGraph's orchestrator-worker pattern), with a corrective step:
 
 ```
-START -> prepare -> planner -+-> answer                                   (small talk)
-                             +-> entry -+-> sources      -+
-                                        +-> causes       -+-> check -+-> answer -> END
-                                        +-> architecture -+          +-> explorer -> answer
-                                        +-> people       -+
+START -> prepare -> summarize -> planner -+-> answer                                   (small talk)
+                                          +-> entry -+-> sources      -+
+                                                     +-> causes       -+-> check -+-> answer -> END
+                                                     +-> architecture -+          +-> explorer -> answer
+                                                     +-> people       -+
 ```
 
 `entry` starts the chosen specialists with `Send`; they run in parallel and each appends its packet to `evidence`.
@@ -41,16 +41,17 @@ START -> prepare -> planner -+-> answer                                   (small
 
 | Node | Kind | Does | Reads | Writes |
 | --- | --- | --- | --- | --- |
-| `prepare` | code | Loads `settings.json`, computes layer staleness (`pipeline_staleness`), trims history to `history_turns` | `question`, `recent_history` | `settings`, `staleness`, `recent_history` |
-| `planner` | model, 1 call, structured output (`PlanOut`) | Question types, language, entities, English keywords, specialists | `question`, `recent_history`, `settings` | `plan`, `usage` |
-| `entry` | code + 1 embedding call | Lookup (issue keys, PR refs, document ids exactly; names via `entity_lookup`), vector search (`searchable_embedding`, Cypher `SEARCH`), fulltext (`searchable_text`, English keywords); merged by reciprocal rank fusion, best hit per `embedding_group`. Then the fan-out | `question`, `plan`, `settings`, `usage` | `entry_points`, `usage`, `errors` |
+| `prepare` | code | Loads `settings.json`, computes layer staleness (`pipeline_staleness`), splits the stored conversation into the last `history_turns` turns (word for word) and the turns still to be summarized (section 5.1) | `question`, `stored_history`, `conversation_summary`, `summarized_messages` | `settings`, `staleness`, `recent_history`, `pending_history`, `conversation_summary`, `summarized_messages` |
+| `summarize` | model, 1 call, only when turns left the window | Works the turns that left the recent window into the running summary (section 5.1); does nothing otherwise | `pending_history`, `conversation_summary`, `summarized_messages`, `settings` | `conversation_summary`, `summarized_messages`, `usage` |
+| `planner` | model, 1 call, structured output (`PlanOut`) | The question rewritten to stand on its own (`standalone_question`, section 5.1), then question types, language, entities, English keywords, specialists, all for that standalone question | `question`, `conversation_summary`, `recent_history`, `settings` | `plan`, `usage` |
+| `entry` | code + 1 embedding call | Searches with `standalone_question`: lookup (issue keys, PR refs, document ids exactly; names via `entity_lookup`), vector search (`searchable_embedding`, Cypher `SEARCH`), fulltext (`searchable_text`, English keywords); merged by reciprocal rank fusion, best hit per `embedding_group`. Then the fan-out | `question`, `plan`, `settings`, `usage` | `entry_points`, `usage`, `errors` |
 | `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions/comments/reviews/code changes of an entry issue, document or PR, evidence of entry events, nodes that mention an entry issue/PR/document | `question`, `plan`, `entry_points`, `settings`, `usage` | `evidence`, `usage`, `errors` |
 | `causes` | code + model follow-up | Events, root causes and topics: entry events, events evidenced by entry sources, root causes of entry events, events a code change contributed to, root causes in an entry component, events of an entry issue's topic | same | same |
 | `architecture` | code + model follow-up | Components: entry components, components affected by entry events, holding entry root causes, evidenced by entry sources, implemented in files an entry code change or PR modifies, dependency neighbours | same | same |
 | `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts | same | same |
 | `check` | code | Enough evidence? No entry points, no evidence, a `why` question without causal evidence, or a `ranking` question without metrics means no. Its routing also reads `explorer_ran`, `usage`, `settings` | `plan`, `entry_points`, `evidence`, `explorer_ran`, `usage`, `settings` | `sufficiency` |
 | `explorer` | model + read-only Cypher | Runs at most once, only when `check` says no, the explorer is on and the budget allows (section 4) | `question`, `evidence`, `sufficiency`, `settings` | `evidence`, `usage`, `explorer_ran` |
-| `answer` | model, 1 streamed call | Answers from the evidence only, cites references in square brackets (a node's name, or `fact-N` for a fact; see below), mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
+| `answer` | model, 1 streamed call | Answers from the evidence only, cites references in square brackets (a node's name, or `fact-N` for a fact; see below), mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `conversation_summary`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
 
 **Citations.** In the answer's evidence text (`_evidence_text` in `nodes.py`) every node starts with its reference
 in square brackets (its name), and every distinct fact gets its own reference `fact-1`, `fact-2`, ... (numbered per
@@ -94,14 +95,16 @@ The executed queries are listed in the trace.
 
 ## 5. State
 
-`backend/ai_agent/state.py`, one question per run. Conversation history is kept outside the graph (`graph.py`,
-per `thread_id`, last 20 messages, at most 200 threads), so every question starts from a clean state.
+`backend/ai_agent/state.py`, one question per run. The conversation is kept outside the graph (`graph.py`, per
+`thread_id`, at most 200 threads) and passed in with every question, so every question starts from a clean state.
 
 | Field | Content | Merge |
 | --- | --- | --- |
-| `question`, `recent_history` | The question; the last `history_turns` turns | overwrite |
+| `question` | The question as the user wrote it | overwrite |
+| `stored_history`, `conversation_summary`, `summarized_messages` | Passed in: the thread's stored messages, its running summary, and how many of the stored messages the summary covers | overwrite |
+| `recent_history`, `pending_history` | Set by `prepare`: the last `history_turns` turns; the messages that left that window and are not in the summary yet | overwrite |
 | `settings`, `staleness` | Settings for this question; `{stage: {stale, reasons}}` | overwrite |
-| `plan` | `question_types`, `language`, `entities`, `keywords_en`, `specialists`, `route`, `reason` | overwrite |
+| `plan` | `standalone_question`, `question_types`, `language`, `entities`, `keywords_en`, `specialists`, `route`, `reason` | overwrite |
 | `entry_points` | `id`, `label`, `name`, `score`, `via` (lookup, vector, fulltext) | overwrite |
 | `evidence` | One packet per specialist and the explorer: `specialist`, `nodes` (`id`, `label`, `name`, `at`, `priority`, `text`), `facts`, `candidates`, `errors`, `followup` (log), `ms` | **appended** |
 | `sufficiency`, `explorer_ran` | `{ok, reason}`; whether the explorer ran | overwrite |
@@ -113,6 +116,30 @@ per `thread_id`, last 20 messages, at most 200 threads), so every question start
 A node may not share its name with a state field in LangGraph, hence `final_answer` rather than `answer`. The `Send`
 payload to a specialist carries the `usage` so far, so each parallel specialist can check the budget.
 
+### 5.1 Long conversations
+
+Two parts keep a long conversation together (added 2026-09-27).
+
+**Standalone question.** Only the planner and the answer see the conversation; entry search, the specialists and the
+explorer see one question. So the planner first rewrites the question to stand on its own (`standalone_question`,
+the first field of `PlanOut`): "Vem granskade fixen för den?" becomes "Vem granskade fixen för AUTH-17?". Entry
+search (vector, lookup, fulltext), the specialists (through the `Send` payload) and the explorer all use it
+(`search_question` in `nodes.py`); `entities` and `keywords_en` are taken from it too. The answer sees the original
+question, the conversation and, when it differs, the resolved question. No extra model call. `Configure AI agent`
+shows it under Last run as "Understood as", and the planner's trace summary as "understood as".
+
+**Running summary.** The last `history_turns` turns are given word for word. Turns before them are worked into a
+running summary (at most `conversation_summary.max_chars`) by the `summarize` node, one call per question and only
+when a turn has left the window (from the fourth question on with 3 turns). The planner and the answer get the summary
+before the recent turns, as "Earlier in the conversation (summary)". The prompts say the conversation is context, not
+evidence; the summary is never cited. Per thread `graph.py` stores the messages (up to `STORED_HISTORY_MESSAGES` = 24),
+the summary and how many messages it covers; a message is dropped from the store only once it is in the summary, and a
+failed summary call keeps the old summary and retries the same turns on the next question. With the summary off
+(`conversation_summary.enabled = false`), no summary is used or kept, and the store simply keeps the last 24 messages.
+
+Limit: the conversation lives in the backend's memory. A page reload (new `thread_id`) or a backend restart starts a
+new conversation.
+
 ## 6. Settings
 
 `backend/ai_agent/settings.json`, read at the start of every question (an edit applies to the next question, no
@@ -121,9 +148,10 @@ restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the
 
 | Key | Current | Meaning |
 | --- | --- | --- |
-| `models.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-sol` (since 2026-09-27; not yet run on the test set, which passed 14/14 with `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o`) | Model per model step; only models with a price can be chosen |
-| `reasoning_effort.planner`, `.specialists`, `.explorer`, `.answer` | `low`, `low`, `low`, `low` (defaults in `settings.py`: `none`, `none`, `low`, `low`) | `reasoning.effort` per model step, one of `none`, `low`, `medium`, `high`. Sent only when the step's model is a reasoning model (`is_reasoning_model`: name starts with `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`); other models reject the parameter, so it has no effect on them. Reasoning tokens are billed as output tokens. Every reasoning model given a price must accept all four values (the `gpt-6` and `gpt-5.6` models do; plain `gpt-5` and the o-series do not accept `none`) |
-| `history_turns` | 3 | Earlier turns the planner and the answer see |
+| `models.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-6-luna`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-sol` (since 2026-09-27; not yet run on the test set, which passed 14/14 with `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o`) | Model per model step; only models with a price can be chosen |
+| `reasoning_effort.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `none`, `low`, `low`, `low`, `medium` (defaults in `settings.py`: `none`, `none`, `none`, `low`, `low`) | `reasoning.effort` per model step, one of `none`, `low`, `medium`, `high`. Sent only when the step's model is a reasoning model (`is_reasoning_model`: name starts with `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`); other models reject the parameter, so it has no effect on them. Reasoning tokens are billed as output tokens. Every reasoning model given a price must accept all four values (the `gpt-6` and `gpt-5.6` models do; plain `gpt-5` and the o-series do not accept `none`) |
+| `history_turns` | 3 | Earlier turns the planner and the answer see word for word |
+| `conversation_summary.enabled`, `.max_chars` | `true`, 1500 | Running summary of the turns before those (section 5.1); model `models.summarize` (`gpt-6-luna`, effort `none`) |
 | `budget_usd_per_question` | 0.05 | Above this, optional steps (follow-ups, explorer) are skipped; the answer always runs |
 | `specialists.<name>` | all `true` | Turn a specialist off |
 | `specialist_followup` | enabled, 1 round, 2 calls per round, 4 extra nodes | Follow-up caps |
@@ -234,6 +262,16 @@ evidence), so `evidence.max_text_chars` and `max_nodes_per_specialist` are the m
 | Settings validation | Six invalid updates rejected (unknown model, out of range, not a boolean, prices, not a whole number, unknown specialist) with the file unchanged; valid model changes saved through the proxy |
 | Test set through `POST /api/ai/agent/evaluation` | Section 9 |
 | `tsc --noEmit`, `py_compile` | Pass |
+
+Long conversations (2026-09-27): one six-turn conversation through `POST /api/ai/chat` with the current models,
+$0.068 in total. Every reference was resolved: "Vem granskade fixen för den?" was searched as "Vem granskade fixen för
+AUTH-17?" (found `review-001`); "Vad sa hon ...?" as a question about Priya Raman and `backend-api#42`; "Vem kan mest om
+den komponenten?" as one about Mobile session refresh endpoint. The summary started on turn 5 (turn 1 left the
+window), and turn 6, "Hänger det här ihop med det vi pratade om allra först?", was resolved from the summary alone to
+the AUTH-17 blocking of turn 1 and answered with citations. Offline (fake model, no cost): 15 turns with
+`history_turns` changed from 3 to 5 midway and one failing summary call; no message was dropped before it was in the
+summary, and the failed turn was summarized on the next question. The 14 test questions run without history and were
+not rerun; they contain no multi-turn conversation yet.
 
 Known weak points: the follow-up model sometimes passes a Swedish word from the question as a tool argument (returns
 nothing, costs little); answers in Swedish are somewhat stiff with `gpt-4o`. The tab has not been checked for layout

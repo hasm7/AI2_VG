@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from pipeline_staleness import STAGE_LABELS, compute_staleness, read_pipeline_state
 
 from .followup import run_explorer, run_followup
-from .prompts import ANSWER_PROMPT, PLANNER_PROMPT
+from .prompts import ANSWER_PROMPT, PLANNER_PROMPT, SUMMARY_PROMPT
 from .retrieval import find_entry_points
 from .settings import SPECIALISTS, enabled_specialists, load_settings, reasoning_args
 from .specialists import run_specialist
@@ -30,6 +30,8 @@ FACT_LABEL = "Fact"  # citation label of a fact, which is not a graph node
 
 
 class PlanOut(BaseModel):
+    # First, so the model resolves the question before it plans the rest from it.
+    standalone_question: str
     question_types: list[QuestionType]
     language: str
     entities: list[str] = Field(default_factory=list)
@@ -53,9 +55,23 @@ def traced(node_name: str, status_text: str):
 
 
 def _format_history(history: list[dict]) -> str:
-    if not history:
-        return ""
-    return "Recent conversation:\n" + "\n".join(f"{turn['role']}: {turn['content']}" for turn in history) + "\n\n"
+    return "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
+
+
+def _format_conversation(state) -> str:
+    """The conversation as the planner and the answer see it: the summary of earlier turns, then the recent turns."""
+    parts = []
+    if state.get("conversation_summary"):
+        parts.append("Earlier in the conversation (summary):\n" + state["conversation_summary"])
+    if state.get("recent_history"):
+        parts.append("Recent conversation:\n" + _format_history(state["recent_history"]))
+    return "".join(part + "\n\n" for part in parts)
+
+
+def search_question(state) -> str:
+    """The question the graph is searched with: the planner's standalone version, which resolves references to the
+    conversation ("it", "that fix"), or the question itself when there is no plan yet."""
+    return ((state.get("plan") or {}).get("standalone_question") or "").strip() or state["question"]
 
 
 def _error(node: str, tool: str, message: str) -> dict:
@@ -75,13 +91,68 @@ def prepare(state, config):
     with driver.session(database=config["configurable"]["database"], default_access_mode="READ") as session:
         pipeline_state = session.execute_read(read_pipeline_state)
     staleness = compute_staleness(pipeline_state)
-    history = (state.get("recent_history") or [])[-settings["history_turns"] * 2:]
+
+    # The last `history_turns` turns go word for word; the messages before them are covered by the running summary.
+    stored = state.get("stored_history") or []
+    window = settings["history_turns"] * 2
+    recent = stored[-window:] if window else []
+    before_recent = len(stored) - len(recent)
+    summary_on = settings["conversation_summary"]["enabled"]
+    summarized = min(state.get("summarized_messages") or 0, len(stored))
+    pending = stored[summarized:before_recent] if summary_on else []
+
     stale = [STAGE_LABELS[stage] for stage, value in staleness.items() if value["stale"]]
     return {
         "settings": settings,
         "staleness": staleness,
-        "recent_history": history,
-        "_summary": f"stale layers: {', '.join(stale) or 'none'}; history messages: {len(history)}",
+        "recent_history": recent,
+        "pending_history": pending,
+        "conversation_summary": (state.get("conversation_summary") or "") if summary_on else "",
+        "summarized_messages": summarized,
+        "_summary": (
+            f"stale layers: {', '.join(stale) or 'none'}; recent messages: {len(recent)}; "
+            f"to summarize: {len(pending)}"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# summarize (one model call, only when turns have left the recent window)
+# ---------------------------------------------------------------------------
+
+@traced("summarize", "Sammanfattar samtalet...")
+def summarize(state, config):
+    pending = state.get("pending_history") or []
+    if not pending:
+        return {"_summary": "nothing to add"}
+
+    settings = state["settings"]
+    client = config["configurable"]["client"]
+    model = settings["models"]["summarize"]
+    max_chars = settings["conversation_summary"]["max_chars"]
+    current = state.get("conversation_summary") or ""
+    try:
+        response = client.responses.create(
+            model=model,
+            instructions=SUMMARY_PROMPT,
+            input=(f"Character limit: {max_chars}\n\nCurrent summary:\n{current or '(none yet)'}\n\n"
+                   f"Turns to add:\n{_format_history(pending)}"),
+            **reasoning_args(settings, "summarize"),
+        )
+    except Exception as error:  # noqa: BLE001 - the question goes on with the old summary; the turns are retried next time
+        return {"_summary": f"failed, kept the previous summary: {error}"}
+
+    usage = [response_usage(settings, "summarize", model, response)]
+    text = (response.output_text or "").strip()
+    if not text:
+        return {"usage": usage, "_summary": "empty result, kept the previous summary"}
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(" ", 1)[0] + " ..."
+    return {
+        "conversation_summary": text,
+        "summarized_messages": state["summarized_messages"] + len(pending),
+        "usage": usage,
+        "_summary": f"added {len(pending) // 2} turn(s); summary {len(text)} characters",
     }
 
 
@@ -98,7 +169,7 @@ def planner(state, config):
     response = client.responses.parse(
         model=model,
         instructions=PLANNER_PROMPT,
-        input=_format_history(state.get("recent_history", [])) + f"Question: {state['question']}",
+        input=_format_conversation(state) + f"Question: {state['question']}",
         text_format=PlanOut,
         **reasoning_args(settings, "planner"),
     )
@@ -112,10 +183,13 @@ def planner(state, config):
         specialists = enabled
 
     plan = {**parsed.model_dump(), "specialists": specialists, "route": route}
+    standalone = parsed.standalone_question.strip()
+    resolved = f"; understood as: {standalone}" if standalone and standalone != state["question"].strip() else ""
     return {
         "plan": plan,
         "usage": [response_usage(settings, "planner", model, response)],
-        "_summary": f"route {route}; types {', '.join(parsed.question_types)}; specialists {', '.join(specialists) or '-'}",
+        "_summary": (f"route {route}; types {', '.join(parsed.question_types)}; "
+                     f"specialists {', '.join(specialists) or '-'}{resolved}"),
     }
 
 
@@ -134,7 +208,7 @@ def entry(state, config):
     try:
         with configurable["driver"].session(database=configurable["database"], default_access_mode="READ") as session:
             entry_points, usage, details = find_entry_points(
-                session, configurable["client"], state["question"], state["plan"], settings,
+                session, configurable["client"], search_question(state), state["plan"], settings,
             )
     except Exception as error:  # noqa: BLE001 - reported, and the answer step refuses to guess
         return {"entry_points": [], "errors": [_error("entry", "hybrid_search", str(error))], "_summary": "failed"}
@@ -153,7 +227,8 @@ def dispatch_specialists(state):
     if not state.get("entry_points") or not state["plan"]["specialists"]:
         return "check"
     payload = {
-        "question": state["question"],
+        # The specialists work from the standalone question: they do not see the conversation.
+        "question": search_question(state),
         "plan": state["plan"],
         "entry_points": state["entry_points"],
         "settings": state["settings"],
@@ -238,7 +313,7 @@ def explorer(state, config):
     try:
         with configurable["driver"].session(database=configurable["database"], default_access_mode="READ") as session:
             packet, usage = run_explorer(
-                session, configurable["client"], state["question"], state.get("evidence") or [],
+                session, configurable["client"], search_question(state), state.get("evidence") or [],
                 state["sufficiency"]["reason"], state["settings"],
             )
     except Exception as error:  # noqa: BLE001 - the explorer is optional; its failure leaves the evidence as it was
@@ -320,9 +395,12 @@ def answer(state, config):
 
     evidence_text, references = _evidence_text(state.get("evidence") or [])
     stale = [STAGE_LABELS[stage] for stage, value in (state.get("staleness") or {}).items() if value["stale"]]
+    standalone = search_question(state)
+    resolved = f"Question with its references resolved: {standalone}\n" if standalone != state["question"].strip() else ""
     prompt_input = (
-        _format_history(state.get("recent_history", []))
+        _format_conversation(state)
         + f"Question: {state['question']}\n"
+        + resolved
         + f"Answer language: {state['plan'].get('language') or 'the language of the question'}\n\n"
         + f"Stale layers: {', '.join(stale) or 'none'}\n\n"
         + ("Evidence:\n" + evidence_text if evidence_text else "Evidence: none.")

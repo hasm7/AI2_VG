@@ -18,9 +18,12 @@ REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
 REASONING_EFFORTS = ("none", "low", "medium", "high")
 
 DEFAULTS = {
-    "models": {"planner": "gpt-4o", "specialists": "gpt-4o", "explorer": "gpt-4o", "answer": "gpt-4o"},
-    "reasoning_effort": {"planner": "none", "specialists": "none", "explorer": "low", "answer": "low"},
+    "models": {"summarize": "gpt-4o-mini", "planner": "gpt-4o", "specialists": "gpt-4o", "explorer": "gpt-4o", "answer": "gpt-4o"},
+    "reasoning_effort": {"summarize": "none", "planner": "none", "specialists": "none", "explorer": "low", "answer": "low"},
     "history_turns": 3,
+    # Turns older than the last `history_turns` are folded into a running summary, so a long conversation keeps its
+    # thread. At most `max_chars` characters.
+    "conversation_summary": {"enabled": True, "max_chars": 1500},
     "budget_usd_per_question": 0.05,
     "specialists": {name: True for name in SPECIALISTS},
     "specialist_followup": {"enabled": True, "max_rounds": 1, "max_calls_per_round": 2, "max_extra_nodes": 4},
@@ -80,6 +83,7 @@ EDITABLE_NUMBERS = {
     (None, "history_turns"): (int, 0, 10),
     (None, "budget_usd_per_question"): (float, 0.001, 1.0),
     (None, "query_timeout_seconds"): (int, 1, 60),
+    ("conversation_summary", "max_chars"): (int, 300, 4000),
     ("specialist_followup", "max_rounds"): (int, 1, 3),
     ("specialist_followup", "max_calls_per_round"): (int, 1, 3),
     ("specialist_followup", "max_extra_nodes"): (int, 0, 10),
@@ -94,7 +98,7 @@ EDITABLE_NUMBERS = {
     ("evidence", "max_nodes_per_specialist"): (int, 1, 20),
     ("evidence", "max_text_chars"): (int, 200, 4000),
 }
-EDITABLE_FLAGS = {("specialist_followup", "enabled"), ("explorer", "enabled")}
+EDITABLE_FLAGS = {("specialist_followup", "enabled"), ("explorer", "enabled"), ("conversation_summary", "enabled")}
 
 
 def save_settings(update: dict) -> dict:

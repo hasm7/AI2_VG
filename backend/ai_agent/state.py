@@ -10,12 +10,18 @@ from typing import Annotated, TypedDict
 
 class AgentState(TypedDict, total=False):
     question: str
-    recent_history: list[dict]  # [{"role": "user"|"assistant", "content": str}], at most `history_turns` turns
+    # The conversation, kept per thread in `graph.py` and passed in with every question.
+    stored_history: list[dict]  # [{"role": "user"|"assistant", "content": str}], the stored messages of the thread
+    conversation_summary: str  # running summary of the messages before `recent_history`
+    summarized_messages: int  # how many of `stored_history`'s first messages the summary covers
+    # Set by `prepare`.
+    recent_history: list[dict]  # the last `history_turns` turns of `stored_history`, given word for word
+    pending_history: list[dict]  # messages that left the recent window and are not in the summary yet
 
     settings: dict
     staleness: dict  # {stage: {"stale": bool, "reasons": [str]}}
 
-    plan: dict  # question_types, language, entities, keywords_en, specialists, route, reason
+    plan: dict  # standalone_question, question_types, language, entities, keywords_en, specialists, route, reason
     entry_points: list[dict]  # [{"id", "label", "name", "score", "via"}]
 
     evidence: Annotated[list[dict], operator.add]  # appended: one packet per specialist (and the explorer)

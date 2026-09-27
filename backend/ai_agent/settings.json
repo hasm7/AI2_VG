@@ -1,17 +1,23 @@
 {
   "models": {
+    "summarize": "gpt-6-luna",
     "planner": "gpt-6-sol",
     "specialists": "gpt-6-luna",
     "explorer": "gpt-6-sol",
     "answer": "gpt-6-sol"
   },
   "reasoning_effort": {
+    "summarize": "none",
     "planner": "low",
     "specialists": "low",
     "explorer": "low",
     "answer": "medium"
   },
   "history_turns": 3,
+  "conversation_summary": {
+    "enabled": true,
+    "max_chars": 1500
+  },
   "budget_usd_per_question": 0.05,
   "specialists": {
     "sources": true,

@@ -2,13 +2,18 @@
 
 Flow (plan-and-execute with parallel fan-out):
 
-    START -> prepare -> planner -+-> answer                                  (small talk)
-                                 +-> entry -+-> sources      -+
-                                            +-> causes       -+-> check -+-> answer -> END
-                                            +-> architecture -+          +-> explorer -> answer
-                                            +-> people       -+
+    START -> prepare -> summarize -> planner -+-> answer                                  (small talk)
+                                              +-> entry -+-> sources      -+
+                                                         +-> causes       -+-> check -+-> answer -> END
+                                                         +-> architecture -+          +-> explorer -> answer
+                                                         +-> people       -+
 
 Every conditional edge declares its possible targets, so `get_graph()` shows the complete flow.
+
+Conversation memory, per thread: the stored messages, a running summary and how many of the stored messages the
+summary covers. `prepare` gives the last `history_turns` turns word for word; `summarize` folds the turns before them
+into the summary once they leave that window. A stored message is dropped only after it is in the summary, so nothing
+is lost between the window and the summary.
 """
 
 import os
@@ -23,11 +28,12 @@ from .settings import SPECIALISTS
 from .state import AgentState
 from .usage import token_usage_by_node, total_cost
 
-STORED_HISTORY_MESSAGES = 20
+STORED_HISTORY_MESSAGES = 24  # above the largest recent window (history_turns at most 10, so 20 messages)
 MAX_THREADS = 200
 
-# Conversation history per thread, outside the graph so every question starts from a clean state.
-_histories: "OrderedDict[str, list[dict]]" = OrderedDict()
+# Conversation memory per thread, outside the graph so every question starts from a clean state:
+# {"messages": [...], "summary": str, "summarized": int}
+_threads: "OrderedDict[str, dict]" = OrderedDict()
 
 
 class MissingApiKeyError(RuntimeError):
@@ -44,6 +50,7 @@ def require_openai_client() -> OpenAI:
 def build_graph():
     graph = StateGraph(AgentState)
     graph.add_node("prepare", nodes.prepare)
+    graph.add_node("summarize", nodes.summarize)
     graph.add_node("planner", nodes.planner)
     graph.add_node("entry", nodes.entry)
     for name in SPECIALISTS:
@@ -53,7 +60,8 @@ def build_graph():
     graph.add_node("answer", nodes.answer)
 
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "planner")
+    graph.add_edge("prepare", "summarize")
+    graph.add_edge("summarize", "planner")
     graph.add_conditional_edges("planner", nodes.route_after_planner, ["answer", "entry"])
     graph.add_conditional_edges("entry", nodes.dispatch_specialists, [*SPECIALISTS, "check"])
     for name in SPECIALISTS:
@@ -74,12 +82,20 @@ def get_compiled_graph():
     return _compiled_graph
 
 
-def _remember(thread_id: str, question: str, answer: str) -> None:
-    history = _histories.pop(thread_id, [])
-    history = (history + [{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
-    _histories[thread_id] = history[-STORED_HISTORY_MESSAGES:]
-    while len(_histories) > MAX_THREADS:
-        _histories.popitem(last=False)
+def _remember(thread_id: str, question: str, answer: str, final_state: dict) -> None:
+    thread = _threads.pop(thread_id, {"messages": [], "summary": "", "summarized": 0})
+    messages = thread["messages"] + [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+    summarized = final_state.get("summarized_messages", thread["summarized"])
+    summary = final_state.get("conversation_summary", thread["summary"])
+
+    # Drop the oldest messages above the cap, but only those already in the summary (unless the summary is off).
+    summary_on = (final_state.get("settings") or {}).get("conversation_summary", {}).get("enabled", True)
+    excess = max(len(messages) - STORED_HISTORY_MESSAGES, 0)
+    drop = excess if not summary_on else min(excess, summarized)
+    drop -= drop % 2  # whole turns
+    _threads[thread_id] = {"messages": messages[drop:], "summary": summary, "summarized": max(summarized - drop, 0)}
+    while len(_threads) > MAX_THREADS:
+        _threads.popitem(last=False)
 
 
 def stream_chat(message: str, thread_id: str, neo4j_uri: str, neo4j_user: str, neo4j_password: str, neo4j_database: str):
@@ -89,7 +105,13 @@ def stream_chat(message: str, thread_id: str, neo4j_uri: str, neo4j_user: str, n
 
     with GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password)) as driver:
         config = {"configurable": {"client": client, "driver": driver, "database": neo4j_database}}
-        input_state = {"question": message, "recent_history": list(_histories.get(thread_id, []))}
+        thread = _threads.get(thread_id) or {"messages": [], "summary": "", "summarized": 0}
+        input_state = {
+            "question": message,
+            "stored_history": list(thread["messages"]),
+            "conversation_summary": thread["summary"],
+            "summarized_messages": thread["summarized"],
+        }
 
         final_state: dict = {}
         for mode, chunk in compiled.stream(input_state, config, stream_mode=["custom", "values"]):
@@ -99,7 +121,7 @@ def stream_chat(message: str, thread_id: str, neo4j_uri: str, neo4j_user: str, n
                 final_state = chunk
 
     answer = final_state.get("final_answer", "")
-    _remember(thread_id, message, answer)
+    _remember(thread_id, message, answer, final_state)
     usage = final_state.get("usage", [])
     yield {
         "type": "done",

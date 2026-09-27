@@ -572,6 +572,7 @@ type AgentSettings = {
   history_turns: number;
   budget_usd_per_question: number;
   query_timeout_seconds: number;
+  conversation_summary: { enabled: boolean; max_chars: number };
   specialists: Record<string, boolean>;
   specialist_followup: { enabled: boolean; max_rounds: number; max_calls_per_round: number; max_extra_nodes: number };
   explorer: { enabled: boolean; max_queries: number; max_rows: number; max_result_chars: number; max_extra_nodes: number };
@@ -646,6 +647,7 @@ type AgentUsageEntry = {
 type AgentTraceEntry = { node: string; ms: number; summary: string };
 
 type AgentPlan = {
+  standalone_question?: string;
   route: string;
   question_types: string[];
   language: string;
@@ -5196,6 +5198,12 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
             <p>
               <strong>Question:</strong> {lastRun.question}
             </p>
+            {lastRun.plan?.standalone_question && lastRun.plan.standalone_question.trim() !== lastRun.question.trim() ? (
+              <p>
+                <strong>Understood as:</strong> {lastRun.plan.standalone_question}{" "}
+                <span className="knowledge-section-kind">(references to the conversation resolved; the graph is searched with this)</span>
+              </p>
+            ) : null}
             {lastRun.plan ? (
               <p>
                 <strong>Plan:</strong> {lastRun.plan.route === "smalltalk" ? "small talk" : "graph question"}; types{" "}
@@ -5345,7 +5353,7 @@ function AgentCheckField({ label, checked, onChange }: { label: string; checked:
 // models that have a price) and answers 400 with the reason when one is wrong.
 // The settings form lists model steps and specialists in the order they run in the agent flow drawing (the backend
 // returns the keys alphabetically). Keys not listed here come last.
-const AGENT_MODEL_STEP_ORDER = ["planner", "specialists", "explorer", "answer"];
+const AGENT_MODEL_STEP_ORDER = ["summarize", "planner", "specialists", "explorer", "answer"];
 const AGENT_SPECIALIST_ORDER = ["sources", "causes", "architecture", "people"];
 
 function inFlowOrder<T>(record: Record<string, T>, order: string[]): Array<[string, T]> {
@@ -5396,6 +5404,7 @@ function AgentSettingsForm({
           budget_usd_per_question,
           query_timeout_seconds,
           specialists,
+          conversation_summary: draft.conversation_summary,
           specialist_followup: draft.specialist_followup,
           explorer: draft.explorer,
           search: draft.search,
@@ -5429,6 +5438,11 @@ function AgentSettingsForm({
           <strong>Reasoning effort</strong> is sent only to reasoning models (gpt-5 and later), which think before they
           answer; the thinking is billed as output tokens. Higher effort can give better answers but is slower and costs
           more. It has no effect on other models.
+        </p>
+        <p>
+          <strong>Conversation summary</strong> keeps a long conversation together: the last History turns are given
+          word for word, and the turns before them are worked into a running summary by the summarize step, so the
+          agent still knows what "it" or "what we discussed at the start" refers to.
         </p>
       </div>
       <div className="agent-settings">
@@ -5486,6 +5500,20 @@ function AgentSettingsForm({
               label="Query timeout (s)"
               value={draft.query_timeout_seconds}
               onChange={(value) => update("query_timeout_seconds", value)}
+            />
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Conversation summary</legend>
+            <AgentCheckField
+              label="On"
+              checked={draft.conversation_summary.enabled}
+              onChange={(value) => update("conversation_summary", { ...draft.conversation_summary, enabled: value })}
+            />
+            <AgentNumberField
+              label="Max characters"
+              value={draft.conversation_summary.max_chars}
+              onChange={(value) => update("conversation_summary", { ...draft.conversation_summary, max_chars: value })}
             />
           </fieldset>
 

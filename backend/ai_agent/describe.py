@@ -13,19 +13,30 @@ from .state import AgentState
 START, END = "__start__", "__end__"
 
 NODE_INFO = {
-    START: {"kind": "start", "title": "Start", "description": "The question arrives with the recent conversation.",
-            "reads": [], "writes": ["question", "recent_history"]},
+    START: {"kind": "start", "title": "Start",
+            "description": "The question arrives with the conversation: its stored messages and running summary.",
+            "reads": [], "writes": ["question", "stored_history", "conversation_summary", "summarized_messages"]},
     "prepare": {"kind": "code", "title": "Prepare",
-                "description": "Loads settings.json, computes which layers are stale, trims the conversation history.",
-                "reads": ["question", "recent_history"], "writes": ["settings", "staleness", "recent_history"]},
+                "description": "Loads settings.json, computes which layers are stale, splits the conversation into "
+                               "the recent turns (given word for word) and the turns still to be summarized.",
+                "reads": ["question", "stored_history", "conversation_summary", "summarized_messages"],
+                "writes": ["settings", "staleness", "recent_history", "pending_history", "conversation_summary",
+                           "summarized_messages"]},
+    "summarize": {"kind": "model", "model_key": "summarize", "title": "Summarize",
+                  "description": "Keeps a long conversation together: when turns have left the recent window, one "
+                                 "model call works them into the running summary (conversation_summary.max_chars). "
+                                 "Does nothing otherwise. A failure keeps the old summary and retries next time.",
+                  "reads": ["pending_history", "conversation_summary", "summarized_messages", "settings"],
+                  "writes": ["conversation_summary", "summarized_messages", "usage"]},
     "planner": {"kind": "model", "model_key": "planner", "title": "Planner",
-                "description": "One model call with structured output: question types, language, entities, English "
-                               "keywords, and which specialists to run. Small talk goes straight to the answer.",
-                "reads": ["question", "recent_history", "settings"], "writes": ["plan", "usage"]},
+                "description": "One model call with structured output: the question rewritten to stand on its own "
+                               "(references to the conversation resolved), question types, language, entities, "
+                               "English keywords, and which specialists to run. Small talk goes straight to the answer.",
+                "reads": ["question", "conversation_summary", "recent_history", "settings"], "writes": ["plan", "usage"]},
     "entry": {"kind": "code", "title": "Entry",
-              "description": "Finds the entry points: exact lookup of keys and names, vector search on "
-                             "searchable_embedding, fulltext on searchable_text, merged by reciprocal rank fusion. "
-                             "One embedding call for the question. Then starts the chosen specialists in parallel.",
+              "description": "Finds the entry points for the standalone question: exact lookup of keys and names, "
+                             "vector search on searchable_embedding, fulltext on searchable_text, merged by reciprocal "
+                             "rank fusion. One embedding call. Then starts the chosen specialists in parallel.",
               "reads": ["question", "plan", "settings", "usage"], "writes": ["entry_points", "usage", "errors"]},
     "sources": {"kind": "code + model", "model_key": "specialists", "title": "Sources specialist",
                 "description": "Source records around the entry points: versions, comments, reviews, code changes, "
@@ -56,7 +67,8 @@ NODE_INFO = {
     "answer": {"kind": "model", "model_key": "answer", "title": "Answer",
                "description": "One streamed model call that answers from the evidence only, with citations, in the "
                               "question's language, mentioning stale layers. Refuses in code when a fetch failed.",
-               "reads": ["question", "recent_history", "plan", "staleness", "evidence", "errors", "settings"],
+               "reads": ["question", "conversation_summary", "recent_history", "plan", "staleness", "evidence",
+                         "errors", "settings"],
                "writes": ["final_answer", "citations", "dropped_citations", "usage"]},
     END: {"kind": "end", "title": "End", "description": "The answer, citations, usage and trace are returned.",
           "reads": ["final_answer", "citations", "dropped_citations", "usage", "trace"], "writes": []},
@@ -81,10 +93,15 @@ EDGE_LABELS = {
 
 STATE_DESCRIPTIONS = {
     "question": "The user's question.",
-    "recent_history": "The last turns of the conversation (history_turns).",
+    "stored_history": "The conversation's stored messages, kept per thread outside the graph.",
+    "conversation_summary": "Running summary of the turns before the recent window.",
+    "summarized_messages": "How many of the stored messages the summary covers.",
+    "recent_history": "The last turns of the conversation (history_turns), given word for word.",
+    "pending_history": "Turns that left the recent window and are not in the summary yet.",
     "settings": "settings.json as read for this question.",
     "staleness": "Per layer: stale or not, and why.",
-    "plan": "question_types, language, entities, keywords_en, specialists, route, reason.",
+    "plan": "standalone_question (searched with), question_types, language, entities, keywords_en, specialists, "
+            "route, reason.",
     "entry_points": "Nodes the question enters the graph through, with score and how they were found.",
     "evidence": "One packet per specialist (and the explorer): nodes with their texts, facts, follow-up log.",
     "sufficiency": "Whether the evidence was judged enough, and why.",
@@ -135,6 +152,8 @@ def describe_agent(compiled_graph) -> dict:
             enabled = bool(settings["specialists"][node_id])
         elif node_id == "explorer":
             enabled = bool(settings["explorer"]["enabled"])
+        elif node_id == "summarize":
+            enabled = bool(settings["conversation_summary"]["enabled"])
         nodes.append({
             "id": node_id, "title": info["title"], "kind": info["kind"], "model": model, "enabled": enabled,
             "description": info["description"], "reads": info["reads"], "writes": info["writes"],

@@ -120,7 +120,7 @@ def run_evaluation(client, neo4j_uri: str, neo4j_user: str, neo4j_password: str,
         for index, question in enumerate(questions):
             started = time.perf_counter()
             try:
-                state = compiled.invoke({"question": question["question"], "recent_history": []}, config)
+                state = compiled.invoke({"question": question["question"], "stored_history": []}, config)
                 result = _score(question, state)
             except Exception as error:  # noqa: BLE001 - one failing question must not stop the run
                 result = {"passed": False, "errors": [{"node": "run", "tool": "run", "error": str(error)}], "answer": "",
