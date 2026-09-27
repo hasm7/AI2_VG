@@ -1,9 +1,15 @@
 {
   "models": {
-    "planner": "gpt-4o",
-    "specialists": "gpt-4o-mini",
-    "explorer": "gpt-4o-mini",
-    "answer": "gpt-4o"
+    "planner": "gpt-6-sol",
+    "specialists": "gpt-6-luna",
+    "explorer": "gpt-6-sol",
+    "answer": "gpt-6-sol"
+  },
+  "reasoning_effort": {
+    "planner": "low",
+    "specialists": "low",
+    "explorer": "low",
+    "answer": "low"
   },
   "history_turns": 3,
   "budget_usd_per_question": 0.05,
@@ -47,6 +53,21 @@
       "input": 0.15,
       "cached_input": 0.075,
       "output": 0.6
+    },
+    "gpt-5.6-terra": {
+      "input": 2.0,
+      "cached_input": 0.2,
+      "output": 12.0
+    },
+    "gpt-6-luna": {
+      "input": 0.1,
+      "cached_input": 0.01,
+      "output": 0.5
+    },
+    "gpt-6-sol": {
+      "input": 2.0,
+      "cached_input": 0.2,
+      "output": 10.0
     },
     "text-embedding-3-large": {
       "input": 0.13,

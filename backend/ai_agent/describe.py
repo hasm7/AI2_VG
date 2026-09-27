@@ -7,7 +7,7 @@ described here; keep `NODE_INFO` in step with `nodes.py`.
 
 import typing
 
-from .settings import available_models, load_settings
+from .settings import REASONING_EFFORTS, available_models, is_reasoning_model, load_settings
 from .state import AgentState
 
 START, END = "__start__", "__end__"
@@ -147,4 +147,6 @@ def describe_agent(compiled_graph) -> dict:
     return {
         "nodes": nodes, "edges": edges, "state": _state_fields(), "settings": settings,
         "available_models": available_models(settings),
+        "reasoning_models": [model for model in available_models(settings) if is_reasoning_model(model)],
+        "reasoning_efforts": list(REASONING_EFFORTS),
     }

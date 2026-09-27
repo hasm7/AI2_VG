@@ -50,7 +50,17 @@ START -> prepare -> planner -+-> answer                                   (small
 | `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts | same | same |
 | `check` | code | Enough evidence? No entry points, no evidence, a `why` question without causal evidence, or a `ranking` question without metrics means no. Its routing also reads `explorer_ran`, `usage`, `settings` | `plan`, `entry_points`, `evidence`, `explorer_ran`, `usage`, `settings` | `sufficiency` |
 | `explorer` | model + read-only Cypher | Runs at most once, only when `check` says no, the explorer is on and the budget allows (section 4) | `question`, `evidence`, `sufficiency`, `settings` | `evidence`, `usage`, `explorer_ran` |
-| `answer` | model, 1 streamed call | Answers from the evidence only, cites node references in square brackets, mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
+| `answer` | model, 1 streamed call | Answers from the evidence only, cites references in square brackets (a node's name, or `fact-N` for a fact; see below), mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
+
+**Citations.** In the answer's evidence text (`_evidence_text` in `nodes.py`) every node starts with its reference
+in square brackets (its name), and every distinct fact gets its own reference `fact-1`, `fact-2`, ... (numbered per
+question; the same fact from two specialists keeps one number), since a fact has no node. `_citations` resolves every
+bracket in the answer against these references: a node becomes a citation with its label, a fact a citation with
+label `Fact` (`FACT_LABEL`) and the fact text as `display_name`. Anything else ends up in `dropped_citations`, shown in
+the chat as "Unresolved references". In the chat a node citation is a chip that selects the node in the graph; a fact
+citation is a dashed chip (`chat-citation-fact`) showing `fact-N` and the start of the fact, with the full text on
+hover, and is not clickable. Before facts had references, the answer model sometimes put a whole `Fact:` line in
+brackets, which showed as unresolved although the claim was grounded.
 
 Every node also appends one `trace` entry (time and a summary) through the `traced` wrapper in `nodes.py`.
 
@@ -111,7 +121,8 @@ restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the
 
 | Key | Current | Meaning |
 | --- | --- | --- |
-| `models.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o` | Model per model step; only models with a price can be chosen |
+| `models.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-sol` (since 2026-09-27; not yet run on the test set, which passed 14/14 with `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o`) | Model per model step; only models with a price can be chosen |
+| `reasoning_effort.planner`, `.specialists`, `.explorer`, `.answer` | `low`, `low`, `low`, `low` (defaults in `settings.py`: `none`, `none`, `low`, `low`) | `reasoning.effort` per model step, one of `none`, `low`, `medium`, `high`. Sent only when the step's model is a reasoning model (`is_reasoning_model`: name starts with `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`); other models reject the parameter, so it has no effect on them. Reasoning tokens are billed as output tokens. Every reasoning model given a price must accept all four values (the `gpt-6` and `gpt-5.6` models do; plain `gpt-5` and the o-series do not accept `none`) |
 | `history_turns` | 3 | Earlier turns the planner and the answer see |
 | `budget_usd_per_question` | 0.05 | Above this, optional steps (follow-ups, explorer) are skipped; the answer always runs |
 | `specialists.<name>` | all `true` | Turn a specialist off |
@@ -120,7 +131,7 @@ restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the
 | `search.vector_k`, `fulltext_k`, `lookup_k`, `entry_points` | 10, 10, 3, 8 | Hits per search and entry points kept |
 | `evidence.max_nodes_per_specialist`, `max_text_chars` | 8, 1200 | Size of each evidence packet from the code fetch |
 | `query_timeout_seconds` | 10 | Timeout on every Neo4j query |
-| `prices_usd_per_million_tokens` | `gpt-4o`, `gpt-4o-mini`, `text-embedding-3-large` | Used for `cost_usd`. Checked 2026-09-26 against OpenAI's pricing page (developers.openai.com/api/docs/pricing), Standard tier, which the agent uses: all match. Not updated automatically; a model missing here is counted as 0 with `priced: false` |
+| `prices_usd_per_million_tokens` | `gpt-4o`, `gpt-4o-mini`, `gpt-5.6-terra`, `gpt-6-luna`, `gpt-6-sol`, `text-embedding-3-large` | Used for `cost_usd`, and decides which models can be chosen. Checked 2026-09-27 against OpenAI's pricing page (developers.openai.com/api/docs/pricing), Standard tier, which the agent uses. `gpt-6-sol` and `gpt-6-luna` have promotional prices (Sol until 2026-11-21, Luna's end date not stated): update them here when the promotion ends, or the cost is counted too low. Not updated automatically; a model missing here is counted as 0 with `priced: false` |
 
 The query embedding always uses the embedding layer's model and dimensions (`EMBEDDING_MODEL`,
 `EMBEDDING_DIMENSIONS` from `embedding_pass.py`); it is not a setting, since vector search needs the same model.
@@ -144,11 +155,13 @@ connections and 0 running transactions one second after.
 
 `GET /api/ai/agent` (read-only, `describe.py`): `nodes` (`id`, `title`, `kind`, `model`, `enabled`, `description`,
 `reads`, `writes`), `edges` (`source`, `target`, `conditional`, `label`), `state` (`name`, `type`, `merge`,
-`description`, `written_by`, `read_by`), `settings` and `available_models`.
+`description`, `written_by`, `read_by`), `settings`, `available_models`, `reasoning_models` (the available models
+that take a reasoning effort) and `reasoning_efforts`.
 
 `POST /api/ai/agent/settings` (`settings.save_settings`): a partial settings object. Every value is checked before
 anything is written: known groups and keys only, whole numbers where required, ranges (`EDITABLE_NUMBERS`), booleans
-for on/off, specialists by name, models only from `available_models` (those with a price). Prices cannot be changed
+for on/off, specialists by name, models only from `available_models` (those with a price), reasoning efforts only from `REASONING_EFFORTS` and
+for known steps. Prices cannot be changed
 here. A wrong value answers `400` with the reason and leaves the file unchanged.
 
 `GET /api/ai/agent/evaluation`: the test questions, the last run and the run history. `POST` runs every test question
@@ -165,7 +178,9 @@ come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 | State | Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
 | Last run | Question, plan, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
 | Conversation cost | Every chat question since the page was loaded: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). A reload empties it, as it starts a new conversation. Test questions are not counted. A question that ends in an error is not listed |
-| Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
+| Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, reasoning effort per step (a step's select is disabled while its model is not a reasoning model; the caption explains effort and its cost), budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. Model steps and specialists are listed in the order they run in the drawing (planner,
+specialists, explorer, answer; sources, causes, architecture, people), since the backend returns the keys
+alphabetically. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
 | Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models. The last part of the tab, so its last table has `layer-last-table` |
 
 The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRunComplete` when a `done` event arrives.

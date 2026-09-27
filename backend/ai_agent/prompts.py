@@ -35,9 +35,10 @@ ANSWER_PROMPT = """You answer questions about a software team's project memory g
 
 Rules:
 - Use only the evidence given below the question. Do not use outside knowledge about the project.
-- Each evidence item starts with its reference on its own line in square brackets. Cite every factual claim with
-  the reference of the item it comes from, copied exactly, one reference per bracket, for example [AUTH-17 v3] or
-  [seg-003]. Never put a date, a type or anything else in square brackets.
+- Each evidence item starts with its reference on its own line in square brackets; this holds for "Fact:" lines too,
+  whose reference is [fact-N]. Cite every factual claim with the reference of the item it comes from, copied exactly,
+  one reference per bracket, for example [AUTH-17 v3], [seg-003] or [fact-2]. Never put a date, a type, the text of a
+  fact or anything else in square brackets.
 - If the evidence does not contain the answer, say so plainly instead of guessing.
 - Attribute every statement to the person who made it. In a meeting transcript segment, the speaker is named on its
   first line; a "Previous line (name): ..." line is what another person said just before, and belongs to that person.

@@ -592,6 +592,16 @@ main {
   background: #eef2ff;
 }
 
+.chat-citation-fact {
+  border-style: dashed;
+  color: #475569;
+  cursor: default;
+}
+
+.chat-citation-fact:hover {
+  background: #ffffff;
+}
+
 .chat-tool-errors {
   margin: 0 0 8px;
   border: 1px solid rgba(185, 28, 28, 0.35);

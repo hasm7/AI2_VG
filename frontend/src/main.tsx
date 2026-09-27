@@ -568,6 +568,7 @@ type AgentStateField = {
 
 type AgentSettings = {
   models: Record<string, string>;
+  reasoning_effort: Record<string, string>;
   history_turns: number;
   budget_usd_per_question: number;
   query_timeout_seconds: number;
@@ -584,6 +585,8 @@ type AgentDescription = {
   state: AgentStateField[];
   settings: AgentSettings;
   available_models: string[];
+  reasoning_models: string[];
+  reasoning_efforts: string[];
 };
 
 type AgentEvalNodeSpec = { label?: string; name?: string; contains?: string };
@@ -4563,7 +4566,13 @@ function ChatPanel({
               </div>
               {entry.citations && entry.citations.length > 0 ? (
                 <div className="chat-citations">
-                  {entry.citations.map((citation) => (
+                  {entry.citations.map((citation) =>
+                    citation.label === "Fact" ? (
+                      // A fact (a ranking row, an expert share, an explorer result) has no node to select in the graph.
+                      <span key={`Fact-${citation.key}`} className="chat-citation-chip chat-citation-fact" title={citation.display_name}>
+                        {citation.key}: {citation.display_name.length > 60 ? `${citation.display_name.slice(0, 60)}…` : citation.display_name}
+                      </span>
+                    ) : (
                     <button
                       key={`${citation.label}-${citation.key}`}
                       type="button"
@@ -4573,7 +4582,8 @@ function ChatPanel({
                     >
                       {citation.display_name}
                     </button>
-                  ))}
+                    ),
+                  )}
                 </div>
               ) : null}
               {entry.droppedCitations && entry.droppedCitations.length > 0 ? (
@@ -5291,6 +5301,8 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
       <AgentSettingsForm
         settings={description.settings}
         availableModels={description.available_models}
+        reasoningModels={description.reasoning_models}
+        reasoningEfforts={description.reasoning_efforts}
         onSaved={() => setDescriptionVersion((version) => version + 1)}
       />
 
@@ -5331,13 +5343,27 @@ function AgentCheckField({ label, checked, onChange }: { label: string; checked:
 
 // Edits settings.json through POST /api/ai/agent/settings. The backend checks every value (known keys, ranges,
 // models that have a price) and answers 400 with the reason when one is wrong.
+// The settings form lists model steps and specialists in the order they run in the agent flow drawing (the backend
+// returns the keys alphabetically). Keys not listed here come last.
+const AGENT_MODEL_STEP_ORDER = ["planner", "specialists", "explorer", "answer"];
+const AGENT_SPECIALIST_ORDER = ["sources", "causes", "architecture", "people"];
+
+function inFlowOrder<T>(record: Record<string, T>, order: string[]): Array<[string, T]> {
+  const rank = (key: string) => (order.includes(key) ? order.indexOf(key) : order.length);
+  return Object.entries(record).sort(([a], [b]) => rank(a) - rank(b));
+}
+
 function AgentSettingsForm({
   settings,
   availableModels,
+  reasoningModels,
+  reasoningEfforts,
   onSaved,
 }: {
   settings: AgentSettings;
   availableModels: string[];
+  reasoningModels: string[];
+  reasoningEfforts: string[];
   onSaved: () => void;
 }) {
   const [draft, setDraft] = useState<AgentSettings>(settings);
@@ -5365,6 +5391,7 @@ function AgentSettingsForm({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           models,
+          reasoning_effort: draft.reasoning_effort,
           history_turns,
           budget_usd_per_question,
           query_timeout_seconds,
@@ -5398,12 +5425,17 @@ function AgentSettingsForm({
           Read at the start of every question, so a change applies to the next question without a restart. A model
           can be chosen when it has a price in settings.json, so its cost can be counted; prices are edited in the file.
         </p>
+        <p>
+          <strong>Reasoning effort</strong> is sent only to reasoning models (gpt-5 and later), which think before they
+          answer; the thinking is billed as output tokens. Higher effort can give better answers but is slower and costs
+          more. It has no effect on other models.
+        </p>
       </div>
       <div className="agent-settings">
         <div className="agent-settings-grid">
           <fieldset className="agent-settings-group">
             <legend>Models</legend>
-            {Object.entries(draft.models).map(([step, model]) => (
+            {inFlowOrder(draft.models, AGENT_MODEL_STEP_ORDER).map(([step, model]) => (
               <label key={step} className="agent-settings-field">
                 <span>{step}</span>
                 <select value={model} onChange={(event) => update("models", { ...draft.models, [step]: event.target.value })}>
@@ -5415,6 +5447,30 @@ function AgentSettingsForm({
                 </select>
               </label>
             ))}
+          </fieldset>
+
+          <fieldset className="agent-settings-group">
+            <legend>Reasoning effort</legend>
+            {inFlowOrder(draft.reasoning_effort, AGENT_MODEL_STEP_ORDER).map(([step, effort]) => {
+              const isReasoning = reasoningModels.includes(draft.models[step]);
+              return (
+                <label key={step} className="agent-settings-field">
+                  <span>{step}</span>
+                  <select
+                    value={effort}
+                    disabled={!isReasoning}
+                    title={isReasoning ? undefined : "The chosen model is not a reasoning model."}
+                    onChange={(event) => update("reasoning_effort", { ...draft.reasoning_effort, [step]: event.target.value })}
+                  >
+                    {reasoningEfforts.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              );
+            })}
           </fieldset>
 
           <fieldset className="agent-settings-group">
@@ -5435,7 +5491,7 @@ function AgentSettingsForm({
 
           <fieldset className="agent-settings-group">
             <legend>Specialists</legend>
-            {Object.entries(draft.specialists).map(([name, isOn]) => (
+            {inFlowOrder(draft.specialists, AGENT_SPECIALIST_ORDER).map(([name, isOn]) => (
               <AgentCheckField
                 key={name}
                 label={name}

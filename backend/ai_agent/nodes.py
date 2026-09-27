@@ -18,7 +18,7 @@ from pipeline_staleness import STAGE_LABELS, compute_staleness, read_pipeline_st
 from .followup import run_explorer, run_followup
 from .prompts import ANSWER_PROMPT, PLANNER_PROMPT
 from .retrieval import find_entry_points
-from .settings import SPECIALISTS, enabled_specialists, load_settings
+from .settings import SPECIALISTS, enabled_specialists, load_settings, reasoning_args
 from .specialists import run_specialist
 from .usage import response_usage, total_cost
 
@@ -26,6 +26,7 @@ QuestionType = Literal["smalltalk", "lookup", "why", "ranking", "who", "timeline
 SpecialistName = Literal["sources", "causes", "architecture", "people"]
 
 _BRACKET_PATTERN = re.compile(r"\[([^\[\]]+)\]")
+FACT_LABEL = "Fact"  # citation label of a fact, which is not a graph node
 
 
 class PlanOut(BaseModel):
@@ -99,6 +100,7 @@ def planner(state, config):
         instructions=PLANNER_PROMPT,
         input=_format_history(state.get("recent_history", [])) + f"Question: {state['question']}",
         text_format=PlanOut,
+        **reasoning_args(settings, "planner"),
     )
     parsed: PlanOut = response.output_parsed
     enabled = enabled_specialists(settings)
@@ -254,9 +256,14 @@ def explorer(state, config):
 # ---------------------------------------------------------------------------
 
 def _evidence_text(evidence: list[dict]) -> tuple[str, dict[str, dict]]:
-    """Evidence as prompt text, and reference -> node metadata for citation checking."""
+    """Evidence as prompt text, and reference -> citation metadata for citation checking.
+
+    Facts have no node, so each distinct fact gets its own reference `fact-N` (numbered per question), so a claim
+    that rests on a fact can be cited like one that rests on a node.
+    """
     lines: list[str] = []
     references: dict[str, dict] = {}
+    fact_references: dict[str, str] = {}
     for packet in evidence:
         if not packet["nodes"] and not packet["facts"]:
             continue
@@ -267,7 +274,10 @@ def _evidence_text(evidence: list[dict]) -> tuple[str, dict[str, dict]]:
             when = f"; time: {node['at']}" if node.get("at") else ""
             lines.append(f"[{reference}]\ntype: {node['label']}{when}\n{node['text']}\n")
         for fact in packet["facts"]:
-            lines.append(f"Fact: {fact}\n")
+            if fact not in fact_references:
+                fact_references[fact] = f"fact-{len(fact_references) + 1}"
+                references[fact_references[fact]] = {"label": FACT_LABEL, "display_name": fact}
+            lines.append(f"[{fact_references[fact]}]\nFact: {fact}\n")
     return "\n".join(lines), references
 
 
@@ -321,7 +331,9 @@ def answer(state, config):
     client = config["configurable"]["client"]
     model = settings["models"]["answer"]
     parts: list[str] = []
-    with client.responses.stream(model=model, instructions=ANSWER_PROMPT, input=prompt_input) as stream:
+    with client.responses.stream(
+        model=model, instructions=ANSWER_PROMPT, input=prompt_input, **reasoning_args(settings, "answer"),
+    ) as stream:
         for event in stream:
             if event.type == "response.output_text.delta":
                 writer({"type": "token", "text": event.delta})

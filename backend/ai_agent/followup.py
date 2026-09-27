@@ -16,6 +16,7 @@ from cypher_guard import enforce_read_only
 
 from .db import fetch_nodes, node_text, read
 from .prompts import EXPLORER_PROMPT, followup_prompt
+from .settings import reasoning_args
 from .specialists import SOURCE_LABELS
 from .usage import response_usage
 
@@ -288,6 +289,7 @@ def run_followup(name: str, session, client, question: str, packet: dict, settin
     for round_index in range(config["max_rounds"]):
         response = client.responses.create(
             model=model, instructions=followup_prompt(name), input=input_items, tools=schemas, parallel_tool_calls=True,
+            **reasoning_args(settings, "specialists"),
         )
         usage.append(response_usage(settings, name, model, response))
         calls = _function_calls(response)[: config["max_calls_per_round"]]
@@ -345,7 +347,9 @@ def run_explorer(session, client, question: str, evidence: list[dict], reason: s
     facts: list[str] = []
     log: list[str] = []
     for _ in range(config["max_queries"]):
-        response = client.responses.create(model=model, instructions=EXPLORER_PROMPT, input=input_items, tools=[tool])
+        response = client.responses.create(
+            model=model, instructions=EXPLORER_PROMPT, input=input_items, tools=[tool], **reasoning_args(settings, "explorer"),
+        )
         usage.append(response_usage(settings, "explorer", model, response))
         calls = _function_calls(response)[:1]
         if not calls:

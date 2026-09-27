@@ -12,8 +12,14 @@ SETTINGS_PATH = Path(__file__).with_name("settings.json")
 
 SPECIALISTS = ("sources", "causes", "architecture", "people")
 
+# Reasoning models take `reasoning.effort`; other models reject it, so it is sent only to these. Every reasoning model
+# given a price in settings.json must accept all of REASONING_EFFORTS (the gpt-6 and gpt-5.6 models do).
+REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+REASONING_EFFORTS = ("none", "low", "medium", "high")
+
 DEFAULTS = {
     "models": {"planner": "gpt-4o", "specialists": "gpt-4o", "explorer": "gpt-4o", "answer": "gpt-4o"},
+    "reasoning_effort": {"planner": "none", "specialists": "none", "explorer": "low", "answer": "low"},
     "history_turns": 3,
     "budget_usd_per_question": 0.05,
     "specialists": {name: True for name in SPECIALISTS},
@@ -53,12 +59,23 @@ def available_models(settings: dict) -> list[str]:
     return sorted(model for model in settings["prices_usd_per_million_tokens"] if not model.startswith("text-embedding"))
 
 
+def is_reasoning_model(model: str) -> bool:
+    return model.startswith(REASONING_MODEL_PREFIXES)
+
+
+def reasoning_args(settings: dict, step: str) -> dict:
+    """Extra arguments for a model call of `step`: the reasoning effort, only when the step's model is a reasoning model."""
+    if not is_reasoning_model(settings["models"][step]):
+        return {}
+    return {"reasoning": {"effort": settings["reasoning_effort"][step]}}
+
+
 class SettingsError(ValueError):
     pass
 
 
 # Settings that the Configure AI agent tab may change: (group, key) -> (type, minimum, maximum). Models are checked
-# against `available_models`; prices are edited in the file only.
+# against `available_models`, reasoning efforts against REASONING_EFFORTS; prices are edited in the file only.
 EDITABLE_NUMBERS = {
     (None, "history_turns"): (int, 0, 10),
     (None, "budget_usd_per_question"): (float, 0.001, 1.0),
@@ -93,6 +110,13 @@ def save_settings(update: dict) -> dict:
             raise SettingsError(f"Model {model} has no price in settings.json; choose one of {', '.join(models)}.")
         changed["models"][step] = model
 
+    for step, effort in (update.get("reasoning_effort") or {}).items():
+        if step not in current["reasoning_effort"]:
+            raise SettingsError(f"Unknown reasoning effort step: {step}.")
+        if effort not in REASONING_EFFORTS:
+            raise SettingsError(f"Reasoning effort must be one of {', '.join(REASONING_EFFORTS)}.")
+        changed["reasoning_effort"][step] = effort
+
     for name, value in (update.get("specialists") or {}).items():
         if name not in SPECIALISTS or not isinstance(value, bool):
             raise SettingsError(f"Invalid specialist setting: {name}.")
@@ -100,7 +124,7 @@ def save_settings(update: dict) -> dict:
 
     editable_groups = {group for group, _ in EDITABLE_NUMBERS if group} | {group for group, _ in EDITABLE_FLAGS}
     for key, value in update.items():
-        if key in ("models", "specialists"):
+        if key in ("models", "reasoning_effort", "specialists"):
             continue
         if isinstance(value, dict):
             if key not in editable_groups:
