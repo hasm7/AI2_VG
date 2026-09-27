@@ -5190,6 +5190,53 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
       </div>
 
       <h4 className="knowledge-card-title knowledge-section-title">
+        Entry points <span className="knowledge-section-kind">(where every chosen specialist starts, for the latest question)</span>
+      </h4>
+      {!lastRun ? (
+        <p className="reference-empty">No question asked yet. Ask one in Chat with AI and come back here.</p>
+      ) : lastRun.plan?.route === "smalltalk" ? (
+        <p className="reference-empty">Small talk: the graph was not searched.</p>
+      ) : lastRun.entry_points.length === 0 ? (
+        <p className="reference-empty">No entry points were found, so no specialist was started.</p>
+      ) : (
+        <>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th className="reference-cell-center">#</th>
+                  <th>
+                    Node <span className="knowledge-section-kind">(property display_name)</span>
+                  </th>
+                  <th>
+                    Type <span className="knowledge-section-kind">(node label)</span>
+                  </th>
+                  <th>Found by</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lastRun.entry_points.map((point, index) => (
+                  <tr key={point.id}>
+                    <td className="reference-cell-center">{index + 1}</td>
+                    <td className="reference-cell-wrap">{point.name}</td>
+                    <td>{point.label}</td>
+                    <td>{point.via.join(", ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="knowledge-table-caption">
+            <p>
+              <strong>Found by:</strong> lookup = an exact issue key, PR, document id or name in the question; vector =
+              similar meaning (searchable_embedding); fulltext = the same words (searchable_text). Listed best first: a
+              node found high up by several searches comes first.
+            </p>
+          </div>
+        </>
+      )}
+
+      <h4 className="knowledge-card-title knowledge-section-title">
         Last run <span className="knowledge-section-kind">(the latest question in Chat with AI)</span>
       </h4>
       {lastRun ? (
@@ -5208,7 +5255,13 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
               <p>
                 <strong>Plan:</strong> {lastRun.plan.route === "smalltalk" ? "small talk" : "graph question"}; types{" "}
                 {lastRun.plan.question_types.join(", ")}; specialists {lastRun.plan.specialists.join(", ") || "-"};
-                keywords {lastRun.plan.keywords_en.join(", ") || "-"}
+                keywords {lastRun.plan.keywords_en.join(", ") || "-"}; entities {lastRun.plan.entities.join(", ") || "-"};
+                language {lastRun.plan.language || "-"}
+              </p>
+            ) : null}
+            {lastRun.plan?.reason ? (
+              <p>
+                <strong>Planner's reason:</strong> {lastRun.plan.reason}
               </p>
             ) : null}
             {lastRun.sufficiency ? (
