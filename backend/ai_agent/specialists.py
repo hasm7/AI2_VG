@@ -156,8 +156,17 @@ def _packet(session, name: str, queries: list, entry_ids: list[str], settings: d
     return {"specialist": name, "nodes": nodes, "facts": [], "candidates": len(priorities)}
 
 
+def _add_participation(session, packet: dict, entry_ids: list[str], settings: dict) -> None:
+    """Adds who took part in an entry meeting or mail. Used by both `sources` and `people`, so the answer does not
+    depend on which of the two the planner picks."""
+    for row in read(session, PARTICIPATION, {"ids": entry_ids}, settings["query_timeout_seconds"]):
+        packet["nodes"].append({**row, "priority": 1})
+
+
 def sources(session, entry_ids, plan, settings):
-    return _packet(session, "sources", SOURCES_QUERIES, entry_ids, settings, {"labels": SOURCE_LABELS})
+    packet = _packet(session, "sources", SOURCES_QUERIES, entry_ids, settings, {"labels": SOURCE_LABELS})
+    _add_participation(session, packet, entry_ids, settings)
+    return packet
 
 
 def causes(session, entry_ids, plan, settings):
@@ -170,9 +179,8 @@ def architecture(session, entry_ids, plan, settings):
 
 def people(session, entry_ids, plan, settings):
     packet = _packet(session, "people", PEOPLE_QUERIES, entry_ids, settings, {"activity": PERSON_ACTIVITY_TYPES})
+    _add_participation(session, packet, entry_ids, settings)
     timeout = settings["query_timeout_seconds"]
-    for row in read(session, PARTICIPATION, {"ids": entry_ids}, timeout):
-        packet["nodes"].append({**row, "priority": 1})
     # Ranking questions are answered from the metric properties directly, not from search.
     if "ranking" in plan.get("question_types", []):
         persons = read(session, RANKING_PERSONS, None, timeout)
