@@ -17,6 +17,28 @@ same types, never new types**. The agent's specialists therefore keep covering e
 - **Embeddings**: incremental (only changed texts are re-embedded), capped lists in every text, chunking of long
   texts, batching and retries (`docs/EMBEDDING_LAYER_HANDOFF.md`, sections 5.0, 5.7, 8).
 
+## A few times today's data (300-400 nodes)
+
+Assessed 2026-09-27 (today's graph: 107 nodes). Three to four times today's size needs no changes; the list below
+becomes relevant at thousands of nodes.
+
+- Speed: queries stay in milliseconds, far from the 10 s query timeout.
+- Cost per question: unchanged, since every agent step has a fixed cap.
+- Traversal: the same node and relationship types, so the same fixed paths; only more candidates.
+- Graph panel: 300-400 nodes draw without problems; `Full graph` gets denser to read.
+- Embeddings: more nodes to embed the first time, still a few cents.
+- LLM layer builds: bundles about three times larger, well within the models' limits; a full rebuild costs about
+  three times today's.
+
+The one thing that can start to show: "who has the most ..." questions about people. Today all five eligible person
+profiles fit in the evidence (at most 8 nodes per specialist), and each profile carries its activity counts, so the
+answer compares everyone. With more than 8 eligible persons the answer compares only the profiles that were fetched and
+can miss someone without saying so. The explorer already counts over the whole graph for questions the planner types
+as `ranking` without metrics (seen 2026-09-27 with "which file changed most"), which covers part of this.
+
+When the data is loaded: rebuild the layers, update the test questions' expected names, run the test set, and ask a
+few "who has the most ..." questions to check that the answers hold.
+
 ## Must be fixed before large data
 
 ### Agent (`backend/ai_agent/`)
