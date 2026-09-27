@@ -134,5 +134,7 @@ def find_entry_points(session, client, question: str, plan: dict, settings: dict
         "vector_hits": len(vector_rows),
         "fulltext_hits": len(fulltext_rows),
         "fulltext_query": _phrase_query(fulltext_terms),
+        # Kept so the specialists can rank their candidates by similarity to the question without a second embedding.
+        "vector": vector,
     }
     return entry_points, [usage_entry], details

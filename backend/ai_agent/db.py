@@ -39,6 +39,21 @@ def node_text(row: dict, max_chars: int) -> str:
     return text
 
 
+SIMILARITIES = """
+MATCH (n) WHERE elementId(n) IN $ids AND n.embedding IS NOT NULL
+RETURN elementId(n) AS id, vector.similarity.cosine(n.embedding, $vector) AS similarity
+"""
+
+
+def similarities(session, ids: list[str], vector: list[float] | None, timeout: float) -> dict[str, float]:
+    """Each node's similarity to the question (cosine of the stored embedding and the question's). Nodes without an
+    embedding (`Issue`, `Document`, `TeamsMeeting`) are left out."""
+    if not ids or not vector:
+        return {}
+    rows = read(session, SIMILARITIES, {"ids": ids, "vector": vector}, timeout)
+    return {row["id"]: row["similarity"] for row in rows}
+
+
 def fetch_nodes(session, ids: list[str], timeout: float) -> dict[str, dict]:
     if not ids:
         return {}

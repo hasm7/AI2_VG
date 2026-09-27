@@ -70,12 +70,23 @@ its follow-up), keeps `max_nodes_per_specialist`, and returns their `embedding_t
 already carries each node's context from every layer. Nodes without an embedded text (`Issue`, `Document`) get a short
 fallback text.
 
+**Selection among equal priority** (added 2026-09-28). Among candidates of the same priority, the ones most similar
+to the question are kept: the cosine between the question's embedding (`question_vector`, computed once in `entry`
+and passed to the specialists) and each node's stored `embedding`, computed in Neo4j (`db.similarities`,
+`vector.similarity.cosine`). Nodes without an embedding (`Issue`, `Document`, `TeamsMeeting`) come after those with
+one; equal similarity falls back to time, oldest first. The kept nodes are then listed in time order. Before, equal
+priority was decided by time alone, oldest first, so early, general records were kept and later, more relevant ones
+were cut once there were more candidates than places. The follow-up's extra nodes are chosen the same way (below).
+Test set after the change: 14 of 14, $0.104, the same as before. The test set has no question where more candidates
+than places decide the answer, so it shows no gain either; that shows only with more data or such a question.
+
 ## 4. Model Follow-up and Explorer (`followup.py`)
 
 **Specialist follow-up.** After the code fetch, one model call (`models.specialists`) sees the question and a compact
 view of the packet (label, name and a 160-character snippet per node, not the full texts). It either replies DONE or
 calls up to `max_calls_per_round` of its own tools; there are `max_rounds` rounds (1 by default, so the results are not
-sent back to the model). At most `max_extra_nodes` new nodes are added. It is skipped when the budget is already spent.
+sent back to the model). At most `max_extra_nodes` new nodes are added, the most similar to the question first (nodes
+without an embedding after, in the order the tools gave them). It is skipped when the budget is already spent.
 A failed follow-up only means no extra evidence; it is not an error.
 
 | Specialist | Tools (fixed, parameterised Cypher; name arguments are resolved case-insensitively) |
@@ -113,6 +124,7 @@ The executed queries are listed in the trace.
 | `settings`, `staleness` | Settings for this question; `{stage: {stale, reasons}}` | overwrite |
 | `plan` | `standalone_question`, `question_types`, `language`, `entities`, `keywords_en`, `specialists`, `route`, `reason` | overwrite |
 | `entry_points` | `id`, `label`, `name`, `score`, `via` (lookup, vector, fulltext) | overwrite |
+| `question_vector` | The question's embedding from `entry`, passed to the specialists to rank their candidates | overwrite |
 | `evidence` | One packet per specialist and the explorer: `specialist`, `nodes` (`id`, `label`, `name`, `at`, `priority`, `text`), `facts`, `candidates`, `errors`, `followup` (log), `ms` | **appended** |
 | `sufficiency`, `explorer_ran` | `{ok, reason}`; whether the explorer ran | overwrite |
 | `final_answer`, `citations`, `dropped_citations` | The answer; resolved and unresolved references | overwrite |
@@ -339,7 +351,7 @@ Proposals (not decided):
 | `backend/ai_agent/followup.py` | Follow-up tools per specialist, `run_followup`, `run_explorer` |
 | `backend/ai_agent/describe.py` | `NODE_INFO`, `EDGE_LABELS`, `STATE_DESCRIPTIONS`, `describe_agent` for `GET /api/ai/agent` |
 | `backend/ai_agent/evaluation.py`, `test_questions.json` | Test questions, scoring in code, `run_evaluation`, saved last run and history |
-| `backend/ai_agent/db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text` |
+| `backend/ai_agent/db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text`, `similarities` (each node's similarity to the question) |
 | `backend/ai_agent/state.py` | `AgentState` |
 | `backend/ai_agent/prompts.py` | `PLANNER_PROMPT`, `ANSWER_PROMPT`, `followup_prompt`, `EXPLORER_PROMPT` |
 | `backend/ai_agent/settings.py`, `settings.json` | Settings and defaults, `available_models`, `save_settings` with validation (`EDITABLE_NUMBERS`, `EDITABLE_FLAGS`) |

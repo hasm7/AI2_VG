@@ -214,6 +214,7 @@ def entry(state, config):
         return {"entry_points": [], "errors": [_error("entry", "hybrid_search", str(error))], "_summary": "failed"}
     return {
         "entry_points": entry_points,
+        "question_vector": details["vector"],
         "usage": usage,
         "_summary": (
             f"{len(entry_points)} entry points (lookup {details['lookup_hits']}, vector {details['vector_hits']}, "
@@ -231,6 +232,7 @@ def dispatch_specialists(state):
         "question": search_question(state),
         "plan": state["plan"],
         "entry_points": state["entry_points"],
+        "question_vector": state.get("question_vector") or [],
         "settings": state["settings"],
         # Parallel specialists cannot see each other's spending; each checks the budget as it stood at the fan-out.
         "usage": list(state.get("usage") or []),
@@ -251,14 +253,16 @@ def make_specialist(name: str):
     def specialist(state, config):
         configurable = config["configurable"]
         settings = state["settings"]
+        question_vector = state.get("question_vector") or []
         followup = None
         if settings["specialist_followup"]["enabled"] and _within_budget(state):
             def followup(session, packet):
-                return run_followup(name, session, configurable["client"], state["question"], packet, settings)
+                return run_followup(name, session, configurable["client"], state["question"], packet, settings,
+                                    question_vector)
 
         packet, usage = run_specialist(
             name, configurable["driver"], configurable["database"],
-            [point["id"] for point in state["entry_points"]], state["plan"], settings, followup,
+            [point["id"] for point in state["entry_points"]], state["plan"], settings, followup, question_vector,
         )
         errors = [_error(name, name, message) for message in packet["errors"]]
         followup_note = "; follow-up: " + " | ".join(packet.get("followup", ["off"]))

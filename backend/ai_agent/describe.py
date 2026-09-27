@@ -37,23 +37,23 @@ NODE_INFO = {
               "description": "Finds the entry points for the standalone question: exact lookup of keys and names, "
                              "vector search on searchable_embedding, fulltext on searchable_text, merged by reciprocal "
                              "rank fusion. One embedding call. Then starts the chosen specialists in parallel.",
-              "reads": ["question", "plan", "settings", "usage"], "writes": ["entry_points", "usage", "errors"]},
+              "reads": ["question", "plan", "settings", "usage"], "writes": ["entry_points", "question_vector", "usage", "errors"]},
     "sources": {"kind": "code + model", "model_key": "specialists", "title": "Sources specialist",
                 "description": "Source records around the entry points: versions, comments, reviews, code changes, "
                                "mentions, event evidence. Follow-up tools: get_timeline, get_conversation, search_sources.",
-                "reads": ["question", "plan", "entry_points", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
+                "reads": ["question", "plan", "entry_points", "question_vector", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
     "causes": {"kind": "code + model", "model_key": "specialists", "title": "Causes specialist",
                "description": "Events, causal links and root causes around the entry points. Follow-up tools: "
                               "get_causal_chain, get_root_causes, search_causes.",
-               "reads": ["question", "plan", "entry_points", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
+               "reads": ["question", "plan", "entry_points", "question_vector", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
     "architecture": {"kind": "code + model", "model_key": "specialists", "title": "Architecture specialist",
                      "description": "Components, dependencies and affected components around the entry points. "
                                     "Follow-up tools: get_component, get_file_history, search_architecture.",
-                     "reads": ["question", "plan", "entry_points", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
+                     "reads": ["question", "plan", "entry_points", "question_vector", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
     "people": {"kind": "code + model", "model_key": "specialists", "title": "People specialist",
                "description": "Persons, expertise, collaboration and communities; metric rankings for ranking "
                               "questions. Follow-up tools: get_person, get_experts, rank.",
-               "reads": ["question", "plan", "entry_points", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
+               "reads": ["question", "plan", "entry_points", "question_vector", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
     "check": {"kind": "code", "title": "Check",
               "description": "Is the evidence enough? No entry points, no evidence, a why question without causal "
                              "evidence, or a ranking question without metrics means no.",
@@ -103,6 +103,8 @@ STATE_DESCRIPTIONS = {
     "plan": "standalone_question (searched with), question_types, language, entities, keywords_en, specialists, "
             "route, reason.",
     "entry_points": "Nodes the question enters the graph through, with score and how they were found.",
+    "question_vector": "The question's embedding from the entry step; the specialists keep the candidates most "
+                       "similar to it when more are found than fit.",
     "evidence": "One packet per specialist (and the explorer): nodes with their texts, facts, follow-up log.",
     "sufficiency": "Whether the evidence was judged enough, and why.",
     "explorer_ran": "Whether the explorer has run (it runs at most once).",

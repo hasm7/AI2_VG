@@ -50,8 +50,23 @@ few "who has the most ..." questions to check that the answers hold.
 | `specialists.py`, `PARTICIPATION` | Lists every participant of a meeting and every recipient of a mail | Cap the names, with "and N more" |
 | `followup.py`, `RESOLVE`, `FILE_HISTORY` | `CONTAINS` over all nodes or files, no index: slow on a large graph, may hit the 10 s timeout | Resolve names through the fulltext index `entity_lookup` (or an index on `File.path`); `LIMIT` on `FILE_HISTORY` |
 | `followup.py`, `CONVERSATION` | Collects a whole meeting before its `LIMIT 12` | Take segments near the given one by `sequence_number` |
-| Selection in `specialists._packet` | With many relevant nodes, "closest to the entry point, then time" becomes too coarse to pick the right 8 | Rank by search score as well; measure with the test set |
+| Selection in `specialists._packet` | With many relevant nodes, "closest to the entry point, then time" becomes too coarse to pick the right 8 | Done 2026-09-28: equal priority is now decided by similarity to the question (`docs/AI_AGENT_HANDOFF.md`, section 3). Measure with the test set on the large data |
 | `test_questions.json` | Written for today's graph; expected names may change | Add questions for the new data; keep running the set after each change |
+
+**When to add `LIMIT` to the specialist queries** (discussed 2026-09-27, not done). `LIMIT` only protects speed; it
+is not needed today (a specialist fetches at most a few dozen candidates) and most likely not at about 1000 nodes
+either (a few hundred candidates at worst, fetched in milliseconds, far from the 10 s query timeout). At that size the
+problem is which 8 nodes are kept, not speed. Add it when the graph grows to several thousand nodes and a question is
+measurably slow. Two rules, or `LIMIT` makes answers worse without showing it:
+
+- **Sort each query the same way as the final selection** in `specialists._packet` (priority, then time), with a limit
+  well above `max_nodes_per_specialist`. Otherwise a node that would have been among the 8 is cut before it is ranked.
+- **Never `LIMIT` a list that is the answer itself**, such as meeting participants or mail recipients (`PARTICIPATION`).
+  Cap those with "and N more" instead, so the answer knows there are more.
+
+Check before committing: save what every specialist fetches for every test question (read-only, no model calls),
+add the limits, and compare; with today's data the result must be identical node for node. This does not show that the
+limits choose well on large data; only a run on the large data does.
 
 ### Layer builds (LLM layers)
 

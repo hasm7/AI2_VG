@@ -14,7 +14,7 @@ import re
 
 from cypher_guard import enforce_read_only
 
-from .db import fetch_nodes, node_text, read
+from .db import fetch_nodes, node_text, read, similarities
 from .prompts import EXPLORER_PROMPT, followup_prompt
 from .settings import reasoning_args
 from .specialists import SOURCE_LABELS
@@ -271,7 +271,8 @@ def _echo(call) -> dict:
     return {"type": "function_call", "call_id": call.call_id, "name": call.name, "arguments": call.arguments}
 
 
-def run_followup(name: str, session, client, question: str, packet: dict, settings: dict) -> list[dict]:
+def run_followup(name: str, session, client, question: str, packet: dict, settings: dict,
+                 question_vector: list[float] | None = None) -> list[dict]:
     """Extends `packet` in place. Returns the usage entries of the model calls made."""
     config = settings["specialist_followup"]
     timeout = settings["query_timeout_seconds"]
@@ -311,7 +312,11 @@ def run_followup(name: str, session, client, question: str, packet: dict, settin
                                               "output": json.dumps({"added_nodes": len(result["ids"]), "facts": result["facts"][:10]})}]
 
     known = {node["id"] for node in packet["nodes"]}
-    extra_ids = [i for i in new_ids if i not in known][: config["max_extra_nodes"]]
+    candidates = [i for i in new_ids if i not in known]
+    # The most similar to the question first (nodes without an embedding after, in the order the tools gave them).
+    similarity = similarities(session, candidates, question_vector, timeout)
+    candidates.sort(key=lambda i: (i not in similarity, -similarity.get(i, 0.0)))
+    extra_ids = candidates[: config["max_extra_nodes"]]
     rows = fetch_nodes(session, extra_ids, timeout)
     for node_id in extra_ids:
         if node_id in rows:

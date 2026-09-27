@@ -23,6 +23,7 @@ class AgentState(TypedDict, total=False):
 
     plan: dict  # standalone_question, question_types, language, entities, keywords_en, specialists, route, reason
     entry_points: list[dict]  # [{"id", "label", "name", "score", "via"}]
+    question_vector: list[float]  # the question's embedding from `entry`, used to rank the specialists' candidates
 
     evidence: Annotated[list[dict], operator.add]  # appended: one packet per specialist (and the explorer)
     sufficiency: dict  # {"ok": bool, "reason": str}

@@ -8,7 +8,7 @@ from every layer (causal lines, root causes, dependencies, experts, bus factor, 
 
 import time
 
-from .db import NODE_NAME, fetch_nodes, node_text, read
+from .db import NODE_NAME, fetch_nodes, node_text, read, similarities
 
 SOURCE_LABELS = [
     "MailMessage", "SlackMessage", "TeamsTranscriptSegment", "IssueVersion", "IssueComment",
@@ -131,14 +131,19 @@ def _collect(session, queries: list[tuple[int, str]], params: dict, timeout: flo
     return priorities
 
 
-def _packet(session, name: str, queries: list, entry_ids: list[str], settings: dict, extra_params: dict | None = None) -> dict:
+def _packet(session, name: str, queries: list, entry_ids: list[str], settings: dict, question_vector: list[float],
+            extra_params: dict | None = None) -> dict:
     limits = settings["evidence"]
     timeout = settings["query_timeout_seconds"]
     priorities = _collect(session, queries, {"ids": entry_ids, **(extra_params or {})}, timeout)
     rows = fetch_nodes(session, list(priorities), timeout)
+    similarity = similarities(session, list(priorities), question_vector, timeout)
 
-    # Best priority first, then by time; the kept nodes are then listed in time order.
-    ranked = sorted(rows.values(), key=lambda r: (priorities[r["id"]], r.get("at") or "9999", r["name"] or ""))
+    # Best priority first; among equal priority the most similar to the question (nodes without an embedding after
+    # those with one), then by time. The kept nodes are then listed in time order.
+    ranked = sorted(rows.values(), key=lambda r: (
+        priorities[r["id"]], r["id"] not in similarity, -similarity.get(r["id"], 0.0), r.get("at") or "9999", r["name"] or "",
+    ))
     kept = ranked[: limits["max_nodes_per_specialist"]]
     kept.sort(key=lambda r: (r.get("at") or "9999", r["name"] or ""))
 
@@ -163,22 +168,23 @@ def _add_participation(session, packet: dict, entry_ids: list[str], settings: di
         packet["nodes"].append({**row, "priority": 1})
 
 
-def sources(session, entry_ids, plan, settings):
-    packet = _packet(session, "sources", SOURCES_QUERIES, entry_ids, settings, {"labels": SOURCE_LABELS})
+def sources(session, entry_ids, plan, settings, question_vector):
+    packet = _packet(session, "sources", SOURCES_QUERIES, entry_ids, settings, question_vector, {"labels": SOURCE_LABELS})
     _add_participation(session, packet, entry_ids, settings)
     return packet
 
 
-def causes(session, entry_ids, plan, settings):
-    return _packet(session, "causes", CAUSES_QUERIES, entry_ids, settings)
+def causes(session, entry_ids, plan, settings, question_vector):
+    return _packet(session, "causes", CAUSES_QUERIES, entry_ids, settings, question_vector)
 
 
-def architecture(session, entry_ids, plan, settings):
-    return _packet(session, "architecture", ARCHITECTURE_QUERIES, entry_ids, settings)
+def architecture(session, entry_ids, plan, settings, question_vector):
+    return _packet(session, "architecture", ARCHITECTURE_QUERIES, entry_ids, settings, question_vector)
 
 
-def people(session, entry_ids, plan, settings):
-    packet = _packet(session, "people", PEOPLE_QUERIES, entry_ids, settings, {"activity": PERSON_ACTIVITY_TYPES})
+def people(session, entry_ids, plan, settings, question_vector):
+    packet = _packet(session, "people", PEOPLE_QUERIES, entry_ids, settings, question_vector,
+                     {"activity": PERSON_ACTIVITY_TYPES})
     _add_participation(session, packet, entry_ids, settings)
     timeout = settings["query_timeout_seconds"]
     # Ranking questions are answered from the metric properties directly, not from search.
@@ -202,7 +208,7 @@ SPECIALIST_FUNCTIONS = {"sources": sources, "causes": causes, "architecture": ar
 
 
 def run_specialist(name: str, driver, database: str, entry_ids: list[str], plan: dict, settings: dict,
-                   followup=None) -> tuple[dict, list[dict]]:
+                   followup=None, question_vector: list[float] | None = None) -> tuple[dict, list[dict]]:
     """Runs one specialist in its own read session (specialists run in parallel; a session is not thread-safe).
 
     `followup(session, packet) -> usage entries`, when given, extends the packet in the same session. Returns
@@ -212,7 +218,7 @@ def run_specialist(name: str, driver, database: str, entry_ids: list[str], plan:
     usage: list[dict] = []
     try:
         with driver.session(database=database, default_access_mode="READ") as session:
-            packet = SPECIALIST_FUNCTIONS[name](session, entry_ids, plan, settings)
+            packet = SPECIALIST_FUNCTIONS[name](session, entry_ids, plan, settings, question_vector or [])
             packet["errors"] = []
             if followup is not None:
                 try:
