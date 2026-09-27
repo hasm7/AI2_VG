@@ -59,14 +59,44 @@ either (a few hundred candidates at worst, fetched in milliseconds, far from the
 problem is which 8 nodes are kept, not speed. Add it when the graph grows to several thousand nodes and a question is
 measurably slow. Two rules, or `LIMIT` makes answers worse without showing it:
 
-- **Sort each query the same way as the final selection** in `specialists._packet` (priority, then time), with a limit
-  well above `max_nodes_per_specialist`. Otherwise a node that would have been among the 8 is cut before it is ranked.
+- **Sort each query the same way as the final selection** in `specialists._packet` (priority, then similarity to the
+  question, then time), with a limit well above `max_nodes_per_specialist`. Otherwise a node that would have been among
+  the 8 is cut before it is ranked. Similarity can be sorted on in Cypher with `vector.similarity.cosine`.
 - **Never `LIMIT` a list that is the answer itself**, such as meeting participants or mail recipients (`PARTICIPATION`).
   Cap those with "and N more" instead, so the answer knows there are more.
 
 Check before committing: save what every specialist fetches for every test question (read-only, no model calls),
 add the limits, and compare; with today's data the result must be identical node for node. This does not show that the
 limits choose well on large data; only a run on the large data does.
+
+**Intent rules per question type** (tried 2026-09-27, measured worse, reverted; not decided). The idea: let the
+planner's question types steer what a specialist fetches, for example the whole history of a version for a `timeline`
+question, the conversation around a message for a `why` question, the components that use a component for an `impact`
+question. It was built behind an on/off setting and measured on the test set:
+
+- With the setting off the code fetch was identical to before, node for node (checked for every node, specialist and
+  question type, without model calls).
+- With it on the result was worse: 15 of 18 against 16-17 of 18 off. The `timeline` rule for `sources` added every
+  version and comment of a parent at the same priority, and with only 8 places that pushed out the node the question
+  was about (`doc-001 v2` in "how did REQ-AUTH-SESSION change?"). A rule that took the start and the end of the
+  candidate list made it worse, since it mixed several histories in one list.
+- On today's data no question went from failing to passing with the rules on. That says little: every original test
+  question already passed without them, and the test set cannot show a gain (`docs/AI_AGENT_HANDOFF.md`, section 9).
+  More candidates than places is not rare even today: with a single entry point, `sources` had more than 8 in 3 of
+  107 cases (up to 29) and `causes` in 14 of 107 (up to 10), and a real question has up to 8 entry points whose
+  candidates add up.
+
+Since then the selection keeps the candidates most similar to the question (the `Selection in specialists._packet` row
+above), which covers much of what the rules were meant to do, without rules per question type.
+
+When the data has grown, in this order:
+
+1. Rebuild the layers and update the test questions' expected names.
+2. Add test questions where the selection decides the answer: a timeline ("from when it was created until it was
+   done", which needs both the first and the last version), a why question, a "who has the most ..." question.
+3. Run the test set. Only where a question fails because the right node was not kept, add one targeted rule (for
+   example: always keep the latest version of each history for a timeline question, grouped per history, never across
+   histories), and run the set again after each rule.
 
 ### Layer builds (LLM layers)
 

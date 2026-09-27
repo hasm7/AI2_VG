@@ -4907,6 +4907,7 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
   const [description, setDescription] = useState<AgentDescription | null>(null);
   const [error, setError] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [isStateShown, setIsStateShown] = useState(false);
   // Bumped after the settings are saved, so the drawing shows the new models and on/off states.
   const [descriptionVersion, setDescriptionVersion] = useState(0);
 
@@ -5149,6 +5150,13 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
       <h4 className="knowledge-card-title knowledge-section-title">
         State <span className="knowledge-section-kind">(AgentState, one per question)</span>
       </h4>
+      <div>
+        <button className="embedding-secondary-button" type="button" onClick={() => setIsStateShown((current) => !current)}>
+          {isStateShown ? "Hide state" : "Show state"}
+        </button>
+      </div>
+      {isStateShown ? (
+      <>
       <div className="knowledge-table-caption">
         <p>
           The data that flows between the nodes. <strong>Overwrite</strong>: a node's value replaces the previous one.{" "}
@@ -5163,9 +5171,9 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
               <th>Field</th>
               <th>Type</th>
               <th>Merge</th>
-              <th className="reference-cell-wrap">Written by</th>
-              <th className="reference-cell-wrap">Read by</th>
-              <th className="reference-cell-wrap">Meaning</th>
+              <th className="reference-cell-wrap agent-state-written">Written by</th>
+              <th className="reference-cell-wrap agent-state-read">Read by</th>
+              <th className="reference-cell-wrap agent-state-meaning">Meaning</th>
             </tr>
           </thead>
           <tbody>
@@ -5179,15 +5187,17 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
                   </td>
                   <td>{field.type}</td>
                   <td>{field.merge}</td>
-                  <td className="reference-cell-wrap">{field.written_by.join(", ") || "-"}</td>
-                  <td className="reference-cell-wrap">{field.read_by.join(", ") || "-"}</td>
-                  <td className="reference-cell-wrap">{field.description}</td>
+                  <td className="reference-cell-wrap agent-state-written">{field.written_by.join(", ") || "-"}</td>
+                  <td className="reference-cell-wrap agent-state-read">{field.read_by.join(", ") || "-"}</td>
+                  <td className="reference-cell-wrap agent-state-meaning">{field.description}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+      </>
+      ) : null}
 
       <h4 className="knowledge-card-title knowledge-section-title">
         Entry points <span className="knowledge-section-kind">(where every chosen specialist starts, for the latest question)</span>
@@ -5284,7 +5294,7 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
                   <th className="reference-cell-center">Cached</th>
                   <th className="reference-cell-center">Tokens out</th>
                   <th className="reference-cell-center">Cost</th>
-                  <th className="reference-cell-wrap">What happened</th>
+                  <th className="reference-cell-wrap agent-run-summary">What happened</th>
                 </tr>
               </thead>
               <tbody>
@@ -5303,7 +5313,7 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
                       <td className="reference-cell-center">
                         {calls.length > 0 ? formatUsd(calls.reduce((total, entry) => total + entry.cost_usd, 0)) : "-"}
                       </td>
-                      <td className="reference-cell-wrap">{step.summary}</td>
+                      <td className="reference-cell-wrap agent-run-summary">{step.summary}</td>
                     </tr>
                   );
                 })}
@@ -5357,7 +5367,7 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
         <p className="reference-empty">No questions asked in this session yet.</p>
       )}
 
-      <hr className="agent-section-divider" />
+      <hr className="agent-section-divider agent-section-divider-below-costs" />
 
       <AgentSettingsForm
         settings={description.settings}
@@ -5712,6 +5722,7 @@ function AgentTestQuestions() {
   const [liveResults, setLiveResults] = useState<AgentEvalResult[] | null>(null);
   const [progress, setProgress] = useState<{ index: number; total: number } | null>(null);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [isResultsShown, setIsResultsShown] = useState(false);
   const [error, setError] = useState("");
 
   const load = async () => {
@@ -5770,7 +5781,7 @@ function AgentTestQuestions() {
   return (
     <>
       <h4 className="knowledge-card-title knowledge-section-title">
-        Test questions <span className="knowledge-section-kind">(backend/ai_agent/test_questions.json)</span>
+        Test questions
       </h4>
       <div className="knowledge-table-caption">
         <p>
@@ -5814,8 +5825,15 @@ function AgentTestQuestions() {
       {error ? <p className="reference-error">{error}</p> : null}
 
       {results.length > 0 ? (
+        <div>
+          <button className="embedding-secondary-button" type="button" onClick={() => setIsResultsShown((current) => !current)}>
+            {isResultsShown ? "Hide questions and results" : "Show questions and results"}
+          </button>
+        </div>
+      ) : null}
+      {results.length > 0 && !isResultsShown ? null : results.length > 0 ? (
         <div className={`reference-table-wrapper reference-table-wrapper-capped${hasHistory ? "" : " layer-last-table"}`}>
-          <table className="reference-table">
+          <table className="reference-table agent-test-table">
             <thead>
               <tr>
                 <th>#</th>
@@ -5823,7 +5841,7 @@ function AgentTestQuestions() {
                 <th className="reference-cell-center">Result</th>
                 <th className="reference-cell-wrap">Evidence (expected nodes found / cited)</th>
                 <th className="reference-cell-wrap">Answer words and facts</th>
-                <th>Specialists</th>
+                <th className="agent-test-specialists">Specialists</th>
                 <th className="reference-cell-center">Cost</th>
                 <th className="reference-cell-center">Time (s)</th>
                 <th className="agent-test-answer-cell">Answer</th>
@@ -5864,7 +5882,7 @@ function AgentTestQuestions() {
                       <div className="agent-test-missing">error: {result.errors.map((e) => e.error).join("; ")}</div>
                     ) : null}
                   </td>
-                  <td>
+                  <td className="agent-test-specialists">
                     {(result.specialists ?? []).join(", ") || "-"}
                     {result.explorer_ran ? " + explorer" : ""}
                   </td>
@@ -5885,7 +5903,7 @@ function AgentTestQuestions() {
           <h4 className="knowledge-card-title knowledge-section-title">
             Test runs <span className="knowledge-section-kind">(latest first)</span>
           </h4>
-          <div className="reference-table-wrapper layer-last-table">
+          <div className="reference-table-wrapper agent-test-runs layer-last-table">
             <table className="reference-table">
               <thead>
                 <tr>

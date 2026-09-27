@@ -1444,6 +1444,7 @@ main {
 /* Configure AI agent: the agent flow drawing, node details and state highlighting. */
 .agent-panel {
   padding-top: 10px;
+  padding-right: 10px;
 }
 
 .agent-flow-wrapper {
@@ -1586,6 +1587,31 @@ main {
 }
 
 .agent-node-details code,
+/* State table: narrower fixed widths than the default 280px wrapping column. */
+.reference-table .agent-state-written {
+  width: 150px;
+  min-width: 150px;
+  max-width: 150px;
+}
+
+.reference-table .agent-state-read {
+  width: 180px;
+  min-width: 180px;
+  max-width: 180px;
+}
+
+.reference-table .agent-state-meaning {
+  width: 240px;
+  min-width: 240px;
+  max-width: 240px;
+}
+
+/* Last run, What happened: a table cell grows past its width for a long word without spaces (an explorer query,
+   a path), so such words are broken too, keeping the column at its fixed width. */
+.reference-table .agent-run-summary {
+  overflow-wrap: anywhere;
+}
+
 .agent-panel .reference-table code {
   background: #e0e7ff;
   border-radius: 3px;
@@ -1610,8 +1636,17 @@ main {
   margin-top: 32px;
 }
 
+.agent-section-divider-below-costs {
+  margin-top: 32px;
+}
+
 /* Conversation cost: scrolls once the conversation grows; the total stays above it. */
 .agent-session-costs {
+  max-height: 280px;
+}
+
+/* Test runs: up to 50 runs are kept, so the table scrolls. */
+.agent-test-runs {
   max-height: 280px;
 }
 
@@ -1697,7 +1732,21 @@ main {
 }
 
 .reference-table .agent-test-answer-cell {
-  min-width: 360px;
-  max-width: 480px;
+  width: 420px;
+  min-width: 420px;
+  max-width: 420px;
   white-space: pre-wrap;
+}
+
+/* Test results: fixed widths; long words without spaces (node names, paths) are broken so no column grows. */
+.agent-test-table .reference-cell-wrap,
+.agent-test-table .agent-test-answer-cell {
+  overflow-wrap: anywhere;
+}
+
+.reference-table .agent-test-specialists {
+  width: 130px;
+  min-width: 130px;
+  max-width: 130px;
+  white-space: normal;
 }

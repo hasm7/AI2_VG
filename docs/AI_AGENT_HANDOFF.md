@@ -80,6 +80,20 @@ were cut once there were more candidates than places. The follow-up's extra node
 Test set after the change: 14 of 14, $0.104, the same as before. The test set has no question where more candidates
 than places decide the answer, so it shows no gain either; that shows only with more data or such a question.
 
+How often a specialist has more candidates than places (`max_nodes_per_specialist` = 8), counted 2026-09-27 with
+every node in the graph as the single entry point (read-only, no model calls):
+
+| Specialist | Cases with more than 8 candidates | Most candidates |
+| --- | ---: | ---: |
+| `sources` | 3 of 107 | 29 |
+| `causes` | 14 of 107 | 10 |
+| `architecture` | 0 of 107 | 3 |
+| `people` | 0 of 107 | 4 |
+
+A real question has up to 8 entry points (`search.entry_points`), and their candidates add up, so more candidates than
+places happens more often than the table shows, most for `sources` and `causes`. How often per test question was not
+measured, since the test run does not store the entry points.
+
 ## 4. Model Follow-up and Explorer (`followup.py`)
 
 **Specialist follow-up.** After the code fetch, one model call (`models.specialists`) sees the question and a compact
@@ -222,14 +236,14 @@ come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 | --- | --- |
 | Agent flow | SVG drawn top-down: a node's row is its longest path from the start, so the parallel specialists share a row. Blue = code, violet = model call, green = code + bounded model follow-up, dark pills = start/end; a node turned off in the settings is faded. Dashed edges are conditional, with their label (the four Send edges share one). Edges that skip rows run in their own lane along the side. After a question in the chat, the nodes and edges it went through are amber, with time and cost under each node. Clicking a node selects it |
 | Node details | Title, kind, model, description, the state fields it reads and writes, and its last-run summary |
-| State | Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
+| State | Hidden until `Show state` is pressed (`Hide state` hides it again; hidden again after a reload). Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
 | Entry points | The nodes every chosen specialist started from for the latest chat question (all get the same question, plan and entry points; there is no separate message per specialist), as a table (number, node, label, found by lookup/vector/fulltext), best first by the fused score (not shown). The heading is always shown; before any question, for small talk, or when nothing was found, a short line says so |
 | Last run | Question, plan (route, types, specialists, keywords, entities, language), the planner's reason, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
 | Conversation cost | Every chat question since the page was loaded: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). A reload empties it, as it starts a new conversation. Test questions are not counted. A question that ends in an error is not listed |
 | Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, reasoning effort per step (a step's select is disabled while its model is not a reasoning model; the caption explains effort and its cost), budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. Model steps and specialists are listed in the order they run in the drawing (planner,
 specialists, explorer, answer; sources, causes, architecture, people), since the backend returns the keys
 alphabetically. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
-| Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models. The last part of the tab, so its last table has `layer-last-table` |
+| Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. The results table is hidden until `Show questions and results` is pressed (`Hide questions and results` hides it again; hidden again after a reload); its columns have fixed widths and break long words. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models. The last part of the tab, so its last table has `layer-last-table` |
 
 The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRunComplete` when a `done` event arrives.
 The same callback (`handleRunComplete`) appends the question and its cost to `sessionCosts` in `App`.
@@ -247,6 +261,15 @@ took part in a meeting, and small talk. Each question has an expected route, gro
 plus exact name or part of the name), expected facts and expected words in the answer. Scored in code: a question
 passes when the route, every evidence group, every fact group and every word group are right. Whether an expected node
 was also cited is shown but does not decide the pass. Every question runs without history.
+
+**What the test set can and cannot show** (noted 2026-09-28). The questions were written on 2026-09-25 while the agent
+was built, and some expected answers were adjusted after runs (q10, q12), so the set is partly fitted to how the agent
+already worked. All 14 pass, so the set can show that a change makes something worse (a passing question fails), but
+never that it makes something better. It is 14 questions, each run once, so a single result can be chance. It is a
+guard against breaking things, not a measure of answer quality. Changes whose gain is in choosing the right evidence
+(the selection by similarity to the question, section 3) cannot be judged by it. To measure that, write new questions
+the agent does not already pass, especially ones where the right node has to be kept among many candidates; they are
+best written from the grown data once it is loaded.
 
 The expected answers were written from the graph (read-only queries) and must be updated when an LLM layer is rebuilt
 and renames events, root causes or components. The last run is saved to `evaluation_last.json` and a summary per run to
@@ -339,6 +362,34 @@ Proposals (not decided):
   answer. Note: with no evidence, `check` answers "not enough" and the explorer would run, so `route_after_check`
   would also have to skip the explorer in this case, or the cost only moves there.
 - **Both**, with the second as a guard when the planner misses the first.
+
+### Open issue: `check` sees whether there is evidence, not whether it answers the question
+
+**Not decided. It has not been decided whether this will be fixed; the options below are proposals only.**
+
+`check` (`nodes.py`) says "not enough" only when there are no entry points, no evidence at all, a `why` question
+without causal evidence, or a `ranking` question without metrics. Otherwise it says "enough", counting the evidence
+items, and the explorer does not run. So when the specialists return evidence that is about the right subject but
+lacks what the question asks for, the explorer, which could have found it, never starts, and the answer says the
+evidence does not show it.
+
+Seen twice (2026-09-27): "Vilka var med på sprint review-mötet?" before meeting participants were added to `sources`
+(the transcript segments were evidence, the participant list was not; the answer named the speakers and said it could
+not tell whether Priya took part), and an answer that said the evidence did not show who approved `backend-api#42`,
+although `review-004` and `review-005` record it (the approvals were not among the 8 nodes kept). The second cause is
+reduced by the selection by similarity to the question (section 3), but `check` would still not notice it.
+
+Proposals (not decided):
+
+- **More rules in code.** Like the `why` and `ranking` rules: for `who`, persons or participation items in the
+  evidence; for `timeline`, evidence from more than one point in time. Cheap and predictable, but coarse: it cannot
+  tell whether they are the right persons or times.
+- **A cheap model judges the evidence.** One call (for example `gpt-6-luna`, effort `none`) sees the question and the
+  compact view of the evidence (as the follow-up does) and answers whether the answer is in it; no starts the explorer.
+  Addresses the cause, but adds a model call and some time to every graph question, and a wrong no runs the explorer
+  when it is not needed. Must be measured on the test set: passed questions, cost and how often the explorer runs.
+- **Nothing for now.** Add test questions that this weakness makes fail first, on the grown data; if they fail despite
+  the selection by similarity, the second proposal is the one that addresses the cause.
 
 ## 12. Code Map
 
