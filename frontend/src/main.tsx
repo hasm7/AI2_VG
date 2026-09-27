@@ -4419,6 +4419,49 @@ async function* readSseEvents<T = ChatSseEvent>(response: Response): AsyncGenera
   }
 }
 
+// A small "thinking" animation next to the agent's status text, in the style of the right panel's knowledge graphic:
+// an amber core that pulses, blue and turquoise nodes on lines circling it, and a turquoise ring turning the other way.
+// `still`: smaller and without motion, as the AI's icon on each of its answers.
+function ThinkingOrbit({ still = false }: { still?: boolean }) {
+  return (
+    <svg className={`thinking-orbit${still ? " thinking-orbit-still" : ""}`} viewBox="0 0 40 40" aria-hidden="true">
+      <ellipse className="thinking-ring" cx="20" cy="20" rx="17" ry="7" />
+      <g className="thinking-spin">
+        <line className="thinking-edge" x1="20" y1="20" x2="34" y2="12" />
+        <line className="thinking-edge" x1="20" y1="20" x2="7" y2="28" />
+        <line className="thinking-edge" x1="20" y1="20" x2="24" y2="4" />
+        <circle cx="34" cy="12" r="2.8" fill="#3b82f6" />
+        <circle cx="7" cy="28" r="2.4" fill="#22d3ee" />
+        <circle cx="24" cy="4" r="2" fill="#3b82f6" />
+      </g>
+      <circle className="thinking-core" cx="20" cy="20" r="5.5" fill="#fbbf24" />
+    </svg>
+  );
+}
+
+// Shows an AI answer a few characters at a time, fast, so it appears to be typed. When the text grows while the answer
+// streams in, it keeps going from where it is; when it falls far behind it speeds up to catch up.
+function TypewriterText({ text, onProgress }: { text: string; onProgress?: () => void }) {
+  const [shown, setShown] = useState(0);
+
+  useEffect(() => {
+    if (shown >= text.length) {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const behind = text.length - shown;
+      setShown((current) => Math.min(text.length, current + Math.max(2, Math.ceil(behind / 40))));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [shown, text]);
+
+  useEffect(() => {
+    onProgress?.();
+  }, [shown]);
+
+  return <>{text.slice(0, shown)}</>;
+}
+
 function ChatPanel({
   graphViewRef,
   onRunComplete,
@@ -4530,6 +4573,13 @@ function ChatPanel({
     }
   };
 
+  // Keeps the newest text in view while an answer is typed out.
+  const scrollToEnd = () => {
+    if (isVisible) {
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    }
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -4550,7 +4600,7 @@ function ChatPanel({
         ) : (
           messages.map((entry) => (
             <div key={entry.id} className={`chat-message chat-message-${entry.role}`}>
-              <div className="chat-message-role">{entry.role === "user" ? "You" : "AI"}</div>
+              {entry.role === "assistant" && (entry.content || entry.error) ? <ThinkingOrbit still /> : null}
               {entry.toolErrors && entry.toolErrors.length > 0 ? (
                 <div className="chat-tool-errors">
                   <strong>Verktygsfel — grafen kunde inte frågas helt ut:</strong>
@@ -4564,7 +4614,13 @@ function ChatPanel({
                 </div>
               ) : null}
               <div className="chat-message-content">
-                {entry.error ? <span className="reference-error">{entry.error}</span> : entry.content}
+                {entry.error ? (
+                  <span className="reference-error">{entry.error}</span>
+                ) : entry.role === "assistant" ? (
+                  <TypewriterText text={entry.content} onProgress={scrollToEnd} />
+                ) : (
+                  entry.content
+                )}
               </div>
               {entry.citations && entry.citations.length > 0 ? (
                 <div className="chat-citations">
@@ -4596,12 +4652,18 @@ function ChatPanel({
             </div>
           ))
         )}
-        {isStreaming && status ? <p className="chat-status">{status}</p> : null}
+        {isStreaming && status ? (
+          <div className="chat-status">
+            <ThinkingOrbit />
+            <span>{status}</span>
+          </div>
+        ) : null}
         <div ref={messagesEndRef} />
       </div>
 
       {error ? <p className="reference-error">{error}</p> : null}
 
+      <div className="chat-input-area">
       <div className="chat-input-row">
         <textarea
           className="ai-chat-input"
@@ -4609,7 +4671,6 @@ function ChatPanel({
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Write a message... (Enter to send, Shift+Enter for a new line)"
         />
         <button
           className="ai-send-button"
@@ -4619,6 +4680,7 @@ function ChatPanel({
         >
           {isStreaming ? "Thinking..." : "Send"}
         </button>
+      </div>
       </div>
     </div>
   );

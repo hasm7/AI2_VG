@@ -555,12 +555,22 @@ main {
 
 .chat-message-user {
   align-self: flex-end;
-  background: #eef2ff;
-  border-color: rgba(37, 99, 235, 0.28);
+  /* A quiet light grey, only a shade off the AI's bubble, so your own messages do not stand out. */
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+  /* The same font as the Send button. */
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
 .chat-message-assistant {
   align-self: flex-start;
+  /* Nearly invisible: slightly see-through white and no edge, enough to keep the grid lines out of the text. */
+  background: rgba(255, 255, 255, 0.72);
+  border-color: transparent;
+  /* Keeps the floated icon (.thinking-orbit-still) inside the bubble for a one-line answer. */
+  display: flow-root;
+  /* The same font as the Send button and your own messages. */
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 
 .chat-message-role {
@@ -634,15 +644,102 @@ main {
 
 .chat-status {
   align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* A typewriter font for the agent's steps, beside the thinking animation. */
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
   font-size: 11px;
   color: #64748b;
-  font-style: italic;
   margin: 0;
 }
 
-/* The message box: a card in the colour seen at the centre of the right panel's glow (.right-graphics-panel): the
-   same turquoise at 16 % over the same dark navy. Blue gradient edge as the side panels, floating above the grid;
-   it glows softly while you type. The text is light so it reads on the dark card. */
+/* The thinking animation beside the status text (ThinkingOrbit): the colours of the right panel's knowledge graphic. */
+.thinking-orbit {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  overflow: visible;
+}
+
+.thinking-ring {
+  fill: none;
+  stroke: rgb(8, 145, 178);
+  stroke-width: 1.2;
+  transform-origin: 20px 20px;
+  animation: thinking-turn 5s linear infinite reverse;
+}
+
+.thinking-spin {
+  transform-origin: 20px 20px;
+  animation: thinking-turn 2.4s linear infinite;
+}
+
+.thinking-edge {
+  stroke: #3b6380;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+}
+
+.thinking-core {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+
+/* The same figure, still and smaller, as the AI's icon at the top left of each answer; the text flows beside it. */
+.thinking-orbit-still {
+  width: 20px;
+  height: 20px;
+  float: left;
+  margin: 0 8px 0 0;
+  opacity: 0.85;
+}
+
+.thinking-orbit-still .thinking-ring,
+.thinking-orbit-still .thinking-spin,
+.thinking-orbit-still .thinking-core {
+  animation: none;
+}
+
+@keyframes thinking-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    transform: scale(0.85);
+  }
+
+  50% {
+    transform: scale(1.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-ring,
+  .thinking-spin,
+  .thinking-core {
+    animation: none;
+  }
+}
+
+/* The area below the messages: a straight divider, then the colour seen at the centre of the right panel's glow
+   (.right-graphics-panel: the same turquoise at 16 % over the same dark navy), reaching the edges of the tab panel
+   (its 10px padding is taken back with negative margins; the panel's rounded corners clip it). */
+.chat-input-area {
+  margin: 0 -10px -10px;
+  padding: 10px;
+  border-top: 1px solid #60a5fa;
+  background:
+    linear-gradient(rgba(34, 211, 238, 0.16), rgba(34, 211, 238, 0.16)),
+    #0b1220;
+}
+
+/* The message box: a white card with the blue gradient edge of the side panels. */
 .chat-input-row {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -652,35 +749,26 @@ main {
   border: 1px solid transparent;
   border-radius: 16px;
   background:
-    linear-gradient(rgba(34, 211, 238, 0.16), rgba(34, 211, 238, 0.16)) padding-box,
-    linear-gradient(#0b1220, #0b1220) padding-box,
+    linear-gradient(#ffffff, #ffffff) padding-box,
     linear-gradient(145deg, #0ea5e9 0%, #60a5fa 52%, #1d4ed8 100%) border-box;
   box-shadow:
     0 6px 18px rgba(29, 78, 216, 0.12),
     0 1px 3px rgba(15, 23, 42, 0.08);
-  transition: box-shadow 0.15s ease;
-}
-
-.chat-input-row:focus-within {
-  box-shadow:
-    0 0 0 3px rgba(96, 165, 250, 0.35),
-    0 8px 22px rgba(29, 78, 216, 0.18);
 }
 
 .chat-input-row .ai-chat-input {
-  min-height: 54px;
-  max-height: 140px;
+  min-height: 84px;
+  max-height: 260px;
   border: 0;
   padding: 8px 4px;
   background: transparent;
-  color: #e2e8f0;
-  caret-color: #67e8f9;
+  color: #0f172a;
   line-height: 1.45;
   outline: none;
 }
 
 .chat-input-row .ai-chat-input::placeholder {
-  color: rgba(186, 230, 253, 0.55);
+  color: #94a3b8;
 }
 
 .ai-send-button {
@@ -688,15 +776,17 @@ main {
   height: 36px;
   border: 0;
   border-radius: 999px;
-  background: linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%);
-  color: #ffffff;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  /* The amber of the core node in the right panel's knowledge graphic (.knowledge-core-node). */
+  background: #fbbf24;
+  /* A deep blue, from the page's blues, which reads well on the amber; a cleaner system font than the page's Arial. */
+  color: #1e3a8a;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
   padding: 0 18px;
   cursor: pointer;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+  box-shadow: 0 4px 12px rgba(251, 191, 36, 0.35);
   transition:
     transform 0.12s ease,
     box-shadow 0.12s ease;
@@ -704,18 +794,19 @@ main {
 
 .ai-send-button:not(:disabled):hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.45);
+  box-shadow: 0 6px 16px rgba(251, 191, 36, 0.45);
 }
 
 .ai-send-button:not(:disabled):active {
   transform: translateY(0);
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+  box-shadow: 0 2px 8px rgba(251, 191, 36, 0.35);
 }
 
+/* Off (no text yet, or an answer is on its way): the button keeps its full amber; only the faded text shows it. */
 .ai-send-button:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
-  box-shadow: none;
+  color: rgba(30, 58, 138, 0.38);
+  font-weight: 500;
 }
 
 .center-notes {
