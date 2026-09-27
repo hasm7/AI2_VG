@@ -5988,7 +5988,7 @@ function App() {
             Chat with AI
           </button>
         </div>
-        <div className="center-tab-panel" role="tabpanel">
+        <div className={`center-tab-panel${activeCenterTab === "message" ? " center-tab-panel-chat" : ""}`} role="tabpanel">
           <ChatPanel graphViewRef={graphViewRef} onRunComplete={handleRunComplete} isVisible={activeCenterTab === "message"} />
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
           {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} sessionCosts={sessionCosts} />}
