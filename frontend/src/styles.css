@@ -739,8 +739,10 @@ main {
     #0b1220;
 }
 
-/* The message box: a white card with the blue gradient edge of the side panels. */
+/* The message box: the chat's beige background with a grid (.center-tab-panel-chat) inside the blue gradient edge
+   of the side panels. */
 .chat-input-row {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px;
@@ -749,8 +751,11 @@ main {
   border: 1px solid transparent;
   border-radius: 16px;
   background:
-    linear-gradient(#ffffff, #ffffff) padding-box,
+    linear-gradient(rgba(37, 99, 235, 0.08) 1px, transparent 1px) padding-box,
+    linear-gradient(90deg, rgba(37, 99, 235, 0.08) 1px, transparent 1px) padding-box,
+    linear-gradient(#f3f0e8, #f3f0e8) padding-box,
     linear-gradient(145deg, #0ea5e9 0%, #60a5fa 52%, #1d4ed8 100%) border-box;
+  background-size: 28px 28px, 28px 28px, auto, auto;
   box-shadow:
     0 6px 18px rgba(29, 78, 216, 0.12),
     0 1px 3px rgba(15, 23, 42, 0.08);
@@ -771,6 +776,36 @@ main {
   color: #94a3b8;
 }
 
+/* New (chat): a small outlined box in quiet colours in the top right corner of the message box (.chat-input-row),
+   above Send, so the amber Send stays the main action. */
+.chat-new-button {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  height: 18px;
+  border: 1px solid #94a3b8;
+  border-radius: 4px;
+  background: transparent;
+  color: #475569;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.chat-new-button:hover:not(:disabled) {
+  border-color: #1d4ed8;
+  color: #1e3a8a;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.chat-new-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .ai-send-button {
   justify-self: start;
   height: 36px;
@@ -778,8 +813,11 @@ main {
   border-radius: 999px;
   /* The amber of the core node in the right panel's knowledge graphic (.knowledge-core-node). */
   background: #fbbf24;
-  /* A deep blue, from the page's blues, which reads well on the amber; a cleaner system font than the page's Arial. */
-  color: #1e3a8a;
+  /* Neon blue text that glows; a cleaner system font than the page's Arial. */
+  color: #0066ff;
+  text-shadow:
+    0 0 4px rgba(56, 189, 248, 0.9),
+    0 0 10px rgba(59, 130, 246, 0.7);
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   font-size: 13px;
   font-weight: 600;
@@ -802,10 +840,12 @@ main {
   box-shadow: 0 2px 8px rgba(251, 191, 36, 0.35);
 }
 
-/* Off (no text yet, or an answer is on its way): the button keeps its full amber; only the faded text shows it. */
+/* Off (no text yet, or an answer is on its way): the button keeps its full amber; only the faded text, without its
+   glow, shows it. */
 .ai-send-button:disabled {
   cursor: not-allowed;
   color: rgba(30, 58, 138, 0.38);
+  text-shadow: none;
   font-weight: 500;
 }
 

@@ -170,8 +170,8 @@ the summary and how many messages it covers; a message is dropped from the store
 failed summary call keeps the old summary and retries the same turns on the next question. With the summary off
 (`conversation_summary.enabled = false`), no summary is used or kept, and the store simply keeps the last 24 messages.
 
-Limit: the conversation lives in the backend's memory. A page reload (new `thread_id`) or a backend restart starts a
-new conversation.
+Limit: the conversation lives in the backend's memory. `New chat`, a page reload (both a new `thread_id`) or a
+backend restart starts a new conversation.
 
 ## 6. Settings
 
@@ -239,7 +239,7 @@ come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 | State | Hidden until `Show state` is pressed (`Hide state` hides it again; hidden again after a reload). Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
 | Entry points | The nodes every chosen specialist started from for the latest chat question (all get the same question, plan and entry points; there is no separate message per specialist), as a table (number, node, label, found by lookup/vector/fulltext), best first by the fused score (not shown). The heading is always shown; before any question, for small talk, or when nothing was found, a short line says so |
 | Last run | Question, plan (route, types, specialists, keywords, entities, language), the planner's reason, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
-| Conversation cost | Every chat question since the page was loaded: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). A reload empties it, as it starts a new conversation. Test questions are not counted. A question that ends in an error is not listed |
+| Conversation cost | Every question in the current chat: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). `New chat` and a reload empty it, as they start a new conversation. Test questions are not counted. A question that ends in an error is not listed |
 | Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, reasoning effort per step (a step's select is disabled while its model is not a reasoning model; the caption explains effort and its cost), budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. Model steps and specialists are listed in the order they run in the drawing (planner,
 specialists, explorer, answer; sources, causes, architecture, people), since the backend returns the keys
 alphabetically. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
@@ -249,8 +249,14 @@ The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRu
 The same callback (`handleRunComplete`) appends the question and its cost to `sessionCosts` in `App`.
 
 `ChatPanel` stays mounted and is only hidden while another center tab is open, so the conversation (and an answer
-still streaming) survives switching to `Configure AI agent` and back. The thread id is made once per page load
-(`newThreadId`), so a reload starts a new conversation in the chat window and in the backend's history alike.
+still streaming) survives switching to `Configure AI agent` and back. The thread id is made per conversation
+(`newThreadId`): on page load and by the `New chat` button, so either starts a new conversation in the chat window and
+in the backend's history alike. The button, labelled `New`, sits in the top right corner of the message box, above `Send`
+(`chat-new-button`, a small outlined box in muted colours, positioned absolutely in `chat-input-row`); it is always shown, but disabled until the chat has messages and while an answer
+streams. It empties the messages,
+keeps any unsent text in the box, and in `App` (`onNewChat`) empties `sessionCosts` and clears `lastAgentRun`, so `Last run`, `Entry points`, the
+highlighted path in the agent drawing and the last-run summary in the node details are reset as before any question. The old
+thread stays in the backend's memory until it is pushed out (at most 200 threads).
 
 ## 9. Test Questions and Model Choice
 

@@ -670,8 +670,8 @@ type AgentRun = {
   sufficiency: { ok: boolean; reason: string } | null;
 };
 
-// One answered chat question in this page load, for the conversation cost table. A reload starts a new list,
-// just as it starts a new conversation.
+// One answered chat question in the current conversation, for the conversation cost table. A new chat or a reload
+// starts a new list, just as it starts a new conversation.
 type AgentSessionCost = { question: string; cost_usd: number; asked_at: string };
 
 const SESSION_QUESTION_MAX_CHARS = 120;
@@ -4372,8 +4372,8 @@ function BuildGraphLayersPanel() {
   );
 }
 
-// One conversation per page load: a reload starts a new conversation, both in the chat window and in the backend's
-// history (which is kept per thread id).
+// One thread id per conversation: New chat or a reload starts a new conversation, both in the chat window and in the
+// backend's history (which is kept per thread id).
 function newThreadId(): string {
   return crypto.randomUUID();
 }
@@ -4465,13 +4465,15 @@ function TypewriterText({ text, onProgress }: { text: string; onProgress?: () =>
 function ChatPanel({
   graphViewRef,
   onRunComplete,
+  onNewChat,
   isVisible,
 }: {
   graphViewRef: React.RefObject<GraphViewHandle | null>;
   onRunComplete?: (run: AgentRun) => void;
+  onNewChat?: () => void;
   isVisible: boolean;
 }) {
-  const [threadId] = useState(newThreadId);
+  const [threadId, setThreadId] = useState(newThreadId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
@@ -4580,6 +4582,19 @@ function ChatPanel({
     }
   };
 
+  // Starts a new conversation without reloading the page (App also resets the last run and the conversation cost).
+  // Not while an answer streams, so it cannot land in the new chat.
+  const startNewChat = () => {
+    if (isStreaming || messages.length === 0) {
+      return;
+    }
+    setThreadId(newThreadId());
+    setMessages([]);
+    setStatus("");
+    setError("");
+    onNewChat?.();
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -4603,7 +4618,7 @@ function ChatPanel({
               {entry.role === "assistant" && (entry.content || entry.error) ? <ThinkingOrbit still /> : null}
               {entry.toolErrors && entry.toolErrors.length > 0 ? (
                 <div className="chat-tool-errors">
-                  <strong>Verktygsfel — grafen kunde inte frågas helt ut:</strong>
+                  <strong>Tool error — the graph could not be fully queried:</strong>
                   <ul>
                     {entry.toolErrors.map((toolError, index) => (
                       <li key={`${toolError.tool}-${index}`}>
@@ -4679,6 +4694,16 @@ function ChatPanel({
           onClick={() => void sendMessage()}
         >
           {isStreaming ? "Thinking..." : "Send"}
+        </button>
+        {/* Only usable when there is a conversation to leave, and not while an answer streams. */}
+        <button
+          className="chat-new-button"
+          type="button"
+          disabled={messages.length === 0 || isStreaming}
+          onClick={startNewChat}
+          title="Start a new chat"
+        >
+          New
         </button>
       </div>
       </div>
@@ -5388,7 +5413,7 @@ function ConfigureAgentPanel({ lastRun, sessionCosts }: { lastRun: AgentRun | nu
       )}
 
       <h4 className="knowledge-card-title knowledge-section-title">
-        Conversation cost <span className="knowledge-section-kind">(every question in Chat with AI since the page was loaded)</span>
+        Conversation cost <span className="knowledge-section-kind">(every question in the current chat in Chat with AI)</span>
       </h4>
       {sessionCosts.length > 0 ? (
         <>
@@ -6051,7 +6076,15 @@ function App() {
           </button>
         </div>
         <div className={`center-tab-panel${activeCenterTab === "message" ? " center-tab-panel-chat" : ""}`} role="tabpanel">
-          <ChatPanel graphViewRef={graphViewRef} onRunComplete={handleRunComplete} isVisible={activeCenterTab === "message"} />
+          <ChatPanel
+            graphViewRef={graphViewRef}
+            onRunComplete={handleRunComplete}
+            onNewChat={() => {
+              setSessionCosts([]);
+              setLastAgentRun(null);
+            }}
+            isVisible={activeCenterTab === "message"}
+          />
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
           {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} sessionCosts={sessionCosts} />}
         </div>

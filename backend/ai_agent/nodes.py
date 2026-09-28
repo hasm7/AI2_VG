@@ -84,7 +84,7 @@ def _error(node: str, tool: str, message: str) -> dict:
 # prepare (code)
 # ---------------------------------------------------------------------------
 
-@traced("prepare", "Förbereder...")
+@traced("prepare", "Preparing...")
 def prepare(state, config):
     settings = load_settings()
     driver = config["configurable"]["driver"]
@@ -120,7 +120,7 @@ def prepare(state, config):
 # summarize (one model call, only when turns have left the recent window)
 # ---------------------------------------------------------------------------
 
-@traced("summarize", "Sammanfattar samtalet...")
+@traced("summarize", "Summarizing the conversation...")
 def summarize(state, config):
     pending = state.get("pending_history") or []
     if not pending:
@@ -160,7 +160,7 @@ def summarize(state, config):
 # planner (one model call, structured output)
 # ---------------------------------------------------------------------------
 
-@traced("planner", "Planerar...")
+@traced("planner", "Planning...")
 def planner(state, config):
     settings = state["settings"]
     client = config["configurable"]["client"]
@@ -201,7 +201,7 @@ def route_after_planner(state) -> str:
 # entry (code: lookup + hybrid search)
 # ---------------------------------------------------------------------------
 
-@traced("entry", "Söker ingångar i grafen...")
+@traced("entry", "Finding entry points in the graph...")
 def entry(state, config):
     settings = state["settings"]
     configurable = config["configurable"]
@@ -249,7 +249,7 @@ def _within_budget(state) -> bool:
 # ---------------------------------------------------------------------------
 
 def make_specialist(name: str):
-    @traced(name, f"Specialist {name} hämtar...")
+    @traced(name, f"Specialist {name} is fetching...")
     def specialist(state, config):
         configurable = config["configurable"]
         settings = state["settings"]
@@ -284,7 +284,7 @@ SPECIALIST_NODES = {name: make_specialist(name) for name in SPECIALISTS}
 # check (code) and explorer (placeholder in step 1)
 # ---------------------------------------------------------------------------
 
-@traced("check", "Kontrollerar underlaget...")
+@traced("check", "Checking the evidence...")
 def check(state, config):
     evidence = state.get("evidence") or []
     types = state["plan"]["question_types"]
@@ -311,7 +311,7 @@ def route_after_check(state) -> str:
     return "answer"
 
 
-@traced("explorer", "Utforskar grafen...")
+@traced("explorer", "Exploring the graph...")
 def explorer(state, config):
     configurable = config["configurable"]
     try:
@@ -380,7 +380,7 @@ def _stream_words(writer, text: str) -> None:
         writer({"type": "token", "text": word + " "})
 
 
-@traced("answer", "Skriver svar...")
+@traced("answer", "Writing the answer...")
 def answer(state, config):
     writer = get_stream_writer()
     settings = state["settings"]
@@ -389,9 +389,9 @@ def answer(state, config):
     if errors:
         # Decided in code, not in the prompt: when a fetch failed, no facts are stated, so nothing is guessed.
         message = (
-            f"Jag kunde inte hämta allt ur grafen just nu ({len(errors)} fel):\n"
+            f"I could not fetch everything from the graph right now ({len(errors)} {'error' if len(errors) == 1 else 'errors'}):\n"
             + "\n".join(f"- {e['node']}: {e['error']}" for e in errors)
-            + "\n\nJag svarar inte med sakuppgifter när en hämtning har misslyckats, för att inte gissa. Fråga gärna igen."
+            + "\n\nI do not state facts when a fetch has failed, so as not to guess. Please ask again."
         )
         _stream_words(writer, message)
         writer({"type": "sources", "citations": [], "dropped_citations": []})
