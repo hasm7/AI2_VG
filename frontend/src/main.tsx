@@ -4402,6 +4402,7 @@ const CHAT_STORAGE_KEYS = {
   referencesShown: "chat.referencesShown",
   lastRun: "agent.lastRun",
   sessionCosts: "agent.sessionCosts",
+  usedLayers: "agent.usedLayers",
 };
 
 function readStored<T>(key: string, fallback: T): T {
@@ -4764,6 +4765,63 @@ function renderChatInline(items: ChatInline[]): React.ReactNode[] {
   });
 }
 
+function sameChatBlock(a: ChatBlock, b: ChatBlock) {
+  if (a.kind !== b.kind) {
+    return false;
+  }
+  if (a.kind === "paragraph" || a.kind === "heading") {
+    return a.text === (b as typeof a).text;
+  }
+  const other = b as typeof a;
+  return (
+    (a.kind !== "numbers" || a.start === (other as typeof a).start) &&
+    a.items.length === other.items.length &&
+    a.items.every((item, index) => item === other.items[index])
+  );
+}
+
+// One Markdown block of an answer. Memoized on its content, so while an answer is typed out only the block being
+// typed renders again; the finished blocks above it are left alone. Before, every frame rendered the whole answer
+// again, so a long answer typed slower and slower towards its end.
+const ChatMarkdownBlock = React.memo(
+  function ChatMarkdownBlock({
+    block,
+    withReferences,
+    leading,
+  }: {
+    block: ChatBlock;
+    withReferences: boolean;
+    leading?: React.ReactNode;
+  }) {
+    if (block.kind === "paragraph" || block.kind === "heading") {
+      return (
+        <p className={`chat-md-block${block.kind === "heading" ? " chat-md-heading" : ""}`}>
+          {leading}
+          {renderChatInline(parseChatInline(block.text, withReferences))}
+        </p>
+      );
+    }
+    const items = block.items.map((item, itemIndex) => (
+      <li key={itemIndex}>
+        {itemIndex === 0 ? leading : null}
+        {renderChatInline(parseChatInline(item, withReferences))}
+      </li>
+    ));
+    return block.kind === "bullets" ? (
+      <ul className="chat-md-block chat-md-list">{items}</ul>
+    ) : (
+      <ol className="chat-md-block chat-md-list" start={block.start}>
+        {items}
+      </ol>
+    );
+  },
+  // The icon is a new element on every render; only whether there is one matters.
+  (before, after) =>
+    before.withReferences === after.withReferences &&
+    Boolean(before.leading) === Boolean(after.leading) &&
+    sameChatBlock(before.block, after.block),
+);
+
 // The answer as blocks. `leading` (the floated icon) is put inside the first block, so the icon and the first line
 // share one block: the bubble sizes itself to its text, and only an icon in the same block is counted in that width.
 function renderChatMarkdown(text: string, withReferences: boolean, leading?: React.ReactNode) {
@@ -4771,38 +4829,27 @@ function renderChatMarkdown(text: string, withReferences: boolean, leading?: Rea
   if (blocks.length === 0) {
     return leading ?? null;
   }
-  return blocks.map((block, index) => {
-    const first = index === 0 ? leading : null;
-    if (block.kind === "paragraph" || block.kind === "heading") {
-      return (
-        <p key={index} className={`chat-md-block${block.kind === "heading" ? " chat-md-heading" : ""}`}>
-          {first}
-          {renderChatInline(parseChatInline(block.text, withReferences))}
-        </p>
-      );
-    }
-    const items = block.items.map((item, itemIndex) => (
-      <li key={itemIndex}>
-        {itemIndex === 0 ? first : null}
-        {renderChatInline(parseChatInline(item, withReferences))}
-      </li>
-    ));
-    return block.kind === "bullets" ? (
-      <ul key={index} className="chat-md-block chat-md-list">
-        {items}
-      </ul>
-    ) : (
-      <ol key={index} className="chat-md-block chat-md-list" start={block.start}>
-        {items}
-      </ol>
-    );
-  });
+  return blocks.map((block, index) => (
+    <ChatMarkdownBlock
+      key={index}
+      block={block}
+      withReferences={withReferences}
+      leading={index === 0 ? leading : undefined}
+    />
+  ));
 }
 
-// Shows an AI answer a character or a few at a time (at least 0.85 per frame, about 50 per second), so it appears to
-// be typed. `shown` may be fractional, so the pace can be below one character per frame; the text is cut at its whole
-// part. When the text grows while the answer streams in, it keeps going from where it is; when it falls far behind it
-// speeds up to catch up. With `hideReferences`, square-bracket references are left out of the shown text (the answer
+// Typing pace of an answer, in time rather than frames: a busy page (the graph panel's motion) draws fewer frames, and
+// a pace per frame then typed slower. Now fewer frames show more characters each.
+const TYPING_CHARS_PER_SECOND = 50;
+// When far behind the streamed text, it speeds up: this share of what is still untyped per second.
+const TYPING_CATCH_UP_PER_SECOND = 0.66;
+// The chat scrolls along at most this often while typing, and once more at the end.
+const TYPING_SCROLL_EVERY_MS = 120;
+
+// Shows an AI answer a character or a few at a time (TYPING_CHARS_PER_SECOND, whatever the frame rate), so it appears
+// to be typed. `shown` may be fractional; the text is cut at its whole part. When the text grows while the answer
+// streams in, it keeps going from where it is; when it falls far behind it speeds up to catch up. With `hideReferences`, square-bracket references are left out of the shown text (the answer
 // itself keeps them) and skipped while typing; without it they are typed out in blue. The shown text is rendered as a
 // small part of Markdown (renderChatMarkdown), with `leading` (the icon) inside its first block. With `sound` on, each
 // word that appears plays one blip (at most one per frame), and once the answer is `complete` and typed out to the end,
@@ -4833,20 +4880,38 @@ function TypewriterText({
   const previousDisplayedRef = useRef("");
   const previousVisibleRef = useRef(instant ? text.length : 0);
   const hasChimedRef = useRef(instant);
+  const lastFrameAtRef = useRef<number | null>(null);
+  const lastProgressAtRef = useRef(0);
+  // The frame reads the latest text through a ref. New streamed text must not cancel the frame already asked for: with
+  // a token every 40 ms and a busy page drawing a frame only every 150-200 ms, most frames were cancelled before they
+  // ran, and the typing fell behind.
+  const latestRef = useRef({ text, hideReferences, complete });
+  latestRef.current = { text, hideReferences, complete };
+  const hasMore = shown < text.length;
+  // Waiting at a reference whose closing bracket has not arrived yet (skipReferences): the position does not move, so
+  // the frame loop wakes up again when more text arrives instead.
+  const at = Math.floor(shown);
+  const waitingForText = hideReferences && !complete && text[at] === "[" && text.indexOf("]", at) === -1;
 
   useEffect(() => {
-    if (shown >= text.length) {
+    if (!hasMore) {
+      lastFrameAtRef.current = null;
       return;
     }
-    const frame = requestAnimationFrame(() => {
-      const behind = text.length - shown;
+    const frame = requestAnimationFrame((now) => {
+      // Seconds since the last step, capped so a tab that was hidden does not dump the rest at once.
+      const elapsed = lastFrameAtRef.current === null ? 1 / 60 : Math.min(0.25, (now - lastFrameAtRef.current) / 1000);
+      lastFrameAtRef.current = now;
+      const latest = latestRef.current;
       setShown((current) => {
-        const next = Math.min(text.length, current + Math.max(0.85, behind / 90));
-        return hideReferences ? skipReferences(text, Math.floor(current), next, complete) : next;
+        const behind = latest.text.length - current;
+        const step = elapsed * Math.max(TYPING_CHARS_PER_SECOND, behind * TYPING_CATCH_UP_PER_SECOND);
+        const next = Math.min(latest.text.length, current + step);
+        return latest.hideReferences ? skipReferences(latest.text, Math.floor(current), next, latest.complete) : next;
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [shown, text, hideReferences, complete]);
+  }, [shown, hasMore, waitingForText ? text.length : -1, complete]);
 
   useEffect(() => {
     // Blips follow the text as shown, so a hidden reference makes no sound; and only typing makes them, not showing or
@@ -4855,7 +4920,11 @@ function TypewriterText({
     const hasTyped = visible > previousVisibleRef.current;
     previousDisplayedRef.current = displayed;
     previousVisibleRef.current = visible;
-    onProgress?.();
+    const now = performance.now();
+    if (now - lastProgressAtRef.current >= TYPING_SCROLL_EVERY_MS || visible >= text.length) {
+      lastProgressAtRef.current = now;
+      onProgress?.();
+    }
     if (
       sound &&
       hasTyped &&
@@ -4879,15 +4948,59 @@ function TypewriterText({
   return <>{renderChatMarkdown(displayed, !hideReferences, leading)}</>;
 }
 
+// The four derived layers named in the right panel's layer map.
+type AnswerLayer = "collaboration" | "causal" | "architecture" | "knowledge";
+
+// The layers each specialist fetches from (sources reads the imported records, none of the four).
+const ANSWER_LAYERS_BY_SPECIALIST: Record<string, AnswerLayer[]> = {
+  causes: ["knowledge", "causal"],
+  architecture: ["architecture"],
+  people: ["collaboration"],
+};
+
+// Which layer a cited node belongs to, for citations that reach a layer no chosen specialist fetched from (the
+// explorer's queries can reach any node).
+const ANSWER_LAYER_BY_LABEL: Record<string, AnswerLayer> = {
+  Topic: "knowledge",
+  Event: "knowledge",
+  RootCause: "causal",
+  Component: "architecture",
+  Repository: "architecture",
+  Module: "architecture",
+  File: "architecture",
+  Expertise: "collaboration",
+  Community: "collaboration",
+};
+
+// The layers an answer drew on: those of the specialists the planner chose (they fetched the evidence the answer was
+// written from, even when it cites the source records behind it), and those of any cited node of the four layers.
+function layersUsedByAnswer(citations: ChatCitation[], specialists: string[]): AnswerLayer[] {
+  const used = new Set<AnswerLayer>(specialists.flatMap((name) => ANSWER_LAYERS_BY_SPECIALIST[name] ?? []));
+  for (const citation of citations) {
+    const layer = ANSWER_LAYER_BY_LABEL[citation.label];
+    if (layer) {
+      used.add(layer);
+    }
+  }
+  return [...used];
+}
+
 function ChatPanel({
   graphViewRef,
   onRunComplete,
   onNewChat,
+  onBusyChange,
+  onLayersUsed,
   isVisible,
 }: {
   graphViewRef: React.RefObject<GraphViewHandle | null>;
   onRunComplete?: (run: AgentRun) => void;
   onNewChat?: () => void;
+  // Told when the AI starts and stops working on a question (from Send until the answer has come in).
+  onBusyChange?: (busy: boolean) => void;
+  // Told which layers the answer drew on (from its citations) when it is done, and an empty list when a new question
+  // is sent.
+  onLayersUsed?: (layers: AnswerLayer[]) => void;
   isVisible: boolean;
 }) {
   // Read back from the tab's storage after a reload (CHAT_STORAGE_KEYS), otherwise a new conversation.
@@ -4898,6 +5011,7 @@ function ChatPanel({
   const [input, setInput] = useState(() => readStored(CHAT_STORAGE_KEYS.input, ""));
   const [status, setStatus] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  useEffect(() => onBusyChange?.(isStreaming), [isStreaming]);
   const [error, setError] = useState("");
   // Typing sound, on for a new tab; turned off with the speaker button.
   const [isSoundOn, setIsSoundOn] = useState(() => readStored(CHAT_STORAGE_KEYS.soundOn, true));
@@ -4934,6 +5048,7 @@ function ChatPanel({
     setStatus("");
     setIsStreaming(true);
     setInput("");
+    onLayersUsed?.([]);
 
     const userMessageId = `u-${Date.now()}`;
     const assistantMessageId = `a-${Date.now()}`;
@@ -4997,6 +5112,7 @@ function ChatPanel({
               entry_points: event.entry_points ?? [],
               sufficiency: event.sufficiency ?? null,
             });
+            onLayersUsed?.(layersUsedByAnswer(event.citations ?? [], event.plan?.specialists ?? []));
           }
           setStatus("");
         }
@@ -5206,6 +5322,22 @@ function ChatPanel({
   );
 }
 
+// The lines of the knowledge graphic at the bottom of the right panel (viewBox 420 x 260), as [x1, y1, x2, y2]; drawn
+// once as the network's edges and once as the light signals that travel along them while the AI works.
+const knowledgeEdges: Array<[number, number, number, number]> = [
+  [120, 142, 218, 62],
+  [218, 62, 252, 34],
+  [218, 62, 306, 104],
+  [218, 62, 306, 142],
+  [120, 142, 284, 186],
+  [120, 142, 228, 228],
+  [162, 126, 306, 104],
+  [162, 126, 306, 142],
+  [162, 126, 284, 186],
+  [306, 142, 306, 104],
+  [284, 186, 306, 142],
+];
+
 // Branches of the layer tree in the right panel (viewBox 420 x 360, centered on x = 210). Each gap between two rows
 // holds two branches per side, spreading a little wider per gap. A branch leaves its row vertically and bends outward.
 const layerTreeBranch = (offsetTop: number, offsetBottom: number, yTop: number, yBottom: number) =>
@@ -5219,12 +5351,35 @@ const layerTreeBranches = layerTreeGaps.flatMap(({ yTop, yBottom, offsets }) =>
   offsets.map(([offsetTop, offsetBottom]) => layerTreeBranch(offsetTop, offsetBottom, yTop, yBottom)),
 );
 
-function RightGraphicsPanel() {
+// A rounded background behind one row of the layer map (icon + label), in the row's own coordinates. The label font is
+// monospace (13px Consolas with a little letter spacing, about 7.55px a character), so its width follows its length.
+function LayerMapHighlight({ label, textY, index }: { label: string; textY: number; index: number }) {
+  return (
+    <rect
+      className="layer-map-highlight"
+      x={-12}
+      y={textY - 18}
+      width={64 + label.length * 7.55}
+      height={26}
+      rx={13}
+      // Each row blinks a little out of step with the others while the AI works.
+      style={{ animationDelay: `${-index * 0.35}s` }}
+    />
+  );
+}
+
+// `isThinking`: the AI is working on a question; the knowledge graphic at the bottom gets a pulsing glow behind it and
+// light signals travelling along its lines, every layer label gets a blinking background, and all of it fades back when
+// the answer has come in. `usedLayers`: the layers the last answer drew on; their labels stay lit afterwards.
+function RightGraphicsPanel({ isThinking = false, usedLayers = [] }: { isThinking?: boolean; usedLayers?: AnswerLayer[] }) {
   const [isMotionOn, setIsMotionOn] = useState(true);
+  const rowClass = (layer: AnswerLayer) => `layer-map-node${usedLayers.includes(layer) ? " layer-map-node-used" : ""}`;
 
   return (
     <aside
-      className={`right-graphics-panel${isMotionOn ? "" : " right-graphics-paused"}`}
+      className={`right-graphics-panel${isMotionOn ? "" : " right-graphics-paused"}${
+        isThinking ? " right-graphics-thinking" : ""
+      }`}
       aria-label="Layer graphics"
     >
       <button
@@ -5244,6 +5399,10 @@ function RightGraphicsPanel() {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
+          {/* Softens a layer label's background into a cloud that fades out at its edges. */}
+          <filter id="layerMapCloud" x="-40%" y="-120%" width="180%" height="340%">
+            <feGaussianBlur stdDeviation="6" />
+          </filter>
         </defs>
 
         {/* Tree branches between the layers, widening downward; each has a light beam running along it. */}
@@ -5261,14 +5420,16 @@ function RightGraphicsPanel() {
         ))}
 
         {/* Each row (icon + label) is centered on x = 210; x offsets assume the monospace label font. */}
-        <g className="layer-map-node" transform="translate(75 58)">
+        <g className={rowClass("collaboration")} transform="translate(75 58)">
+          <LayerMapHighlight label="Expertise & collaboration layer" textY={22} index={0} />
           <circle className="layer-map-dot" cx="0" cy="18" r="5" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="16" cy="10" r="4" />
           <line className="layer-map-icon-line" x1="0" y1="18" x2="16" y2="10" />
           <text x="40" y="22">Expertise &amp; collaboration layer</text>
         </g>
 
-        <g className="layer-map-node" transform="translate(98 138)">
+        <g className={rowClass("causal")} transform="translate(98 138)">
+          <LayerMapHighlight label="Root cause & impact layer" textY={24} index={1} />
           <path className="layer-map-icon-line" d="M0 20 H22" />
           <path className="layer-map-icon-line" d="M17 14 L24 20 L17 26" />
           <circle className="layer-map-dot" cx="0" cy="20" r="4" />
@@ -5276,13 +5437,15 @@ function RightGraphicsPanel() {
           <text x="40" y="24">Root cause &amp; impact layer</text>
         </g>
 
-        <g className="layer-map-node" transform="translate(124 218)">
+        <g className={rowClass("architecture")} transform="translate(124 218)">
+          <LayerMapHighlight label="Architecture layer" textY={23} index={2} />
           <rect className="layer-map-icon-box" x="-2" y="6" width="24" height="20" rx="3" />
           <path className="layer-map-icon-line" d="M4 13 H18 M4 19 H13" />
           <text x="40" y="23">Architecture layer</text>
         </g>
 
-        <g className="layer-map-node" transform="translate(135 298)">
+        <g className={rowClass("knowledge")} transform="translate(135 298)">
+          <LayerMapHighlight label="Knowledge layer" textY={23} index={3} />
           <circle className="layer-map-icon-orbit" cx="12" cy="18" r="15" />
           <circle className="layer-map-dot" cx="12" cy="18" r="4" />
           <circle className="layer-map-dot layer-map-dot-secondary" cx="25" cy="12" r="3" />
@@ -5291,21 +5454,48 @@ function RightGraphicsPanel() {
       </svg>
 
       <svg className="knowledge-layer-svg" viewBox="0 0 420 260" role="img" aria-label="Knowledge layer visualizer">
+        <defs>
+          {/* Warm rose at the centre, through violet into the panel's blue, so the red signals still stand out. */}
+          <radialGradient id="knowledgeThinkingGlow">
+            <stop offset="0%" stopColor="#f43f5e" stopOpacity="0.5" />
+            <stop offset="35%" stopColor="#a855f7" stopOpacity="0.3" />
+            <stop offset="70%" stopColor="#3b82f6" stopOpacity="0.14" />
+            <stop offset="100%" stopColor="#1d4ed8" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+
+        {/* While the AI works: a glow behind the graphic, two layers breathing at different speeds (shown and faded by
+            .right-graphics-thinking). */}
+        <g className="knowledge-thinking knowledge-thinking-glow" aria-hidden="true">
+          <ellipse className="knowledge-glow knowledge-glow-a" cx="210" cy="132" rx="210" ry="120" fill="url(#knowledgeThinkingGlow)" />
+          <ellipse className="knowledge-glow knowledge-glow-b" cx="250" cy="140" rx="150" ry="95" fill="url(#knowledgeThinkingGlow)" />
+        </g>
+
         <ellipse className="knowledge-orbit knowledge-orbit-main" cx="210" cy="132" rx="194" ry="72" />
 
         <g className="knowledge-cluster">
           <g className="knowledge-counter">
-            <line x1="120" y1="142" x2="218" y2="62" className="knowledge-edge" />
-            <line x1="218" y1="62" x2="252" y2="34" className="knowledge-edge" />
-            <line x1="218" y1="62" x2="306" y2="104" className="knowledge-edge" />
-            <line x1="218" y1="62" x2="306" y2="142" className="knowledge-edge" />
-            <line x1="120" y1="142" x2="284" y2="186" className="knowledge-edge" />
-            <line x1="120" y1="142" x2="228" y2="228" className="knowledge-edge" />
-            <line x1="162" y1="126" x2="306" y2="104" className="knowledge-edge" />
-            <line x1="162" y1="126" x2="306" y2="142" className="knowledge-edge" />
-            <line x1="162" y1="126" x2="284" y2="186" className="knowledge-edge" />
-            <line x1="306" y1="142" x2="306" y2="104" className="knowledge-edge" />
-            <line x1="284" y1="186" x2="306" y2="142" className="knowledge-edge" />
+            {knowledgeEdges.map(([x1, y1, x2, y2], index) => (
+              <line key={`edge-${index}`} x1={x1} y1={y1} x2={x2} y2={y2} className="knowledge-edge" />
+            ))}
+            {/* While the AI works: a short light travelling along every line, each at its own pace. */}
+            <g className="knowledge-thinking" aria-hidden="true">
+              {knowledgeEdges.map(([x1, y1, x2, y2], index) => (
+                <line
+                  key={`signal-${index}`}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  pathLength={100}
+                  className="knowledge-signal"
+                  style={{
+                    animationDuration: `${1.1 + (index % 4) * 0.35}s`,
+                    animationDelay: `${-(index * 0.37) % 1.5}s`,
+                  }}
+                />
+              ))}
+            </g>
 
             <circle cx="306" cy="142" r="22" fill="#fbbf24" className="knowledge-node knowledge-core-node" />
             <circle cx="120" cy="142" r="10" fill="#3b82f6" className="knowledge-node" />
@@ -6533,6 +6723,13 @@ function App() {
     readStored<AgentSessionCost[]>(CHAT_STORAGE_KEYS.sessionCosts, []),
   );
   const graphViewRef = useRef<GraphViewHandle>(null);
+  // While the AI works on a question, the right panel's knowledge graphic and layer labels become more active; after
+  // the answer, the labels of the layers it drew on stay lit.
+  const [isAgentBusy, setIsAgentBusy] = useState(false);
+  const [usedLayers, setUsedLayers] = useState<AnswerLayer[]>(() =>
+    readStored<AnswerLayer[]>(CHAT_STORAGE_KEYS.usedLayers, []),
+  );
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.usedLayers, usedLayers), [usedLayers]);
 
   useEffect(() => writeStored(CHAT_STORAGE_KEYS.lastRun, lastAgentRun), [lastAgentRun]);
   useEffect(() => writeStored(CHAT_STORAGE_KEYS.sessionCosts, sessionCosts), [sessionCosts]);
@@ -6585,14 +6782,17 @@ function App() {
             onNewChat={() => {
               setSessionCosts([]);
               setLastAgentRun(null);
+              setUsedLayers([]);
             }}
+            onBusyChange={setIsAgentBusy}
+            onLayersUsed={setUsedLayers}
             isVisible={activeCenterTab === "message"}
           />
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
           {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} sessionCosts={sessionCosts} />}
         </div>
       </section>
-      <RightGraphicsPanel />
+      <RightGraphicsPanel isThinking={isAgentBusy} usedLayers={usedLayers} />
     </main>
   );
 }

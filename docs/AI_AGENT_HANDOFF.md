@@ -74,7 +74,7 @@ reference at the start of a line is removed with the spaces after it; elsewhere 
 until it closes, and spaces and line breaks at the end of the typed text are held back until the next visible
 character, so no empty line appears and disappears while typing (seen 2026-09-28 with a line of references between two
 paragraphs). While typing, a whole reference is passed over in one step (`skipReferences`), so it causes no pause and no
-blip. Shown (`withHighlightedReferences`), every `[...]`, brackets included, is typed out in deep blue
+blip. Shown (`parseChatInline` with references on), every `[...]`, brackets included, is typed out in deep blue
 (`chat-inline-reference`, `#1d4ed8`); a fact
 citation is a dashed chip (`chat-citation-fact`) showing `fact-N` and the start of the fact, with the full text on
 hover, and is not clickable. Before facts had references, the answer model sometimes put a whole `Fact:` line in
@@ -334,7 +334,23 @@ heading line is shown as a bold paragraph (`chat-md-heading`), and tables, links
 italic only before a non-space and closes it only after one, so "5 * 3" stays as it is; the prompt does not ask for
 italic, so the support is a fallback for when the model writes it anyway. It is parsed as it is typed out, so a marker
 being typed never shows: an unclosed `**`, `*` or backtick makes the rest bold, italic or code, a single `*` at the end
-is held back, and a last line holding only a list marker is left out until its text arrives. The answer prompt
+is held back, and a last line holding only a list marker is left out until its text arrives.
+
+Typing pace (`TypewriterText`, reworked 2026-09-29): the pace is set in time, not per frame: about
+`TYPING_CHARS_PER_SECOND` = 50 characters a second, faster when far behind the streamed text
+(`TYPING_CATCH_UP_PER_SECOND` = 0.66 of what is still untyped, per second). Before, it was a fixed step per frame, so
+a busy page typed slower: with the graph panel's motion on, headless Chrome drew about 7 frames a second instead of 60
+(software rendering; a real browser does better, but the pattern is the same). Three changes: the step is the time
+since the last frame times the pace, so fewer frames show more characters each; each Markdown block is memoized
+(`ChatMarkdownBlock`, compared by `sameChatBlock`), so only the block being typed renders again instead of the whole
+answer on every frame; and streamed text no longer cancels the frame already asked for (the frame reads the latest
+text through a ref), which with a token every 40 ms and a frame every 150-200 ms had cancelled most frames. The chat
+scrolls along at most every `TYPING_SCROLL_EVERY_MS` = 120 ms. Measured in headless Chrome with the graph's motion on
+and a stubbed answer of about 2 650 characters (no model call): all at once, 70 s before (15 characters a second in the
+last quarter) against 13 s after (110); streamed at 300 characters a second, 35-41 s before (49 in the last quarter)
+against 28 s after (87) at the same frame rate. Headless timings vary a lot between runs with the frame rate.
+
+The answer prompt
 (`ANSWER_PROMPT`, "How to write the answer") asks for exactly this Markdown (file paths always in backticks), for a
 direct answer first, a level of detail that matches the question (a broad question gets an overview in everyday
 words, with file paths, pull request numbers and ids only where they help; a specific technical question gets the full
@@ -352,6 +368,20 @@ The AI's bubble is only as wide as its text (`align-self: flex-start`), with a s
 paragraph, TypewriterText's `leading`), not beside it: only a float in the same block counts in the bubble's width. Beside it (before 2026-09-28) the bubble came out one icon too narrow, so
 the word being typed kept dropping to the next line and jumping back up, about once per word (measured in headless
 Chrome: 14-23 upward jumps per answer before, 0 after, at widths 360-720 px).
+
+The right panel follows the chat (added 2026-09-29). `ChatPanel` reports when it is working (`onBusyChange`, from
+Send until the answer has come in) and which layers the answer drew on (`onLayersUsed`, empty on Send and New);
+`App` passes both to `RightGraphicsPanel` (`isThinking`, `usedLayers`; the used layers are kept in the tab's storage
+with the chat). While the AI works, the knowledge graphic at the bottom gets a glow that breathes in two layers at
+different speeds (rose at the centre through violet into blue), red light signals travelling along its lines
+(`knowledgeEdges`, one signal per line) and a brighter core, and every label of the layer map gets a rose background
+blinking a little out of step (`LayerMapHighlight`); all of it fades back over 0.6 s when the answer is in. After the
+answer, the labels of the layers it drew on stay lit (`layersUsedByAnswer`): the layers of the specialists the planner
+chose (causes: Knowledge and Root cause & impact; architecture: Architecture; people: Expertise & collaboration;
+sources reads the imported records, none of the four), plus the layer of any cited Topic, Event, RootCause,
+Component, Repository, Module, File, Expertise or Community (the explorer can reach any node). Counting citations
+alone was too narrow: a root-cause answer often cites the source records behind the root cause. `Motion off` pauses
+the animations; with reduced motion the glow and backgrounds are still and the signals hidden.
 
 Typing sound: a speaker button left of `New` (`chat-sound-button`, both in `chat-input-corner`) turns a quiet blip per
 word on or off while an answer is typed out. It is on in a new tab and stays as set across `New` and a reload. `TypewriterText`

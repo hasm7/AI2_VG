@@ -1149,6 +1149,47 @@ main {
   filter: url("#layerMapGlow");
 }
 
+/* The background behind a layer label (LayerMapHighlight), in the rose of the thinking glow, blurred into a cloud that
+   fades out at its edges (#layerMapCloud). Hidden at rest; blinking behind every label while the AI works
+   (.right-graphics-thinking), each row a little out of step; and steady behind the layers the last answer drew on
+   (.layer-map-node-used). */
+.layer-map-highlight {
+  fill: rgba(244, 63, 94, 0.55);
+  filter: url("#layerMapCloud");
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+.right-graphics-thinking .layer-map-highlight {
+  animation: layerMapBlink 1.2s ease-in-out infinite;
+}
+
+.layer-map-node-used .layer-map-highlight {
+  opacity: 1;
+}
+
+.layer-map-node-used text {
+  fill: #ffffff;
+}
+
+@keyframes layerMapBlink {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+
+  50% {
+    opacity: 0.95;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .right-graphics-thinking .layer-map-highlight {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
 .layer-map-node text {
   fill: rgba(226, 232, 240, 0.86);
   font-family: "Consolas", "SFMono-Regular", monospace;
@@ -1247,6 +1288,93 @@ main {
 
 .knowledge-star-four {
   animation-delay: -3.2s;
+}
+
+/* While the AI works on a question (.right-graphics-thinking, set from the chat): a glow behind the knowledge graphic
+   that breathes in two layers at different speeds, light signals travelling along its lines, and a brighter core. It
+   fades in and out over 0.6 s; the animations run only while it is shown. Motion off pauses them like the rest. */
+.knowledge-thinking {
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+
+.right-graphics-thinking .knowledge-thinking {
+  opacity: 1;
+}
+
+.knowledge-glow {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0.35;
+}
+
+.right-graphics-thinking .knowledge-glow-a {
+  animation: knowledgeGlowBreathe 1.3s ease-in-out infinite;
+}
+
+.right-graphics-thinking .knowledge-glow-b {
+  animation: knowledgeGlowBreathe 2.1s ease-in-out infinite;
+  animation-delay: -0.7s;
+}
+
+/* Red, so the signals stand out clearly against the graphic's blues. */
+.knowledge-signal {
+  fill: none;
+  stroke: #ff3b5c;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-dasharray: 9 91;
+  stroke-dashoffset: 100;
+}
+
+.right-graphics-thinking .knowledge-signal {
+  animation-name: knowledgeSignal;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.knowledge-core-node {
+  transition: filter 0.6s ease;
+}
+
+.right-graphics-thinking .knowledge-core-node {
+  filter: drop-shadow(0 0 7px rgba(251, 191, 36, 0.85));
+}
+
+@keyframes knowledgeGlowBreathe {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.94);
+  }
+
+  50% {
+    opacity: 0.75;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes knowledgeSignal {
+  from {
+    stroke-dashoffset: 100;
+  }
+
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Reduced motion: a still glow and no travelling signals. */
+@media (prefers-reduced-motion: reduce) {
+  .right-graphics-thinking .knowledge-glow-a,
+  .right-graphics-thinking .knowledge-glow-b,
+  .right-graphics-thinking .knowledge-signal {
+    animation: none;
+  }
+
+  .knowledge-signal {
+    display: none;
+  }
 }
 
 @keyframes knowledgeDrift {
