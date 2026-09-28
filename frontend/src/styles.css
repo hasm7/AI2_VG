@@ -834,6 +834,37 @@ main {
   fill: none;
 }
 
+/* An answer's Markdown blocks (renderChatMarkdown): paragraphs and lists with a little space between them. */
+.chat-md-block {
+  margin: 0 0 8px;
+}
+
+.chat-md-block:last-child {
+  margin-bottom: 0;
+}
+
+.chat-md-list {
+  padding-left: 20px;
+}
+
+.chat-md-list li + li {
+  margin-top: 3px;
+}
+
+/* A Markdown heading line in an answer: shown as a bold paragraph, not as a large heading. */
+.chat-md-heading {
+  font-weight: 600;
+}
+
+/* `code` in an answer, such as a file name: a light box in a monospace font. */
+.chat-inline-code {
+  font-family: Consolas, "Cascadia Mono", "Courier New", monospace;
+  font-size: 12px;
+  background: rgba(37, 99, 235, 0.07);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
 /* A reference in an answer's text, brackets included, while references are shown: the deep blue of the chips, so it
    stands out from the text. */
 .chat-inline-reference {

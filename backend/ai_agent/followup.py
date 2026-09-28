@@ -17,7 +17,7 @@ from cypher_guard import enforce_read_only
 from .db import fetch_nodes, node_text, read, similarities
 from .prompts import EXPLORER_PROMPT, followup_prompt
 from .settings import reasoning_args
-from .specialists import SOURCE_LABELS
+from .specialists import SOURCE_LABELS, expertise_basis
 from .usage import response_usage
 
 ELEMENT_ID_PATTERN = re.compile(r"^\d+:[0-9a-f-]{36}:\d+$")
@@ -181,6 +181,15 @@ def _facts(rows: list[dict]) -> dict:
     return {"ids": [], "facts": [row["fact"] for row in rows]}
 
 
+def _experts_on(session, argument: str, timeout: float) -> dict:
+    """Every expert's share and rank on one topic or component, and what each one's knowledge rests on."""
+    ids = _resolve(session, argument, ["Topic", "Component"], timeout)
+    if not ids:
+        return {"ids": [], "facts": []}
+    shares = [row["fact"] for row in read(session, EXPERTS_ON, {"ids": ids}, timeout)]
+    return {"ids": [], "facts": shares + expertise_basis(session, timeout, ids, max_rank=10)}
+
+
 def _quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -240,9 +249,9 @@ SPECIALIST_TOOLS = {
             lambda s, a, t: _ids(read(s, PERSON_CONTEXT, {"ids": _resolve(s, a, ["Person"], t)}, t)),
         ),
         "get_experts": (
-            _tool("get_experts", "Expertise shares and ranks of every person on one topic or component.", "subject",
-                  "Topic or component name."),
-            lambda s, a, t: _facts(read(s, EXPERTS_ON, {"ids": _resolve(s, a, ["Topic", "Component"], t)}, t)),
+            _tool("get_experts", "Expertise shares and ranks of every person on one topic or component, and what "
+                  "each one's knowledge rests on.", "subject", "Topic or component name."),
+            _experts_on,
         ),
         "rank": (
             _tool("rank", "A full ranking by one metric.", "metric", "The metric to rank by.",

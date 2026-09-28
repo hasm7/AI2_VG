@@ -48,7 +48,7 @@ START -> prepare -> summarize -> planner -+-> answer                            
 | `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions/comments/reviews/code changes of an entry issue, document or PR, evidence of entry events, nodes that mention an entry issue/PR/document | `question`, `plan`, `entry_points`, `settings`, `usage` | `evidence`, `usage`, `errors` |
 | `causes` | code + model follow-up | Events, root causes and topics: entry events, events evidenced by entry sources, root causes of entry events, events a code change contributed to, root causes in an entry component, events of an entry issue's topic | same | same |
 | `architecture` | code + model follow-up | Components: entry components, components affected by entry events, holding entry root causes, evidenced by entry sources, implemented in files an entry code change or PR modifies, dependency neighbours | same | same |
-| `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts | same | same |
+| `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts, and one "What X's knowledge of Y rests on" fact per expert ranked 1-2 on each topic and component (`expertise_basis`, see below) | same | same |
 | `check` | code | Enough evidence? No entry points, no evidence, a `why` question without causal evidence, or a `ranking` question without metrics means no. Its routing also reads `explorer_ran`, `usage`, `settings` | `plan`, `entry_points`, `evidence`, `explorer_ran`, `usage`, `settings` | `sufficiency` |
 | `explorer` | model + read-only Cypher | Runs at most once, only when `check` says no, the explorer is on and the budget allows (section 4) | `question`, `evidence`, `sufficiency`, `settings` | `evidence`, `usage`, `explorer_ran` |
 | `answer` | model, 1 streamed call | Answers from the evidence only, cites references in square brackets (a node's name, or `fact-N` for a fact; see below), mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `conversation_summary`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
@@ -125,7 +125,7 @@ A failed follow-up only means no extra evidence; it is not an error.
 | `sources` | `get_timeline(reference)`: versions, comments, reviews, code changes and mentioning messages of an issue, document or PR, in time order. `get_conversation(reference)`: a message's Slack thread, mail reply chain, or a segment's whole meeting. `search_sources(query)`: fulltext restricted to source labels |
 | `causes` | `get_causal_chain(event)`: events up to three causal steps away. `get_root_causes(subject)`: root causes of an event, in a component, or behind a topic. `search_causes(query)` |
 | `architecture` | `get_component(component)`: the component, its dependency neighbours and the code changes to its files. `get_file_history(path)`. `search_architecture(query)` |
-| `people` | `get_person(name)`: the profile and the people they work with. `get_experts(subject)`: expertise shares and ranks on a topic or component (facts). `rank(metric)`: betweenness, weighted degree or bus factor (facts) |
+| `people` | `get_person(name)`: the profile and the people they work with. `get_experts(subject)`: expertise shares and ranks on a topic or component, and what each expert's knowledge rests on (facts). `rank(metric)`: betweenness, weighted degree or bus factor (facts) |
 
 **Explorer.** A model (`models.explorer`) with one tool, `run_cypher`. Every query goes through
 `cypher_guard.enforce_read_only` (rejects writes, adds a LIMIT of `max_rows`) and runs in a read transaction with the
@@ -141,6 +141,19 @@ result was a few characters over the limit and was dropped entirely, so the larg
 fact at all.) Its prompt holds a compact, fixed schema (labels,
 key properties, every relationship type written as `-[:TYPE]->`) and asks for case-insensitive text matching.
 The executed queries are listed in the trace.
+
+**What expertise rests on** (`expertise_basis` in `specialists.py`, added 2026-09-28). Expertise shares alone let the
+answer say only that someone holds "most of the recorded knowledge". This read-only query follows the Expertise layer's
+own `EXPERTISE_EVIDENCED_BY` from each `Expertise` node to the activity nodes it counted, and how the person is linked
+to each (the relationship types of `ACTIVITY_WEIGHTS` in `collaboration_layer.py`, so it counts what the layer counts).
+Each expert gets one fact, for example "What Erik Nilsson's knowledge of Mobile session refresh endpoint rests on
+(rank 1, 62.5 % of the recorded activity): wrote pull request backend-api#47; took part in event "..."; ...". The
+weightiest kinds come first, as the layer weighs them (pull requests before messages), at most
+`MAX_BASIS_ACTIVITIES` = 6 per expert, then "... and N more". `people` adds it for ranking questions for the experts
+ranked 1 to `MAX_BASIS_EXPERTS` = 2 on every topic and component (8 facts, about 2 800 characters, with today's
+data); `get_experts` adds it for every expert on the one subject asked about. The answer prompt asks to say briefly
+what someone's knowledge rests on when the answer says they know something. Nothing is written and the embeddings are
+unchanged.
 
 ## 5. State
 
@@ -275,9 +288,28 @@ keeps any unsent text in the box, and in `App` (`onNewChat`) empties `sessionCos
 highlighted path in the agent drawing and the last-run summary in the node details are reset as before any question. The old
 thread stays in the backend's memory until it is pushed out (at most 200 threads).
 
+Answers are shown as a small, safe part of Markdown (`renderChatMarkdown`, from `parseChatBlocks` and
+`parseChatInline`, no library): paragraphs, `- ` bullet and `1. ` numbered lists, `**bold**`, `*italic*` and `` `code` ``; a
+heading line is shown as a bold paragraph (`chat-md-heading`), and tables, links and HTML stay plain text. A `*` opens
+italic only before a non-space and closes it only after one, so "5 * 3" stays as it is; the prompt does not ask for
+italic, so the support is a fallback for when the model writes it anyway. It is parsed as it is typed out, so a marker
+being typed never shows: an unclosed `**`, `*` or backtick makes the rest bold, italic or code, a single `*` at the end
+is held back, and a last line holding only a list marker is left out until its text arrives. The answer prompt
+(`ANSWER_PROMPT`, "How to write the answer") asks for exactly this Markdown (file paths always in backticks), for a
+direct answer first, a level of detail that matches the question (a broad question gets an overview in everyday
+words, with file paths, pull request numbers and ids only where they help; a specific technical question gets the full
+detail), every part of a several-part question in its own paragraph in the question's order (a part read
+widely: "how is the project structured" can mean code, roles and way of working), structure and history in separate
+paragraphs, short paragraphs, lists for three or more parallel items that belong together, references at the end of
+the sentence they support, and for
+analysis terms (bus factor, betweenness, weighted degree, expertise share and rank, community, root cause) to be
+explained in everyday words, with the term at most once in parentheses; it defines each term for the model. Added
+2026-09-28; before, the model wrote `**bold**` that the chat showed as asterisks, and gave terms such as "the bus factor
+is 1" as reasons.
+
 The AI's bubble is only as wide as its text (`align-self: flex-start`), with a small floated icon
-(`ThinkingOrbit still`) at its start. The icon is rendered inside `chat-message-content`, not beside it: only a float in
-the same block counts in the bubble's width. Beside it (before 2026-09-28) the bubble came out one icon too narrow, so
+(`ThinkingOrbit still`) at its start. The icon is rendered inside `chat-message-content` (for an answer inside its first
+paragraph, TypewriterText's `leading`), not beside it: only a float in the same block counts in the bubble's width. Beside it (before 2026-09-28) the bubble came out one icon too narrow, so
 the word being typed kept dropping to the next line and jumping back up, about once per word (measured in headless
 Chrome: 14-23 upward jumps per answer before, 0 after, at widths 360-720 px).
 

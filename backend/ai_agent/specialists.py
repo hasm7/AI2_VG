@@ -8,6 +8,8 @@ from every layer (causal lines, root causes, dependencies, experts, bus factor, 
 
 import time
 
+from collaboration_layer import ACTIVITY_WEIGHTS
+
 from .db import NODE_NAME, fetch_nodes, node_text, read, similarities
 
 SOURCE_LABELS = [
@@ -120,6 +122,67 @@ RETURN [l IN labels(s) WHERE l <> 'Searchable'][0] AS kind, s.name AS subject, s
 ORDER BY bus_factor ASC, subject
 """
 
+# What a person's expertise on a topic or component rests on: the activity nodes the Expertise layer counted
+# (EXPERTISE_EVIDENCED_BY) and how the person is linked to each, for the experts ranked `$max_rank` or better.
+# `$ids` limits it to some subjects; null means every subject. Read only; the layer's own relationships.
+EXPERTISE_BASIS = """
+MATCH (p:Person)-[:HAS_EXPERTISE]->(x:Expertise)-[:EXPERTISE_IN]->(s)
+WHERE ($ids IS NULL OR elementId(s) IN $ids) AND x.rank <= $max_rank
+OPTIONAL MATCH (x)-[:EXPERTISE_EVIDENCED_BY]->(a)
+OPTIONAL MATCH (p)-[r]->(a) WHERE type(r) IN $types
+WITH p, x, s, a, r
+ORDER BY toString(coalesce(a.occurred_at, a.version_at, a.sent_at, a.created_at))
+RETURN p.name AS person, coalesce(s.name, s.display_name) AS subject, x.share AS share, x.rank AS rank,
+       collect({how: type(r), name: coalesce(a.display_name, a.name)}) AS activities
+ORDER BY subject, rank
+"""
+
+# How each counted kind of activity is said in an expertise basis (the kinds in the Expertise layer's weights).
+ACTIVITY_PHRASES = {
+    "AUTHORED_PR": "wrote pull request",
+    "WROTE_PR_REVIEW": "reviewed",
+    "AUTHORED_DOCUMENT_VERSION": "wrote document version",
+    "ACTED_IN_EVENT": "took part in event",
+    "CHANGED_ISSUE_VERSION": "changed issue",
+    "WROTE_ISSUE_COMMENT": "commented on issue",
+    "SENT_SLACK_MESSAGE": "wrote Slack message",
+    "SENT_MAIL": "sent mail",
+    "SPOKE_TEAMS_TRANSCRIPT_SEGMENT": "spoke in meeting segment",
+}
+MAX_BASIS_EXPERTS = 2  # experts per subject whose basis is given, best rank first
+MAX_BASIS_ACTIVITIES = 6  # activities listed per expert, then "... and N more"
+
+
+def expertise_basis(session, timeout: float, subject_ids: list[str] | None = None,
+                    max_rank: int = MAX_BASIS_EXPERTS) -> list[str]:
+    """One fact per expert: what their expertise on a subject rests on, e.g. "Erik Nilsson on Mobile session refresh
+    endpoint (62.5 % of the recorded activity): wrote pull request backend-api#47; took part in event "..."; ..."."""
+    rows = read(session, EXPERTISE_BASIS,
+                {"ids": subject_ids, "max_rank": max_rank, "types": list(ACTIVITY_WEIGHTS)}, timeout)
+    facts = []
+    for row in rows:
+        seen, activities = set(), []
+        # The weightiest kinds first, as the Expertise layer weighs them (pull requests before messages), so a cut
+        # list keeps what counts most; within one kind, in time order (the query's order).
+        counted = sorted(
+            (a for a in row["activities"] if a["how"] and a["name"]),
+            key=lambda a: -ACTIVITY_WEIGHTS.get(a["how"], ("", 0))[1],
+        )
+        for activity in counted:
+            if (activity["how"], activity["name"]) in seen:
+                continue
+            seen.add((activity["how"], activity["name"]))
+            name = f'"{activity["name"]}"' if activity["how"] == "ACTED_IN_EVENT" else activity["name"]
+            activities.append(f'{ACTIVITY_PHRASES.get(activity["how"], activity["how"].lower())} {name}')
+        if not activities:
+            continue
+        more = len(activities) - MAX_BASIS_ACTIVITIES
+        listed = "; ".join(activities[:MAX_BASIS_ACTIVITIES]) + (f"; ... and {more} more" if more > 0 else "")
+        share = f"{round((row['share'] or 0) * 100, 1):g} %"
+        facts.append(f"What {row['person']}'s knowledge of {row['subject']} rests on (rank {row['rank']}, "
+                     f"{share} of the recorded activity): {listed}")
+    return facts
+
 
 def _collect(session, queries: list[tuple[int, str]], params: dict, timeout: float) -> dict[str, int]:
     """Candidate node id -> best (lowest) priority."""
@@ -201,6 +264,8 @@ def people(session, entry_ids, plan, settings, question_vector):
             + "; ".join(f"{r['subject']} ({r['kind']}): bus factor {r['bus_factor']}, {r['experts']} experts, "
                         f"top expert {r['top_expert']}" for r in subjects)
         )
+        # What the leading experts' knowledge rests on, so the answer can say it in concrete terms.
+        packet["facts"].extend(expertise_basis(session, timeout))
     return packet
 
 

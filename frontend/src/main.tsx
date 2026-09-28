@@ -4551,48 +4551,230 @@ function withoutReferences(typed: string, fullText: string, complete: boolean) {
   return result.replace(/\s+$/, "");
 }
 
-// The typed-out part of an answer as shown with references shown: every `[...]`, brackets included (also one still
-// being typed at the end), in blue, so the references stand out from the text.
-function withHighlightedReferences(typed: string) {
-  const parts: React.ReactNode[] = [];
-  let last = 0;
-  for (const match of typed.matchAll(/\[[^\[\]]*\]|\[[^\[\]]*$/g)) {
-    const start = match.index ?? 0;
-    if (start > last) {
-      parts.push(typed.slice(last, start));
+// A small, safe part of Markdown for the AI's answers: paragraphs, bullet and numbered lists, **bold**, *italic* and
+// `code`. A heading line is shown as a bold paragraph; tables, links and HTML are shown as plain text. The text is
+// parsed as it is typed out, so a marker still being typed never shows: an unclosed **, * or ` makes the rest bold,
+// italic or code, and a last line holding only a list marker ("-", "1.") is left out until its text arrives.
+type ChatBlock =
+  | { kind: "paragraph"; text: string }
+  | { kind: "heading"; text: string }
+  | { kind: "bullets"; items: string[] }
+  | { kind: "numbers"; start: number; items: string[] };
+
+type ChatInline =
+  | { kind: "text" | "code" | "reference"; text: string }
+  | { kind: "bold"; children: ChatInline[] }
+  | { kind: "italic"; children: ChatInline[] };
+
+function parseChatBlocks(text: string): ChatBlock[] {
+  const lines = text.split("\n");
+  if (lines.length > 0 && /^\s*(?:[-*•]|\d+[.)]?|#{1,6})$/.test(lines[lines.length - 1])) {
+    lines.pop();
+  }
+  const blocks: ChatBlock[] = [];
+  let paragraph: string[] = [];
+  let list: Extract<ChatBlock, { kind: "bullets" | "numbers" }> | null = null;
+  const endParagraph = () => {
+    if (paragraph.length > 0) {
+      blocks.push({ kind: "paragraph", text: paragraph.join("\n") });
+      paragraph = [];
     }
-    parts.push(
-      <span key={start} className="chat-inline-reference">
-        {match[0]}
-      </span>,
+  };
+  const endList = () => {
+    if (list) {
+      blocks.push(list);
+      list = null;
+    }
+  };
+  for (const line of lines) {
+    const bullet = line.match(/^\s*[-*•]\s+(.*)$/);
+    const number = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
+    const heading = line.match(/^\s*#{1,6}\s+(.*)$/);
+    if (line.trim() === "") {
+      endParagraph();
+      endList();
+    } else if (bullet) {
+      endParagraph();
+      if (list?.kind !== "bullets") {
+        endList();
+        list = { kind: "bullets", items: [] };
+      }
+      list.items.push(bullet[1]);
+    } else if (number) {
+      endParagraph();
+      if (list?.kind !== "numbers") {
+        endList();
+        list = { kind: "numbers", start: Number(number[1]), items: [] };
+      }
+      list.items.push(number[2]);
+    } else if (heading) {
+      endParagraph();
+      endList();
+      blocks.push({ kind: "heading", text: heading[1] });
+    } else if (list && /^\s+/.test(line)) {
+      // An indented line continues the last list item.
+      list.items[list.items.length - 1] += "\n" + line.trim();
+    } else {
+      endList();
+      paragraph.push(line);
+    }
+  }
+  endParagraph();
+  endList();
+  return blocks;
+}
+
+// Bold (**), italic (*), code and, when `withReferences`, `[references]` (also one still being typed at the end)
+// inside one block. A * opens italic before a non-space and closes it after one, so "5 * 3" stays as it is. Bold and
+// italic may nest; one still open at the end (its closing marker not typed yet) covers the rest of the text.
+function parseChatInline(text: string, withReferences: boolean): ChatInline[] {
+  // A single * at the end may be the first half of a ** still being typed, or the end of an italic: held back either
+  // way, and an italic left open by it still covers its text.
+  if (/[^*]\*$|^\*$/.test(text)) {
+    text = text.slice(0, -1);
+  }
+  const pattern = withReferences ? /\*\*|\*|`[^`]*`?|\[[^\[\]]*\]|\[[^\[\]]*$/g : /\*\*|\*|`[^`]*`?/g;
+  const top: ChatInline[] = [];
+  const open: { kind: "bold" | "italic"; children: ChatInline[] }[] = [];
+  const current = () => (open.length > 0 ? open[open.length - 1].children : top);
+  // Closes the innermost open `kind`, and any format opened inside it.
+  const close = (kind: "bold" | "italic") => {
+    while (open.length > 0) {
+      const format = open.pop()!;
+      if (format.children.length > 0) {
+        current().push(
+          format.kind === "bold"
+            ? { kind: "bold", children: format.children }
+            : { kind: "italic", children: format.children },
+        );
+      }
+      if (format.kind === kind) {
+        return;
+      }
+    }
+  };
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const token = match[0];
+    if (start > last) {
+      current().push({ kind: "text", text: text.slice(last, start) });
+    }
+    if (token === "**" || token === "*") {
+      const kind = token === "**" ? "bold" : "italic";
+      const before = text[start - 1] ?? "";
+      const after = text[start + token.length] ?? "";
+      if (open.some((format) => format.kind === kind) && before !== "" && !/\s/.test(before)) {
+        close(kind);
+      } else if (after === "" || !/\s/.test(after)) {
+        // At the very end the marker may be one still being typed: opened, so it does not show.
+        open.push({ kind, children: [] });
+      } else {
+        current().push({ kind: "text", text: token });
+      }
+    } else if (token.startsWith("`")) {
+      const code = token.replace(/^`/, "").replace(/`$/, "");
+      if (code) {
+        current().push({ kind: "code", text: code });
+      }
+    } else {
+      current().push({ kind: "reference", text: token });
+    }
+    last = start + token.length;
+  }
+  if (last < text.length) {
+    current().push({ kind: "text", text: text.slice(last) });
+  }
+  while (open.length > 0) {
+    close(open[0].kind);
+  }
+  return top;
+}
+
+function renderChatInline(items: ChatInline[]): React.ReactNode[] {
+  return items.map((item, index) => {
+    if (item.kind === "bold") {
+      return <strong key={index}>{renderChatInline(item.children)}</strong>;
+    }
+    if (item.kind === "italic") {
+      return <em key={index}>{renderChatInline(item.children)}</em>;
+    }
+    if (item.kind === "code") {
+      return (
+        <code key={index} className="chat-inline-code">
+          {item.text}
+        </code>
+      );
+    }
+    if (item.kind === "reference") {
+      return (
+        <span key={index} className="chat-inline-reference">
+          {item.text}
+        </span>
+      );
+    }
+    return item.text;
+  });
+}
+
+// The answer as blocks. `leading` (the floated icon) is put inside the first block, so the icon and the first line
+// share one block: the bubble sizes itself to its text, and only an icon in the same block is counted in that width.
+function renderChatMarkdown(text: string, withReferences: boolean, leading?: React.ReactNode) {
+  const blocks = parseChatBlocks(text);
+  if (blocks.length === 0) {
+    return leading ?? null;
+  }
+  return blocks.map((block, index) => {
+    const first = index === 0 ? leading : null;
+    if (block.kind === "paragraph" || block.kind === "heading") {
+      return (
+        <p key={index} className={`chat-md-block${block.kind === "heading" ? " chat-md-heading" : ""}`}>
+          {first}
+          {renderChatInline(parseChatInline(block.text, withReferences))}
+        </p>
+      );
+    }
+    const items = block.items.map((item, itemIndex) => (
+      <li key={itemIndex}>
+        {itemIndex === 0 ? first : null}
+        {renderChatInline(parseChatInline(item, withReferences))}
+      </li>
+    ));
+    return block.kind === "bullets" ? (
+      <ul key={index} className="chat-md-block chat-md-list">
+        {items}
+      </ul>
+    ) : (
+      <ol key={index} className="chat-md-block chat-md-list" start={block.start}>
+        {items}
+      </ol>
     );
-    last = start + match[0].length;
-  }
-  if (last < typed.length) {
-    parts.push(typed.slice(last));
-  }
-  return parts;
+  });
 }
 
 // Shows an AI answer a character or a few at a time (at least 0.85 per frame, about 50 per second), so it appears to
 // be typed. `shown` may be fractional, so the pace can be below one character per frame; the text is cut at its whole
 // part. When the text grows while the answer streams in, it keeps going from where it is; when it falls far behind it
 // speeds up to catch up. With `hideReferences`, square-bracket references are left out of the shown text (the answer
-// itself keeps them) and skipped while typing; without it they are typed out in blue. With `sound` on, each word that appears plays one blip (at most one per frame),
-// and once the answer is `complete` and typed out to the end, two quick pips. The end is marked once even when silent,
-// so an answer finished while the chat was hidden does not chime later.
+// itself keeps them) and skipped while typing; without it they are typed out in blue. The shown text is rendered as a
+// small part of Markdown (renderChatMarkdown), with `leading` (the icon) inside its first block. With `sound` on, each
+// word that appears plays one blip (at most one per frame), and once the answer is `complete` and typed out to the end,
+// two quick pips. The end is marked once even when silent, so an answer finished while the chat was hidden does not
+// chime later.
 function TypewriterText({
   text,
   onProgress,
   sound = false,
   complete = true,
   hideReferences = false,
+  leading,
 }: {
   text: string;
   onProgress?: () => void;
   sound?: boolean;
   complete?: boolean;
   hideReferences?: boolean;
+  leading?: React.ReactNode;
 }) {
   const [shown, setShown] = useState(0);
   const visible = Math.floor(shown);
@@ -4644,7 +4826,7 @@ function TypewriterText({
     }
   }, [visible, complete, text.length]);
 
-  return <>{hideReferences ? displayed : withHighlightedReferences(displayed)}</>;
+  return <>{renderChatMarkdown(displayed, !hideReferences, leading)}</>;
 }
 
 function ChatPanel({
@@ -4821,12 +5003,15 @@ function ChatPanel({
                 </div>
               ) : null}
               <div className="chat-message-content">
-                {/* The floated icon sits inside the text block, not beside it: the bubble sizes itself to its text, and
-                    only an icon in the same block is counted in that width. Beside it, the bubble came out one icon too
-                    narrow, so the word being typed kept dropping to the next line and jumping back up. */}
-                {entry.role === "assistant" && (entry.content || entry.error) ? <ThinkingOrbit still /> : null}
+                {/* The floated icon sits inside the text, not beside it: the bubble sizes itself to its text, and only an
+                    icon in the same block is counted in that width. Beside it, the bubble came out one icon too narrow,
+                    so the word being typed kept dropping to the next line and jumping back up. For an answer the icon
+                    goes into its first paragraph (TypewriterText's `leading`). */}
                 {entry.error ? (
-                  <span className="reference-error">{entry.error}</span>
+                  <>
+                    {entry.role === "assistant" ? <ThinkingOrbit still /> : null}
+                    <span className="reference-error">{entry.error}</span>
+                  </>
                 ) : entry.role === "assistant" ? (
                   // Silent while another center tab is shown. Complete once no answer is streaming into this message.
                   <TypewriterText
@@ -4835,6 +5020,7 @@ function ChatPanel({
                     sound={isSoundOn && isVisible}
                     complete={!isStreaming || entry.id !== messages[messages.length - 1]?.id}
                     hideReferences={!areReferencesShown}
+                    leading={entry.content ? <ThinkingOrbit still /> : null}
                   />
                 ) : (
                   entry.content
