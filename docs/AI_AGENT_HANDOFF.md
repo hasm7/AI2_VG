@@ -48,7 +48,7 @@ START -> prepare -> summarize -> planner -+-> answer                            
 | `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions/comments/reviews/code changes of an entry issue, document or PR, evidence of entry events, nodes that mention an entry issue/PR/document | `question`, `plan`, `entry_points`, `settings`, `usage` | `evidence`, `usage`, `errors` |
 | `causes` | code + model follow-up | Events, root causes and topics: entry events, events evidenced by entry sources, root causes of entry events, events a code change contributed to, root causes in an entry component, events of an entry issue's topic | same | same |
 | `architecture` | code + model follow-up | Components: entry components, components affected by entry events, holding entry root causes, evidenced by entry sources, implemented in files an entry code change or PR modifies, dependency neighbours | same | same |
-| `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts, and one "What X's knowledge of Y rests on" fact per expert ranked 1-2 on each topic and component (`expertise_basis`, see below) | same | same |
+| `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts, and one "What X's knowledge of Y rests on" fact per expert ranked 1-2 on each topic and component (`expertise_basis`, see below); for a general `who` question (no entity named) the list of every person in the graph as a fact (`person_roster`, see below) | same | same |
 | `check` | code | Enough evidence? No entry points, no evidence, a `why` question without causal evidence, or a `ranking` question without metrics means no. Its routing also reads `explorer_ran`, `usage`, `settings` | `plan`, `entry_points`, `evidence`, `explorer_ran`, `usage`, `settings` | `sufficiency` |
 | `explorer` | model + read-only Cypher | Runs at most once, only when `check` says no, the explorer is on and the budget allows (section 4) | `question`, `evidence`, `sufficiency`, `settings` | `evidence`, `usage`, `explorer_ran` |
 | `answer` | model, 1 streamed call | Answers from the evidence only, cites references in square brackets (a node's name, or `fact-N` for a fact; see below), mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `conversation_summary`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
@@ -65,7 +65,7 @@ opens only when the ringed node itself is clicked; any tap in the graph, another
 the ring (`trySelectPending` and the core `tap` handler in `GraphView`). Under an answer the node chips come first,
 then the fact chips, each group in the order the answer cites them. In the answer text the square-bracket references
 are hidden by default and shown with the `[ ]` button in the message box's corner (`chat-references-button`, left of
-the speaker; on every page load hidden, kept across `New`). Only the display changes: the answer, its citations, the
+the speaker; hidden in a new tab, kept across `New` and a reload). Only the display changes: the answer, its citations, the
 test scoring and the conversation history keep the brackets. Hidden (`withoutReferences` in `TypewriterText`), every
 bracket is removed, unresolved ones too, since the "Unresolved references" line under the answer still reports them,
 and line breaks are kept so paragraphs never move: a line holding only references is removed with one line break; a
@@ -155,6 +155,23 @@ data); `get_experts` adds it for every expert on the one subject asked about. Th
 what someone's knowledge rests on when the answer says they know something. Nothing is written and the embeddings are
 unchanged.
 
+**Every person, for "who is in the project"** (`person_roster` in `specialists.py`, added 2026-09-28). Search keeps at
+most `entry_points` hits, chosen by similarity, so a general "who" question could miss a person by chance and the
+answer still stated a total (seen: "four persons" without Martin Ek; asked "not five?", the answer then agreed that it
+had missed him, although he is the customer, not a team member). When the planner types a question `who` and names no
+entity, `people` adds one fact listing every person in the graph: e-mail address (a different domain usually means
+another organisation, such as a customer), community, what they did counted per kind (`ROSTER_PHRASES`: pull
+requests, reviews, documents, issues, Slack, mails sent and received, meetings, events) and the subjects of up to two
+mails they sent, which often show their role. Mailboxes and name-only identities that could be several persons are
+listed apart, as "Not counted as people". At most `MAX_ROSTER` = 30 persons, then "... and N more"; about 1 600
+characters today. Three answer-prompt rules go with it: tell the people who work in the project apart from others who
+appear (a customer, another organisation, a shared mailbox) and say why; say "all", "only" or a total only when the
+evidence holds a complete list; and when the user questions an answer, check the evidence again, keep what holds and
+explain why, never agree just because the user suggests it, and do not open with "you are right" unless the evidence
+shows the answer was wrong. Checked with "Vilka är med i detta projekt?" followed by "inte 5 personer?", twice: four
+team members and Martin Ek as an external contact from Northwind both times; the follow-up explains that five
+persons appear, of whom four work in the project.
+
 ## 5. State
 
 `backend/ai_agent/state.py`, one question per run. The conversation is kept outside the graph (`graph.py`, per
@@ -200,8 +217,10 @@ the summary and how many messages it covers; a message is dropped from the store
 failed summary call keeps the old summary and retries the same turns on the next question. With the summary off
 (`conversation_summary.enabled = false`), no summary is used or kept, and the store simply keeps the last 24 messages.
 
-Limit: the conversation lives in the backend's memory. `New chat`, a page reload (both a new `thread_id`) or a
-backend restart starts a new conversation.
+Limit: the conversation lives in the backend's memory. `New` (a new `thread_id`) or a backend restart starts a new
+conversation. A page reload keeps the `thread_id` (the tab's storage, section 8), so the backend still knows the
+conversation after a reload unless the backend was restarted in between; then the chat still shows the old messages,
+but the next question starts without its history.
 
 ## 6. Settings
 
@@ -244,6 +263,14 @@ connections and 0 running transactions one second after.
 `POST /api/ai/chat` with `{"message", "thread_id"}`, streamed as Server-Sent Events: `status`, `token`, `tool_error`,
 `sources`, `done`. `done` also carries `usage`, `cost_usd`, `plan`, `entry_points`, `sufficiency` and `trace`.
 
+`status` is one line per step as it starts (`traced` in `nodes.py`), shown in the chat beside the thinking animation:
+"Preparing...", "Summarizing the conversation...", "Planning...", "Finding entry points in the graph...", then one line
+for the specialists, "Checking the evidence...", "Exploring the graph..." (only when the explorer runs) and "Writing
+the answer...". The specialists run in parallel, and each sends its line as it starts, so a line naming only itself
+was overwritten by whichever started last. Each now sends the same line built from the plan (`_specialists_status`),
+for example "Specialists causes, architecture and sources are fetching...", or "Specialist people is fetching..."
+when there is one.
+
 `GET /api/ai/agent` (read-only, `describe.py`): `nodes` (`id`, `title`, `kind`, `model`, `enabled`, `description`,
 `reads`, `writes`), `edges` (`source`, `target`, `conditional`, `label`), `state` (`name`, `type`, `merge`,
 `description`, `written_by`, `read_by`), `settings`, `available_models`, `reasoning_models` (the available models
@@ -269,7 +296,7 @@ come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
 | State | Hidden until `Show state` is pressed (`Hide state` hides it again; hidden again after a reload). Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
 | Entry points | The nodes every chosen specialist started from for the latest chat question (all get the same question, plan and entry points; there is no separate message per specialist), as a table (number, node, label, found by lookup/vector/fulltext), best first by the fused score (not shown). The heading is always shown; before any question, for small talk, or when nothing was found, a short line says so |
 | Last run | Question, plan (route, types, specialists, keywords, entities, language), the planner's reason, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
-| Conversation cost | Every question in the current chat: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). `New chat` and a reload empty it, as they start a new conversation. Test questions are not counted. A question that ends in an error is not listed |
+| Conversation cost | Every question in the current chat: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). `New` empties it, as it starts a new conversation; a reload keeps it. Test questions are not counted. A question that ends in an error is not listed |
 | Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, reasoning effort per step (a step's select is disabled while its model is not a reasoning model; the caption explains effort and its cost), budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. Model steps and specialists are listed in the order they run in the drawing (planner,
 specialists, explorer, answer; sources, causes, architecture, people), since the backend returns the keys
 alphabetically. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
@@ -280,8 +307,21 @@ The same callback (`handleRunComplete`) appends the question and its cost to `se
 
 `ChatPanel` stays mounted and is only hidden while another center tab is open, so the conversation (and an answer
 still streaming) survives switching to `Configure AI agent` and back. The thread id is made per conversation
-(`newThreadId`): on page load and by the `New chat` button, so either starts a new conversation in the chat window and
-in the backend's history alike. The button, labelled `New`, sits in the top right corner of the message box, above `Send`
+(`newThreadId`): in a new tab and by the `New` button, so either starts a new conversation in the chat window and in the
+backend's history alike.
+
+The chat also survives a page reload in the same tab (added 2026-09-28). A page reloads on its own when the Vite dev
+server's websocket drops (the Vite client then polls and calls `location.reload()`: after sleep, a long-hidden tab or a
+network change) or when the browser discards an inactive tab to save memory; before, that emptied the chat. The thread
+id, the messages, the unsent text, the sound and references choices (`ChatPanel`), and `lastAgentRun` and
+`sessionCosts` (`App`) are written to the tab's `sessionStorage` (`CHAT_STORAGE_KEYS`, `readStored`, `writeStored`)
+whenever they change and read back on load. Messages read back are marked `restored` and shown whole at once, silently
+(`TypewriterText` `instant`); an answer that was still streaming when the page reloaded and has no text shows "The
+answer was interrupted when the page reloaded. Please ask again." Closing the tab clears the storage; a new tab starts
+empty. Every read falls back to the default and a failed write is ignored, so the chat works without storage, only
+without surviving a reload.
+
+The `New` button, sits in the top right corner of the message box, above `Send`
 (`chat-new-button`, a small outlined box in muted colours, positioned absolutely in `chat-input-row`); it is always shown, but disabled until the chat has messages and while an answer
 streams. It empties the messages,
 keeps any unsent text in the box, and in `App` (`onNewChat`) empties `sessionCosts` and clears `lastAgentRun`, so `Last run`, `Entry points`, the
@@ -314,7 +354,7 @@ the word being typed kept dropping to the next line and jumping back up, about o
 Chrome: 14-23 upward jumps per answer before, 0 after, at widths 360-720 px).
 
 Typing sound: a speaker button left of `New` (`chat-sound-button`, both in `chat-input-corner`) turns a quiet blip per
-word on or off while an answer is typed out. It is on on every page load and stays as set across `New`. `TypewriterText`
+word on or off while an answer is typed out. It is on in a new tab and stays as set across `New` and a reload. `TypewriterText`
 plays one blip (`playBlip`) when the characters revealed in a frame include the start of a word (`revealsWordStart`),
 about eight per second, and only while the chat tab is shown (`sound={isSoundOn && isVisible}`). The blip is a 45 ms
 triangle tone with a slightly random pitch from the Web Audio API (no sound file); one `AudioContext` for the page,

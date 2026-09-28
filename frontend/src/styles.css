@@ -705,6 +705,49 @@ main {
   animation: none;
 }
 
+/* The empty chat: the figure larger, centred in the message area with a short welcome under it. It moves at about a
+   tenth of the thinking speed, so it adds life without looking as if the AI were working. */
+.chat-welcome {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.thinking-orbit-welcome {
+  width: 56px;
+  height: 56px;
+  margin-bottom: 6px;
+}
+
+.thinking-orbit-welcome .thinking-ring {
+  animation-duration: 50s;
+}
+
+.thinking-orbit-welcome .thinking-spin {
+  animation-duration: 24s;
+}
+
+.thinking-orbit-welcome .thinking-core {
+  animation-duration: 6s;
+}
+
+.chat-welcome-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.chat-welcome-subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
 @keyframes thinking-turn {
   to {
     transform: rotate(360deg);

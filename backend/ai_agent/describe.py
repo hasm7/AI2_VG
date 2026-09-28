@@ -52,8 +52,8 @@ NODE_INFO = {
                      "reads": ["question", "plan", "entry_points", "question_vector", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
     "people": {"kind": "code + model", "model_key": "specialists", "title": "People specialist",
                "description": "Persons, expertise, collaboration and communities; metric rankings for ranking "
-                              "questions, with what the leading experts' knowledge rests on. Follow-up tools: "
-                              "get_person, get_experts, rank.",
+                              "questions, with what the leading experts' knowledge rests on; every person in the "
+                              "graph for a general who-question. Follow-up tools: get_person, get_experts, rank.",
                "reads": ["question", "plan", "entry_points", "question_vector", "settings", "usage"], "writes": ["evidence", "usage", "errors"]},
     "check": {"kind": "code", "title": "Check",
               "description": "Is the evidence enough? No entry points, no evidence, a why question without causal "

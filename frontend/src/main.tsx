@@ -520,6 +520,8 @@ type ChatMessage = {
   droppedCitations?: string[];
   toolErrors?: ChatToolError[];
   error?: string;
+  // Read back from the tab's storage after a reload: shown at once, not typed out again.
+  restored?: boolean;
 };
 
 type ChatSseEvent =
@@ -670,8 +672,8 @@ type AgentRun = {
   sufficiency: { ok: boolean; reason: string } | null;
 };
 
-// One answered chat question in the current conversation, for the conversation cost table. A new chat or a reload
-// starts a new list, just as it starts a new conversation.
+// One answered chat question in the current conversation, for the conversation cost table. New starts a new list,
+// just as it starts a new conversation; a reload keeps it (the tab's storage).
 type AgentSessionCost = { question: string; cost_usd: number; asked_at: string };
 
 const SESSION_QUESTION_MAX_CHARS = 120;
@@ -4380,10 +4382,53 @@ function BuildGraphLayersPanel() {
   );
 }
 
-// One thread id per conversation: New chat or a reload starts a new conversation, both in the chat window and in the
-// backend's history (which is kept per thread id).
+// One thread id per conversation: New starts a new conversation, both in the chat window and in the backend's history
+// (which is kept per thread id). A reload keeps it (the tab's storage below), so the backend still knows the
+// conversation unless the backend itself was restarted.
 function newThreadId(): string {
   return crypto.randomUUID();
+}
+
+// The chat survives a page reload in the same tab: the conversation, its thread id, the unsent text, the sound and
+// references choices, the last run and the conversation cost are kept in the tab's sessionStorage. A page reloads on
+// its own when the Vite dev server's connection drops (sleep, a long-hidden tab) or when the browser discards an
+// inactive tab to save memory; before, that emptied the chat. Closing the tab clears it; New empties the conversation.
+// Storage can be unavailable or full, so every read falls back to the default and a failed write is ignored.
+const CHAT_STORAGE_KEYS = {
+  threadId: "chat.threadId",
+  messages: "chat.messages",
+  input: "chat.input",
+  soundOn: "chat.soundOn",
+  referencesShown: "chat.referencesShown",
+  lastRun: "agent.lastRun",
+  sessionCosts: "agent.sessionCosts",
+};
+
+function readStored<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    return raw === null ? fallback : (JSON.parse(raw) as T);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStored(key: string, value: unknown) {
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage off or full: the chat still works, it just does not survive a reload.
+  }
+}
+
+// Messages read back after a reload are shown at once. An answer that was still on its way when the page reloaded
+// never finished, so an empty one says so.
+function restoreMessages(stored: ChatMessage[]): ChatMessage[] {
+  return stored.map((entry) =>
+    entry.role === "assistant" && !entry.content && !entry.error
+      ? { ...entry, restored: true, error: "The answer was interrupted when the page reloaded. Please ask again." }
+      : { ...entry, restored: true },
+  );
 }
 
 async function* readSseEvents<T = ChatSseEvent>(response: Response): AsyncGenerator<T> {
@@ -4429,10 +4474,12 @@ async function* readSseEvents<T = ChatSseEvent>(response: Response): AsyncGenera
 
 // A small "thinking" animation next to the agent's status text, in the style of the right panel's knowledge graphic:
 // an amber core that pulses, blue and turquoise nodes on lines circling it, and a turquoise ring turning the other way.
-// `still`: smaller and without motion, as the AI's icon on each of its answers.
-function ThinkingOrbit({ still = false }: { still?: boolean }) {
+// `still`: smaller and without motion, as the AI's icon on each of its answers. `welcome`: larger and very slow, in the
+// empty chat, so it adds life without looking busy.
+function ThinkingOrbit({ still = false, welcome = false }: { still?: boolean; welcome?: boolean }) {
+  const variant = still ? " thinking-orbit-still" : welcome ? " thinking-orbit-welcome" : "";
   return (
-    <svg className={`thinking-orbit${still ? " thinking-orbit-still" : ""}`} viewBox="0 0 40 40" aria-hidden="true">
+    <svg className={`thinking-orbit${variant}`} viewBox="0 0 40 40" aria-hidden="true">
       <ellipse className="thinking-ring" cx="20" cy="20" rx="17" ry="7" />
       <g className="thinking-spin">
         <line className="thinking-edge" x1="20" y1="20" x2="34" y2="12" />
@@ -4768,6 +4815,7 @@ function TypewriterText({
   complete = true,
   hideReferences = false,
   leading,
+  instant = false,
 }: {
   text: string;
   onProgress?: () => void;
@@ -4775,14 +4823,16 @@ function TypewriterText({
   complete?: boolean;
   hideReferences?: boolean;
   leading?: React.ReactNode;
+  // Shown whole at once, silently (an answer read back after a reload).
+  instant?: boolean;
 }) {
-  const [shown, setShown] = useState(0);
+  const [shown, setShown] = useState(() => (instant ? text.length : 0));
   const visible = Math.floor(shown);
   const typed = text.slice(0, visible);
   const displayed = hideReferences ? withoutReferences(typed, text, complete) : typed;
   const previousDisplayedRef = useRef("");
-  const previousVisibleRef = useRef(0);
-  const hasChimedRef = useRef(false);
+  const previousVisibleRef = useRef(instant ? text.length : 0);
+  const hasChimedRef = useRef(instant);
 
   useEffect(() => {
     if (shown >= text.length) {
@@ -4840,17 +4890,28 @@ function ChatPanel({
   onNewChat?: () => void;
   isVisible: boolean;
 }) {
-  const [threadId, setThreadId] = useState(newThreadId);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
+  // Read back from the tab's storage after a reload (CHAT_STORAGE_KEYS), otherwise a new conversation.
+  const [threadId, setThreadId] = useState(() => readStored(CHAT_STORAGE_KEYS.threadId, newThreadId()));
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    restoreMessages(readStored<ChatMessage[]>(CHAT_STORAGE_KEYS.messages, [])),
+  );
+  const [input, setInput] = useState(() => readStored(CHAT_STORAGE_KEYS.input, ""));
   const [status, setStatus] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState("");
-  // Typing sound, on on every page load; turned off with the speaker button.
-  const [isSoundOn, setIsSoundOn] = useState(true);
-  // References in square brackets in the answers: hidden on every page load; shown with the brackets button.
-  const [areReferencesShown, setAreReferencesShown] = useState(false);
+  // Typing sound, on for a new tab; turned off with the speaker button.
+  const [isSoundOn, setIsSoundOn] = useState(() => readStored(CHAT_STORAGE_KEYS.soundOn, true));
+  // References in square brackets in the answers: hidden for a new tab; shown with the brackets button.
+  const [areReferencesShown, setAreReferencesShown] = useState(() =>
+    readStored(CHAT_STORAGE_KEYS.referencesShown, false),
+  );
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.threadId, threadId), [threadId]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.messages, messages), [messages]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.input, input), [input]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.soundOn, isSoundOn), [isSoundOn]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.referencesShown, areReferencesShown), [areReferencesShown]);
 
   useEffect(() => {
     // Also when the tab is shown again: a hidden element has no layout, so its scroll position may be lost.
@@ -4986,7 +5047,11 @@ function ChatPanel({
     <div className="chat-panel" style={isVisible ? undefined : { display: "none" }}>
       <div className="chat-messages">
         {messages.length === 0 ? (
-          <p className="reference-empty">Ask a question about the graph, or just say hello.</p>
+          <div className="chat-welcome">
+            <ThinkingOrbit welcome />
+            <p className="chat-welcome-title">Ask a question about the graph</p>
+            <p className="chat-welcome-subtitle">or just say hello</p>
+          </div>
         ) : (
           messages.map((entry) => (
             <div key={entry.id} className={`chat-message chat-message-${entry.role}`}>
@@ -5021,6 +5086,7 @@ function ChatPanel({
                     complete={!isStreaming || entry.id !== messages[messages.length - 1]?.id}
                     hideReferences={!areReferencesShown}
                     leading={entry.content ? <ThinkingOrbit still /> : null}
+                    instant={entry.restored}
                   />
                 ) : (
                   entry.content
@@ -6459,9 +6525,17 @@ function AgentTestQuestions() {
 
 function App() {
   const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes" | "agent">("message");
-  const [lastAgentRun, setLastAgentRun] = useState<AgentRun | null>(null);
-  const [sessionCosts, setSessionCosts] = useState<AgentSessionCost[]>([]);
+  // Kept in the tab's storage with the chat, so a reload does not empty them either.
+  const [lastAgentRun, setLastAgentRun] = useState<AgentRun | null>(() =>
+    readStored<AgentRun | null>(CHAT_STORAGE_KEYS.lastRun, null),
+  );
+  const [sessionCosts, setSessionCosts] = useState<AgentSessionCost[]>(() =>
+    readStored<AgentSessionCost[]>(CHAT_STORAGE_KEYS.sessionCosts, []),
+  );
   const graphViewRef = useRef<GraphViewHandle>(null);
+
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.lastRun, lastAgentRun), [lastAgentRun]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.sessionCosts, sessionCosts), [sessionCosts]);
 
   const handleRunComplete = (run: AgentRun) => {
     setLastAgentRun(run);

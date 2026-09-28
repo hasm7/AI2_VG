@@ -40,11 +40,14 @@ class PlanOut(BaseModel):
     reason: str
 
 
-def traced(node_name: str, status_text: str):
+def traced(node_name: str, status_text):
+    """Wraps a node: sends its status line to the chat as it starts, and appends its trace entry. `status_text` is
+    fixed text, or a function of the node's state for a line that depends on it."""
     def decorate(body):
         @functools.wraps(body)
         def node(state, config):
-            get_stream_writer()({"type": "status", "text": status_text})
+            text = status_text(state) if callable(status_text) else status_text
+            get_stream_writer()({"type": "status", "text": text})
             started = time.perf_counter()
             update = body(state, config) or {}
             summary = update.pop("_summary", "")
@@ -248,8 +251,18 @@ def _within_budget(state) -> bool:
 # specialists (code; one node per specialist)
 # ---------------------------------------------------------------------------
 
+def _specialists_status(state) -> str:
+    """One status line naming every specialist the planner chose, e.g. "Specialists sources, causes and architecture
+    are fetching...". They run in parallel and each sends its status as it starts, so a line of its own name would be
+    overwritten by whichever started last; all of them send this same line instead."""
+    names = (state.get("plan") or {}).get("specialists") or []
+    if len(names) == 1:
+        return f"Specialist {names[0]} is fetching..."
+    return f"Specialists {', '.join(names[:-1])} and {names[-1]} are fetching..."
+
+
 def make_specialist(name: str):
-    @traced(name, f"Specialist {name} is fetching...")
+    @traced(name, _specialists_status)
     def specialist(state, config):
         configurable = config["configurable"]
         settings = state["settings"]

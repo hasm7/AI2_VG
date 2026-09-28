@@ -149,6 +149,75 @@ ACTIVITY_PHRASES = {
     "SENT_MAIL": "sent mail",
     "SPOKE_TEAMS_TRANSCRIPT_SEGMENT": "spoke in meeting segment",
 }
+# Every person in the graph, for a general "who is in the project" question: search finds only the persons most
+# similar to the question (at most `entry_points`), so without this list the answer could miss someone by chance and
+# still state a total. Per person: e-mail (a different domain usually means another organisation, such as a
+# customer), community, what they did counted per kind, and the subjects of mails they sent (often their role, such as
+# reporting a problem). Mailboxes and name-only identities that could be several persons are listed apart. Read only.
+PERSON_ROSTER = """
+MATCH (p:Person)
+OPTIONAL MATCH (p)-[r]->(a) WHERE type(r) IN $types
+WITH p, type(r) AS how, count(DISTINCT a) AS n
+WITH p, collect(CASE WHEN how IS NULL THEN null ELSE {how: how, n: n} END) AS activity
+OPTIONAL MATCH (p)<-[:MAIL_RECIPIENT]-(received:MailMessage)
+WITH p, activity, count(DISTINCT received) AS received
+OPTIONAL MATCH (p)-[:SENT_MAIL]->(sent:MailMessage)
+WITH p, activity, received, sent ORDER BY sent.sent_at
+RETURN p.name AS name, p.emails AS emails, p.actor_type AS actor_type,
+       coalesce(p.identity_ambiguous, false) AS ambiguous, p.community_id AS community, activity, received,
+       [subject IN collect(DISTINCT sent.subject) WHERE subject IS NOT NULL][..2] AS mail_subjects
+ORDER BY name
+"""
+
+# How each kind of activity is counted in the roster.
+ROSTER_PHRASES = {
+    "AUTHORED_PR": "pull requests written",
+    "WROTE_PR_REVIEW": "pull request reviews",
+    "AUTHORED_DOCUMENT_VERSION": "document versions written",
+    "CREATED_ISSUE": "issues created",
+    "OWNS_ISSUE": "issues owned",
+    "CHANGED_ISSUE_VERSION": "issue changes",
+    "WROTE_ISSUE_COMMENT": "issue comments",
+    "SENT_SLACK_MESSAGE": "Slack messages",
+    "SENT_MAIL": "mails sent",
+    "PARTICIPATED_IN_MEETING": "meetings attended",
+    "SPOKE_TEAMS_TRANSCRIPT_SEGMENT": "meeting segments spoken",
+    "ACTED_IN_EVENT": "events",
+}
+MAX_ROSTER = 30  # persons listed, then "... and N more"
+
+
+def person_roster(session, timeout: float) -> str:
+    """One fact listing every person in the graph, e.g. "All persons in the graph (5 people): Anna Berg
+    (anna.berg@example.com, community collab-2): issues created: 1, mails sent: 2, ...; ... Not counted as people:
+    Support ..."."""
+    rows = read(session, PERSON_ROSTER, {"types": list(ROSTER_PHRASES)}, timeout)
+    people, apart = [], []
+    for row in rows:
+        counts = {item["how"]: item["n"] for item in row["activity"] if item}
+        done = [f"{phrase}: {counts[how]}" for how, phrase in ROSTER_PHRASES.items() if counts.get(how)]
+        if row["received"]:
+            done.append(f"mails received: {row['received']}")
+        details = ", ".join(row["emails"] or []) or "no e-mail known"
+        if row["community"]:
+            details += f", community {row['community']}"
+        line = f"{row['name']} ({details}): {', '.join(done) or 'no recorded activity'}"
+        if row["mail_subjects"]:
+            line += ", mail subjects: " + " | ".join(f'"{subject}"' for subject in row["mail_subjects"])
+        if row["actor_type"] == "mailbox":
+            apart.append(f"{line} - a shared mailbox, not a person")
+        elif row["ambiguous"]:
+            apart.append(f"{line} - a name-only mention that could be one of several persons")
+        else:
+            people.append(line)
+    more = len(people) - MAX_ROSTER
+    text = (f"All persons in the graph ({len(people)} people): " + "; ".join(people[:MAX_ROSTER])
+            + (f"; ... and {more} more" if more > 0 else ""))
+    if apart:
+        text += ". Not counted as people: " + "; ".join(apart)
+    return text
+
+
 MAX_BASIS_EXPERTS = 2  # experts per subject whose basis is given, best rank first
 MAX_BASIS_ACTIVITIES = 6  # activities listed per expert, then "... and N more"
 
@@ -250,6 +319,10 @@ def people(session, entry_ids, plan, settings, question_vector):
                      {"activity": PERSON_ACTIVITY_TYPES})
     _add_participation(session, packet, entry_ids, settings)
     timeout = settings["query_timeout_seconds"]
+    # A general "who" question (no person, meeting or other entity named) gets the full list of persons, so the answer
+    # does not depend on which persons search happened to find.
+    if "who" in plan.get("question_types", []) and not plan.get("entities"):
+        packet["facts"].append(person_roster(session, timeout))
     # Ranking questions are answered from the metric properties directly, not from search.
     if "ranking" in plan.get("question_types", []):
         persons = read(session, RANKING_PERSONS, None, timeout)
