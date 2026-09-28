@@ -478,6 +478,52 @@ main {
   overflow: hidden;
 }
 
+/* The centre panel's top tabs (Build graph layers, Configure AI agent, Chat with AI): a row of pills above the panel
+   in the page's dark blues, the active one lit with the blue gradient of the side panels' edges. The inner tabs of
+   Build graph layers keep the style above. */
+.center-panel > .center-tabs {
+  gap: 6px;
+  padding: 0 0 6px 2px;
+}
+
+.center-panel > .center-tabs .center-tab {
+  height: 30px;
+  min-width: 0;
+  padding: 0 16px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 999px;
+  background: rgba(11, 18, 32, 0.55);
+  color: #cbd5e1;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.center-panel > .center-tabs .center-tab:hover:not(.center-tab-active) {
+  border-color: rgba(96, 165, 250, 0.7);
+  background: rgba(11, 18, 32, 0.75);
+  color: #ffffff;
+}
+
+.center-panel > .center-tabs .center-tab-active {
+  border-color: transparent;
+  background: linear-gradient(145deg, #0ea5e9 0%, #3b82f6 52%, #1d4ed8 100%);
+  color: #ffffff;
+  box-shadow:
+    0 0 12px rgba(34, 211, 238, 0.35),
+    0 2px 8px rgba(29, 78, 216, 0.35);
+}
+
+.center-panel > .center-tab-panel {
+  margin-top: 0;
+  border-radius: 12px;
+}
+
 .build-graph-layers {
   display: grid;
   grid-template-rows: auto 1fr;
