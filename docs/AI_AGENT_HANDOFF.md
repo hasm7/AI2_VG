@@ -58,7 +58,24 @@ in square brackets (its name), and every distinct fact gets its own reference `f
 question; the same fact from two specialists keeps one number), since a fact has no node. `_citations` resolves every
 bracket in the answer against these references: a node becomes a citation with its label, a fact a citation with
 label `Fact` (`FACT_LABEL`) and the fact text as `display_name`. Anything else ends up in `dropped_citations`, shown in
-the chat as "Unresolved references". In the chat a node citation is a chip that selects the node in the graph; a fact
+the chat as "Unresolved references". In the chat a node citation is a chip that finds the node in the graph (switching
+the filter to `All` when needed), rings it (class `citation-target`: black `#000000`, 7 px, drawn over the entry-point
+and selected rings; black because node colours cover every hue) and centres it; any open property list is closed and the selection cleared. The property list
+opens only when the ringed node itself is clicked; any tap in the graph, another citation or a filter change removes
+the ring (`trySelectPending` and the core `tap` handler in `GraphView`). Under an answer the node chips come first,
+then the fact chips, each group in the order the answer cites them. In the answer text the square-bracket references
+are hidden by default and shown with the `[ ]` button in the message box's corner (`chat-references-button`, left of
+the speaker; on every page load hidden, kept across `New`). Only the display changes: the answer, its citations, the
+test scoring and the conversation history keep the brackets. Hidden (`withoutReferences` in `TypewriterText`), every
+bracket is removed, unresolved ones too, since the "Unresolved references" line under the answer still reports them,
+and line breaks are kept so paragraphs never move: a line holding only references is removed with one line break; a
+reference at the start of a line is removed with the spaces after it; elsewhere a reference is removed with the spaces
+(not line breaks) before it ("was blocked [AUTH-17 v3]." reads "was blocked."). A bracket still being typed is hidden
+until it closes, and spaces and line breaks at the end of the typed text are held back until the next visible
+character, so no empty line appears and disappears while typing (seen 2026-09-28 with a line of references between two
+paragraphs). While typing, a whole reference is passed over in one step (`skipReferences`), so it causes no pause and no
+blip. Shown (`withHighlightedReferences`), every `[...]`, brackets included, is typed out in deep blue
+(`chat-inline-reference`, `#1d4ed8`); a fact
 citation is a dashed chip (`chat-citation-fact`) showing `fact-N` and the start of the fact, with the full text on
 hover, and is not clickable. Before facts had references, the answer model sometimes put a whole `Fact:` line in
 brackets, which showed as unresolved although the claim was grounded.
@@ -257,6 +274,23 @@ streams. It empties the messages,
 keeps any unsent text in the box, and in `App` (`onNewChat`) empties `sessionCosts` and clears `lastAgentRun`, so `Last run`, `Entry points`, the
 highlighted path in the agent drawing and the last-run summary in the node details are reset as before any question. The old
 thread stays in the backend's memory until it is pushed out (at most 200 threads).
+
+The AI's bubble is only as wide as its text (`align-self: flex-start`), with a small floated icon
+(`ThinkingOrbit still`) at its start. The icon is rendered inside `chat-message-content`, not beside it: only a float in
+the same block counts in the bubble's width. Beside it (before 2026-09-28) the bubble came out one icon too narrow, so
+the word being typed kept dropping to the next line and jumping back up, about once per word (measured in headless
+Chrome: 14-23 upward jumps per answer before, 0 after, at widths 360-720 px).
+
+Typing sound: a speaker button left of `New` (`chat-sound-button`, both in `chat-input-corner`) turns a quiet blip per
+word on or off while an answer is typed out. It is on on every page load and stays as set across `New`. `TypewriterText`
+plays one blip (`playBlip`) when the characters revealed in a frame include the start of a word (`revealsWordStart`),
+about eight per second, and only while the chat tab is shown (`sound={isSoundOn && isVisible}`). The blip is a 45 ms
+triangle tone with a slightly random pitch from the Web Audio API (no sound file); one `AudioContext` for the page,
+created and resumed by a click (`unlockBlips`): sending a message (Send or Enter) while the sound is on, or turning
+the sound on, since browsers start audio only after a click. On, the button is deep blue with sound waves; off, grey with a small cross. When an answer is complete (no
+longer streaming into that message) and typed out to the end, two quick rising sine pips follow (`playDoneChime`,
+1175 and 1568 Hz, 90 ms apart); the end is marked once per message even when silent, so an answer that finished while
+the chat was hidden does not chime later.
 
 ## 9. Test Questions and Model Choice
 

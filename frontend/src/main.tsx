@@ -1372,6 +1372,15 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
           },
         },
         {
+          // The node a chat citation points to: after the entry-point and selected rules, so its ring always shows.
+          // Black, since node colours cover every hue (Person is amber) and the other rings are pink and blue.
+          selector: "node.citation-target",
+          style: {
+            "border-color": "#000000",
+            "border-width": 7,
+          },
+        },
+        {
           selector: ".hidden",
           style: {
             display: "none",
@@ -1430,6 +1439,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     });
 
     graph.on("tap", (event: EventObject) => {
+      // Any tap in the graph (a node, an edge or the background) ends the citation ring.
+      graph.nodes(".citation-target").removeClass("citation-target");
       if (event.target === graph) {
         setSelectedNodeId(null);
         setSelection(null);
@@ -1621,18 +1632,15 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       return;
     }
     pendingSelectionRef.current = null;
-    setSelectedNodeId(match.id);
-    setSelection({
-      title: match.label,
-      rows: [
-        ["label", match.type],
-        ["id", match.id],
-        ["summary", match.summary ?? ""],
-        ...propertyRows(match.properties),
-      ],
-    });
+    // A citation rings and centres its node; the property list opens only when the node itself is clicked. Any open
+    // selection is closed, so the list never shows another node than the ringed one.
+    setSelectedNodeId(null);
+    setSelection(null);
     const node = graphRef.current?.getElementById(match.id);
     if (node && !node.empty()) {
+      graphRef.current!.elements(":selected").unselect();
+      graphRef.current!.nodes(".citation-target").removeClass("citation-target");
+      node.addClass("citation-target");
       graphRef.current!.animate({
         center: { eles: node },
         zoom: Math.max(graphRef.current!.zoom(), 1.15),
@@ -4439,10 +4447,160 @@ function ThinkingOrbit({ still = false }: { still?: boolean }) {
   );
 }
 
-// Shows an AI answer a few characters at a time, fast, so it appears to be typed. When the text grows while the answer
-// streams in, it keeps going from where it is; when it falls far behind it speeds up to catch up.
-function TypewriterText({ text, onProgress }: { text: string; onProgress?: () => void }) {
+// Typing sound: one short, quiet blip per word, made by the browser's Web Audio API (no sound file). One AudioContext
+// for the whole page, created on first use; browsers allow only a few, and start one only after a click, so it is
+// created and resumed from a click: sending a message (Send or Enter) or turning the sound on.
+let blipContext: AudioContext | null = null;
+
+function unlockBlips() {
+  if (!blipContext) {
+    blipContext = new AudioContext();
+  }
+  if (blipContext.state === "suspended") {
+    void blipContext.resume();
+  }
+}
+
+// One short tone that fades out, `delay` seconds from now.
+function playTone(type: OscillatorType, frequency: number, peak: number, duration: number, delay = 0) {
+  const context = blipContext;
+  if (!context || context.state !== "running") {
+    return;
+  }
+  const start = context.currentTime + delay;
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = type;
+  oscillator.frequency.value = frequency;
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(peak, start + 0.004);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(gain).connect(context.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration + 0.005);
+}
+
+function playBlip() {
+  // A slightly different pitch per blip, so it sounds alive rather than like a metronome.
+  playTone("triangle", 760 + Math.random() * 180, 0.045, 0.045);
+}
+
+// Two quick, clearer pips, rising, when an answer has been typed out to the end.
+function playDoneChime() {
+  playTone("sine", 1175, 0.06, 0.07);
+  playTone("sine", 1568, 0.06, 0.08, 0.09);
+}
+
+// True when the characters revealed from `from` to `to` include the first character of a word.
+function revealsWordStart(text: string, from: number, to: number) {
+  for (let index = from; index < to; index += 1) {
+    if (!/\s/.test(text[index]) && (index === 0 || /\s/.test(text[index - 1]))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// With references hidden, the typing passes over a whole `[reference]` in one step instead of typing it out unseen.
+// It stops at an opening bracket whose closing bracket has not arrived yet, unless the answer is complete.
+function skipReferences(text: string, from: number, to: number, complete: boolean) {
+  let end = to;
+  for (let index = from; index < Math.min(Math.floor(end), text.length); index += 1) {
+    if (text[index] !== "[") {
+      continue;
+    }
+    const close = text.indexOf("]", index);
+    if (close === -1) {
+      return complete ? end : index;
+    }
+    end = Math.max(end, close + 1);
+    index = close;
+  }
+  return Math.min(text.length, end);
+}
+
+// The typed-out part of an answer as shown with references hidden. Every `[...]` is removed, unresolved ones too,
+// since the "Unresolved references" line under the answer still reports them; line breaks are kept, so paragraphs
+// never move:
+// - a line holding only references is removed with one line break ("A.\n[x] [y]\n\nB" reads "A.\n\nB");
+// - references at the start of a line are removed with the spaces after them;
+// - elsewhere a reference is removed with the spaces (not line breaks) before it ("was blocked [x]." reads
+//   "was blocked.").
+// A bracket still being typed (no closing bracket yet) is hidden too, unless the full answer has no closing bracket
+// after it. Spaces and line breaks at the end are held back until the next visible character, so no empty line
+// appears and disappears while typing.
+const REFERENCE = String.raw`\[[^\[\]]+\]`;
+const REFERENCE_ONLY_LINE = new RegExp(String.raw`\n[ \t]*(?:${REFERENCE}[ \t]*)+(?=\n|$)`, "g");
+const REFERENCE_ONLY_FIRST_LINE = new RegExp(String.raw`^[ \t]*(?:${REFERENCE}[ \t]*)+(?:\n|$)`);
+const REFERENCES_AT_LINE_START = new RegExp(String.raw`(^|\n)(?:${REFERENCE}[ \t]*)+`, "g");
+const REFERENCE_INLINE = new RegExp(String.raw`[ \t]*${REFERENCE}`, "g");
+
+function withoutReferences(typed: string, fullText: string, complete: boolean) {
+  let result = typed
+    .replace(REFERENCE_ONLY_LINE, "")
+    .replace(REFERENCE_ONLY_FIRST_LINE, "")
+    .replace(REFERENCES_AT_LINE_START, "$1")
+    .replace(REFERENCE_INLINE, "");
+  const open = result.lastIndexOf("[");
+  if (open !== -1 && !result.includes("]", open)) {
+    const closesLater = fullText.indexOf("]", typed.length) !== -1;
+    if (!complete || closesLater) {
+      result = result.slice(0, open);
+    }
+  }
+  return result.replace(/\s+$/, "");
+}
+
+// The typed-out part of an answer as shown with references shown: every `[...]`, brackets included (also one still
+// being typed at the end), in blue, so the references stand out from the text.
+function withHighlightedReferences(typed: string) {
+  const parts: React.ReactNode[] = [];
+  let last = 0;
+  for (const match of typed.matchAll(/\[[^\[\]]*\]|\[[^\[\]]*$/g)) {
+    const start = match.index ?? 0;
+    if (start > last) {
+      parts.push(typed.slice(last, start));
+    }
+    parts.push(
+      <span key={start} className="chat-inline-reference">
+        {match[0]}
+      </span>,
+    );
+    last = start + match[0].length;
+  }
+  if (last < typed.length) {
+    parts.push(typed.slice(last));
+  }
+  return parts;
+}
+
+// Shows an AI answer a character or a few at a time (at least 0.85 per frame, about 50 per second), so it appears to
+// be typed. `shown` may be fractional, so the pace can be below one character per frame; the text is cut at its whole
+// part. When the text grows while the answer streams in, it keeps going from where it is; when it falls far behind it
+// speeds up to catch up. With `hideReferences`, square-bracket references are left out of the shown text (the answer
+// itself keeps them) and skipped while typing; without it they are typed out in blue. With `sound` on, each word that appears plays one blip (at most one per frame),
+// and once the answer is `complete` and typed out to the end, two quick pips. The end is marked once even when silent,
+// so an answer finished while the chat was hidden does not chime later.
+function TypewriterText({
+  text,
+  onProgress,
+  sound = false,
+  complete = true,
+  hideReferences = false,
+}: {
+  text: string;
+  onProgress?: () => void;
+  sound?: boolean;
+  complete?: boolean;
+  hideReferences?: boolean;
+}) {
   const [shown, setShown] = useState(0);
+  const visible = Math.floor(shown);
+  const typed = text.slice(0, visible);
+  const displayed = hideReferences ? withoutReferences(typed, text, complete) : typed;
+  const previousDisplayedRef = useRef("");
+  const previousVisibleRef = useRef(0);
+  const hasChimedRef = useRef(false);
 
   useEffect(() => {
     if (shown >= text.length) {
@@ -4450,16 +4608,43 @@ function TypewriterText({ text, onProgress }: { text: string; onProgress?: () =>
     }
     const frame = requestAnimationFrame(() => {
       const behind = text.length - shown;
-      setShown((current) => Math.min(text.length, current + Math.max(2, Math.ceil(behind / 40))));
+      setShown((current) => {
+        const next = Math.min(text.length, current + Math.max(0.85, behind / 90));
+        return hideReferences ? skipReferences(text, Math.floor(current), next, complete) : next;
+      });
     });
     return () => cancelAnimationFrame(frame);
-  }, [shown, text]);
+  }, [shown, text, hideReferences, complete]);
 
   useEffect(() => {
+    // Blips follow the text as shown, so a hidden reference makes no sound; and only typing makes them, not showing or
+    // hiding the references.
+    const previous = previousDisplayedRef.current;
+    const hasTyped = visible > previousVisibleRef.current;
+    previousDisplayedRef.current = displayed;
+    previousVisibleRef.current = visible;
     onProgress?.();
-  }, [shown]);
+    if (
+      sound &&
+      hasTyped &&
+      displayed.length > previous.length &&
+      revealsWordStart(displayed, previous.length, displayed.length)
+    ) {
+      playBlip();
+    }
+  }, [displayed]);
 
-  return <>{text.slice(0, shown)}</>;
+  useEffect(() => {
+    if (!complete || hasChimedRef.current || text.length === 0 || visible < text.length) {
+      return;
+    }
+    hasChimedRef.current = true;
+    if (sound) {
+      playDoneChime();
+    }
+  }, [visible, complete, text.length]);
+
+  return <>{hideReferences ? displayed : withHighlightedReferences(displayed)}</>;
 }
 
 function ChatPanel({
@@ -4479,6 +4664,10 @@ function ChatPanel({
   const [status, setStatus] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState("");
+  // Typing sound, on on every page load; turned off with the speaker button.
+  const [isSoundOn, setIsSoundOn] = useState(true);
+  // References in square brackets in the answers: hidden on every page load; shown with the brackets button.
+  const [areReferencesShown, setAreReferencesShown] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -4494,6 +4683,10 @@ function ChatPanel({
       return;
     }
 
+    // Send is a click or Enter, which lets the browser start the audio while the sound is on from the page load.
+    if (isSoundOn) {
+      unlockBlips();
+    }
     setError("");
     setStatus("");
     setIsStreaming(true);
@@ -4615,7 +4808,6 @@ function ChatPanel({
         ) : (
           messages.map((entry) => (
             <div key={entry.id} className={`chat-message chat-message-${entry.role}`}>
-              {entry.role === "assistant" && (entry.content || entry.error) ? <ThinkingOrbit still /> : null}
               {entry.toolErrors && entry.toolErrors.length > 0 ? (
                 <div className="chat-tool-errors">
                   <strong>Tool error — the graph could not be fully queried:</strong>
@@ -4629,17 +4821,32 @@ function ChatPanel({
                 </div>
               ) : null}
               <div className="chat-message-content">
+                {/* The floated icon sits inside the text block, not beside it: the bubble sizes itself to its text, and
+                    only an icon in the same block is counted in that width. Beside it, the bubble came out one icon too
+                    narrow, so the word being typed kept dropping to the next line and jumping back up. */}
+                {entry.role === "assistant" && (entry.content || entry.error) ? <ThinkingOrbit still /> : null}
                 {entry.error ? (
                   <span className="reference-error">{entry.error}</span>
                 ) : entry.role === "assistant" ? (
-                  <TypewriterText text={entry.content} onProgress={scrollToEnd} />
+                  // Silent while another center tab is shown. Complete once no answer is streaming into this message.
+                  <TypewriterText
+                    text={entry.content}
+                    onProgress={scrollToEnd}
+                    sound={isSoundOn && isVisible}
+                    complete={!isStreaming || entry.id !== messages[messages.length - 1]?.id}
+                    hideReferences={!areReferencesShown}
+                  />
                 ) : (
                   entry.content
                 )}
               </div>
               {entry.citations && entry.citations.length > 0 ? (
                 <div className="chat-citations">
-                  {entry.citations.map((citation) =>
+                  {/* Node citations first (they can be clicked), then facts; each group keeps the answer's order. */}
+                  {[
+                    ...entry.citations.filter((citation) => citation.label !== "Fact"),
+                    ...entry.citations.filter((citation) => citation.label === "Fact"),
+                  ].map((citation) =>
                     citation.label === "Fact" ? (
                       // A fact (a ranking row, an expert share, an explorer result) has no node to select in the graph.
                       <span key={`Fact-${citation.key}`} className="chat-citation-chip chat-citation-fact" title={citation.display_name}>
@@ -4695,16 +4902,52 @@ function ChatPanel({
         >
           {isStreaming ? "Thinking..." : "Send"}
         </button>
-        {/* Only usable when there is a conversation to leave, and not while an answer streams. */}
-        <button
-          className="chat-new-button"
-          type="button"
-          disabled={messages.length === 0 || isStreaming}
-          onClick={startNewChat}
-          title="Start a new chat"
-        >
-          New
-        </button>
+        <div className="chat-input-corner">
+          {/* References in the answer text shown or hidden; the chips below each answer stay either way. */}
+          <button
+            className="chat-corner-button chat-references-button"
+            type="button"
+            aria-pressed={areReferencesShown}
+            aria-label={areReferencesShown ? "Hide references in the text" : "Show references in the text"}
+            title={areReferencesShown ? "References shown in the text" : "References hidden in the text"}
+            onClick={() => setAreReferencesShown(!areReferencesShown)}
+          >
+            [ ]
+          </button>
+          {/* Typing sound on or off. Turning it on is a click, which lets the browser start the audio. */}
+          <button
+            className="chat-corner-button chat-sound-button"
+            type="button"
+            aria-pressed={isSoundOn}
+            aria-label={isSoundOn ? "Turn typing sound off" : "Turn typing sound on"}
+            title={isSoundOn ? "Typing sound on" : "Typing sound off"}
+            onClick={() => {
+              if (!isSoundOn) {
+                unlockBlips();
+              }
+              setIsSoundOn(!isSoundOn);
+            }}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M2 6h3l4-3v10l-4-3H2z" fill="currentColor" />
+              {isSoundOn ? (
+                <path d="M11 5.5c1 .7 1.5 1.5 1.5 2.5s-.5 1.8-1.5 2.5M12.5 3.5c1.6 1.1 2.5 2.7 2.5 4.5s-.9 3.4-2.5 4.5" />
+              ) : (
+                <path d="M11 6l4 4M15 6l-4 4" />
+              )}
+            </svg>
+          </button>
+          {/* Only usable when there is a conversation to leave, and not while an answer streams. */}
+          <button
+            className="chat-corner-button chat-new-button"
+            type="button"
+            disabled={messages.length === 0 || isStreaming}
+            onClick={startNewChat}
+            title="Start a new chat"
+          >
+            New
+          </button>
+        </div>
       </div>
       </div>
     </div>

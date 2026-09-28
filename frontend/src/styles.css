@@ -378,14 +378,17 @@ main {
   color: #991b1b;
 }
 
+/* The property list of a clicked node or relationship. It sits just above the three rows of source filters
+   (bottom 44px + about 82px) and grows upward to at most 70px from the top, well below the graph actions (top 8px +
+   24px), so neither row of buttons covers its start or end; longer content scrolls inside it. */
 .selection-panel {
   position: absolute;
   right: 10px;
-  bottom: 10px;
+  bottom: 134px;
   display: flex;
   flex-direction: column;
   width: min(360px, calc(100% - 20px));
-  max-height: calc(100% - 20px);
+  max-height: calc(100% - 204px);
   gap: 4px;
   border: 1px solid #d4d4d4;
   border-radius: 6px;
@@ -765,7 +768,8 @@ main {
   min-height: 84px;
   max-height: 260px;
   border: 0;
-  padding: 8px 4px;
+  /* Extra space on the right, so long lines wrap before they reach the corner buttons ([ ], sound, New). */
+  padding: 8px 18px 8px 4px;
   background: transparent;
   color: #0f172a;
   line-height: 1.45;
@@ -776,12 +780,18 @@ main {
   color: #94a3b8;
 }
 
-/* New (chat): a small outlined box in quiet colours in the top right corner of the message box (.chat-input-row),
-   above Send, so the amber Send stays the main action. */
-.chat-new-button {
+/* The sound toggle and New (chat) in the top right corner of the message box (.chat-input-row), above Send. */
+.chat-input-corner {
   position: absolute;
   top: 8px;
   right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Small outlined boxes in quiet colours, so the amber Send stays the main action. */
+.chat-corner-button {
   height: 18px;
   border: 1px solid #94a3b8;
   border-radius: 4px;
@@ -795,15 +805,50 @@ main {
   cursor: pointer;
 }
 
-.chat-new-button:hover:not(:disabled) {
+.chat-corner-button:hover:not(:disabled) {
   border-color: #1d4ed8;
   color: #1e3a8a;
   background: rgba(37, 99, 235, 0.08);
 }
 
-.chat-new-button:disabled {
+.chat-corner-button:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* The speaker icon: a filled speaker, with sound waves when on and a small cross when off. */
+.chat-sound-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  padding: 0;
+}
+
+.chat-sound-button svg {
+  width: 12px;
+  height: 12px;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  fill: none;
+}
+
+/* A reference in an answer's text, brackets included, while references are shown: the deep blue of the chips, so it
+   stands out from the text. */
+.chat-inline-reference {
+  color: #1d4ed8;
+}
+
+/* The references toggle: the brackets themselves as its label. */
+.chat-references-button {
+  letter-spacing: 0.05em;
+}
+
+/* On (sound on, references shown): the deep blue of the hover state, so it is clear the toggle is on. */
+.chat-corner-button[aria-pressed="true"] {
+  border-color: #1d4ed8;
+  color: #1d4ed8;
 }
 
 .ai-send-button {
