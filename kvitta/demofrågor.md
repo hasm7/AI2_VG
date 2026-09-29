@@ -72,9 +72,9 @@ Petrova påpekade det i granskningen, och ett uppföljningsärende skapades.
 granskning.
 **Lager som visas:** sökningen, arkitektur (vilka delar koden rör), källorna.
 
-### 9. Vad krävdes innan teamet sa go till releasen?
-**Facit:** att dubbelutbetalningen (`KV-8`) var löst och att Fortnox-exporten fungerade igen (`KV-7`). Visma-exporten
-hade flyttats till version 1.1.
+### 9. Vad krävdes innan teamet sa go till releasen, och vad plockades bort?
+**Facit:** krävdes: att dubbelutbetalningen (`KV-8`) var löst och att Fortnox-exporten fungerade igen (`KV-7`), plus en
+grön regression. Bortplockat: Visma-exporten flyttades till version 1.1 på releaseplaneringen 10 mars.
 **Varför SQL inte klarar det:** go/no-go-mötet hänger ihop med två andra förlopp genom vad som sägs, inte genom
 nycklar.
 **Lager som visas:** kunskapslagret, samband mellan förlopp.
