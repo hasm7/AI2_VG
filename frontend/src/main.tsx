@@ -1003,6 +1003,31 @@ function propertyRows(properties: Record<string, string | number>) {
     .map(([key, value]) => [key, String(value)] as [string, string]);
 }
 
+// Graph motion: the whole graph turns slowly as one picture (true), or every node floats on its own (false, the earlier
+// motion, which made Cytoscape draw the whole graph again about 30 times a second).
+const GRAPH_MOTION_TURNS = true;
+// Seconds per turn at the Motion panel's speed 1; the speed slider divides it.
+const GRAPH_TURN_SECONDS = 120;
+// Auto fit's zoom out to the whole graph before a turn, in milliseconds.
+const GRAPH_AUTO_FIT_MS = 450;
+
+// Whether every visible node lies inside the circle centred in the canvas that a turn never cuts (its diameter is the
+// canvas's shorter side). A turned picture shows only what was drawn in view, so a graph reaching past that circle
+// would turn with its edges cut off.
+function graphFitsTurningCircle(graph: Core) {
+  const centreX = graph.width() / 2;
+  const centreY = graph.height() / 2;
+  const radius = Math.min(graph.width(), graph.height()) / 2;
+  let fits = true;
+  graph.nodes(":visible").forEach((node) => {
+    const position = node.renderedPosition();
+    if (Math.hypot(position.x - centreX, position.y - centreY) + node.renderedOuterWidth() / 2 > radius) {
+      fits = false;
+    }
+  });
+  return fits;
+}
+
 const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<Core | null>(null);
@@ -1021,6 +1046,16 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const [isMotionMenuOpen, setIsMotionMenuOpen] = useState(false);
   const [isLegendVisible, setIsLegendVisible] = useState(false);
   const [motionLevel, setMotionLevel] = useState(1);
+  // The graph turns only while the pointer is outside the graph box (see the turn effect below).
+  const [isPointerOverGraph, setIsPointerOverGraph] = useState(false);
+  // Auto fit: before the graph starts turning, it zooms out to show the whole graph (a turned picture shows only what
+  // was drawn in view, so a zoomed-in graph would turn with its edges cut off). Off: it turns only when the whole graph
+  // already fits the circle that never gets cut, and stands still otherwise.
+  const [isAutoFit, setIsAutoFit] = useState(true);
+  // A chat citation rings and centres a node: the graph holds still (upright, zoomed in) until the pointer has been in
+  // the graph box and left it again.
+  const [isHeldForCitation, setIsHeldForCitation] = useState(false);
+  const turnRef = useRef<{ animation: Animation; durationMs: number } | null>(null);
   const [spacingLevel, setSpacingLevel] = useState(1);
   const [areLabelsVisible, setAreLabelsVisible] = useState(false);
   const [areEntryPointsVisible, setAreEntryPointsVisible] = useState(false);
@@ -1519,7 +1554,9 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     graph.ready(() => {
       window.setTimeout(() => {
         graph.fit(undefined, 56);
-        startFloating();
+        if (!GRAPH_MOTION_TURNS) {
+          startFloating();
+        }
       }, 120);
     });
 
@@ -1552,6 +1589,73 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       resumeFloatingRef.current?.();
     }
   }, [isMotionPaused]);
+
+  // Motion as a turn of the whole graph: the canvas is turned as one picture by the browser (Web Animations, on the
+  // compositor), so Cytoscape draws nothing again. The float moved every node about 30 times a second, and each move
+  // made Cytoscape draw the whole graph again. Cytoscape does not know about the turn, so a click would land on the
+  // wrong node while the graph is turned: with the pointer over the graph box it turns back upright (0.5 s) and stands
+  // still. It also stands upright while Motion is paused, while labels are shown (they would turn upside down), and at
+  // speed 0.
+  useEffect(() => {
+    const canvas = containerRef.current;
+    const graph = graphRef.current;
+    if (!canvas || !GRAPH_MOTION_TURNS) {
+      return;
+    }
+    const wantsTurn =
+      !isMotionPaused && !areLabelsVisible && !isPointerOverGraph && !isHeldForCitation && motionLevel > 0;
+    // Cytoscape keeps the canvas's screen box (getBoundingClientRect) for mouse coordinates and a scale factor, and
+    // clears it only on CSS transitions, resizes and scrolls. Measured while turned, the box is larger than the canvas,
+    // so clicks and wheel zoom would land wrong until cleared: clear it whenever the canvas stands upright again.
+    const clearMouseCache = () =>
+      (graphRef.current as unknown as { renderer?: () => { invalidateContainerClientCoordsCache?: () => void } } | null)
+        ?.renderer?.()
+        ?.invalidateContainerClientCoordsCache?.();
+    const startTurn = () => {
+      const durationMs = (GRAPH_TURN_SECONDS / motionLevel) * 1000;
+      turnRef.current = {
+        animation: canvas.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], {
+          duration: durationMs,
+          iterations: Infinity,
+        }),
+        durationMs,
+      };
+    };
+    let fitTimer = 0;
+    let fit: ReturnType<Core["animation"]> | null = null;
+    if (wantsTurn && graph) {
+      if (isAutoFit) {
+        // Zoom out to the whole graph first, then turn.
+        fit = graph.animation({ fit: { eles: graph.elements(":visible"), padding: 56 }, duration: GRAPH_AUTO_FIT_MS });
+        fit.play();
+        fitTimer = window.setTimeout(startTurn, GRAPH_AUTO_FIT_MS + 40);
+      } else if (graphFitsTurningCircle(graph)) {
+        startTurn();
+      }
+    }
+    return () => {
+      window.clearTimeout(fitTimer);
+      // The pointer came back (or a citation arrived) before the fit ended: stop only this fit, so the view stays
+      // where it is and a citation's own zoom to its node is left alone.
+      if (fit?.playing()) {
+        fit.stop();
+      }
+      const turn = turnRef.current;
+      if (!turn) {
+        return;
+      }
+      const angle = ((Number(turn.animation.currentTime ?? 0) / turn.durationMs) * 360) % 360;
+      turn.animation.cancel();
+      turnRef.current = null;
+      // Back upright the short way round, then clear Cytoscape's measured box.
+      const upright = canvas.animate(
+        [{ transform: `rotate(${angle}deg)` }, { transform: `rotate(${angle > 180 ? 360 : 0}deg)` }],
+        { duration: 500, easing: "ease-out" },
+      );
+      upright.onfinish = clearMouseCache;
+      upright.oncancel = clearMouseCache;
+    };
+  }, [isMotionPaused, areLabelsVisible, isPointerOverGraph, isHeldForCitation, isAutoFit, motionLevel]);
 
   useEffect(() => {
     motionLevelRef.current = motionLevel;
@@ -1643,6 +1747,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       graphRef.current!.elements(":selected").unselect();
       graphRef.current!.nodes(".citation-target").removeClass("citation-target");
       node.addClass("citation-target");
+      // Hold the graph still while the cited node is looked at (see isHeldForCitation).
+      setIsHeldForCitation(true);
       graphRef.current!.animate({
         center: { eles: node },
         zoom: Math.max(graphRef.current!.zoom(), 1.15),
@@ -1734,6 +1840,11 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     <section
       className={`context-box${isExpanded ? " context-box-expanded" : ""}`}
       aria-label="Neo4j graph visualization"
+      onPointerEnter={() => setIsPointerOverGraph(true)}
+      onPointerLeave={() => {
+        setIsPointerOverGraph(false);
+        setIsHeldForCitation(false);
+      }}
     >
       <div className="source-filters" aria-label="Data source filters">
         {dataSources.map((source) => {
@@ -1824,6 +1935,20 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
                   {isMotionPaused ? "On" : "Pause"}
                 </button>
               </div>
+              {GRAPH_MOTION_TURNS ? (
+                <div className="motion-panel-header motion-panel-row">
+                  <span>Auto fit</span>
+                  <button
+                    className={`motion-toggle-button${isAutoFit ? " motion-toggle-button-on" : ""}`}
+                    type="button"
+                    aria-pressed={isAutoFit}
+                    title="Zoom out to the whole graph before it turns"
+                    onClick={() => setIsAutoFit((current) => !current)}
+                  >
+                    {isAutoFit ? "On" : "Off"}
+                  </button>
+                </div>
+              ) : null}
               <label className="motion-slider">
                 <span>Distance</span>
                 <input
@@ -1836,7 +1961,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
                 />
               </label>
               <label className="motion-slider">
-                <span>Float</span>
+                <span>{GRAPH_MOTION_TURNS ? "Speed" : "Float"}</span>
                 <input
                   type="range"
                   min="0"

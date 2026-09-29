@@ -619,6 +619,32 @@ It does not change `activeSource` and sends nothing to the backend. The frontend
 `embedding_model` property (`isEmbedded` in the Cytoscape element data) and toggles the class `entry-point` on them,
 the same way `Labels` toggles `labels-hidden`. A selected node keeps its blue border (`#1d4ed8`, 4 px).
 
+`Motion` (top row, right; added 2026-09-29): the whole graph turns slowly as one picture instead of every node floating
+on its own (`GRAPH_MOTION_TURNS` in `GraphView`; set it to `false` for the earlier float). The Cytoscape canvas
+(`.graph-canvas`) is turned with the Web Animations API, which the browser runs on the compositor, so Cytoscape draws
+nothing again; the float moved every node about 30 times a second and each move made Cytoscape draw the whole graph
+again. Measured in headless Chrome: 52 frames a second while turning against 7 while floating (59 with motion off).
+The beige grid behind the graph is a layer of its own (`.context-box::before`), so it stands still. Cytoscape does
+not know about the turn, so a click would land on the wrong node while turned: with the pointer anywhere over the
+graph box the graph turns back upright in 0.5 s and stands still, and it turns again when the pointer leaves. It also
+stands upright while Motion is paused, while labels are shown (they would turn upside down) and at speed 0. The
+Motion panel's `Speed` slider sets the pace: one turn in `GRAPH_TURN_SECONDS` = 120 s at speed 1. Two things the turn
+needs: the canvas has `z-index: 1` to lie over the grid layer, so every box over the graph needs `z-index: 2` (the
+property panel `.selection-panel` had none and ended up behind the graph); and Cytoscape keeps the canvas's screen box
+(`findContainerClientCoords`, from `getBoundingClientRect`) for mouse coordinates and a scale factor, clearing it only
+on CSS transitions, resizes and scrolls. Measured while turned, that box is larger, so clicks and wheel zoom would land
+wrong: the turn effect clears it (`invalidateContainerClientCoordsCache`) whenever the canvas stands upright again.
+Checked in headless Chrome: a citation clicked while the graph turns, then the pointer into the graph and a click on
+the ringed node opens that node's property panel on top, at the same zoom.
+
+A turned picture shows only what Cytoscape drew in view, so a zoomed-in graph would turn with its edges cut off.
+`Auto fit` (a toggle in the Motion panel, on by default): before the graph starts turning, it zooms out to the whole
+visible graph (`fit`, padding 56, `GRAPH_AUTO_FIT_MS` = 450 ms) and then turns; if the pointer comes back during the
+fit, the fit stops where it is. Off: it turns only when every visible node lies inside the circle centred in the canvas
+that a turn never cuts (`graphFitsTurningCircle`: diameter the canvas's shorter side), and stands still otherwise. A
+chat citation rings and centres a node and holds the graph still, upright and zoomed in (`isHeldForCitation`), until
+the pointer has been in the graph box and left it again; then Auto fit zooms out and the turn starts.
+
 ## Backend API
 
 | Endpoint | Method | Purpose |

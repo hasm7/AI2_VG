@@ -375,7 +375,7 @@ Send until the answer has come in) and which layers the answer drew on (`onLayer
 with the chat). While the AI works, the knowledge graphic at the bottom gets a glow that breathes in two layers at
 different speeds (rose at the centre through violet into blue), red light signals travelling along its lines
 (`knowledgeEdges`, one signal per line) and a brighter core, and every label of the layer map gets a rose background
-blinking a little out of step (`LayerMapHighlight`); all of it fades back over 0.6 s when the answer is in. After the
+blurred into a cloud that fades out at its edges (`layerMapCloud`), blinking a little out of step (`LayerMapHighlight`); all of it fades back over 0.6 s when the answer is in. After the
 answer, the labels of the layers it drew on stay lit (`layersUsedByAnswer`): the layers of the specialists the planner
 chose (causes: Knowledge and Root cause & impact; architecture: Architecture; people: Expertise & collaboration;
 sources reads the imported records, none of the four), plus the layer of any cited Topic, Event, RootCause,
