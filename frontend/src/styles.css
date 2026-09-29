@@ -698,6 +698,11 @@ main {
   background: #ffffff;
 }
 
+.chat-citation-toggle {
+  border-style: dashed;
+  color: #475569;
+}
+
 .chat-tool-errors {
   margin: 0 0 8px;
   border: 1px solid rgba(185, 28, 28, 0.35);

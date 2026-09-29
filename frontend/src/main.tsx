@@ -761,6 +761,10 @@ const nodeColors: Record<string, string> = {
   RootCause: "#f43f5e",
   Expertise: "#22d3ee",
   Community: "#a3e635",
+  // Fixed so they never share a fallback colour (Event and EmbeddingChunk used to get the same one).
+  Topic: "#1e3a8a",
+  Event: "#ec4899",
+  EmbeddingChunk: "#94a3b8",
 };
 
 const fallbackNodeColors = [
@@ -1033,7 +1037,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const graphRef = useRef<Core | null>(null);
   const viewerWindowRef = useRef<Window | null>(null);
   const viewerCloseTimerRef = useRef<number | null>(null);
-  const isMotionPausedRef = useRef(true);
+  const isMotionPausedRef = useRef(false);
   // Restarts the float loop after a pause; the loop stops scheduling frames while motion is paused.
   const resumeFloatingRef = useRef<(() => void) | null>(null);
   const motionLevelRef = useRef(1);
@@ -1042,7 +1046,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const pendingSelectionRef = useRef<{ type: string; displayName: string } | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
   const [isExpanded, setIsExpanded] = useState(false);
-  const [isMotionPaused, setIsMotionPaused] = useState(true);
+  // Motion is on from the start; the turn itself waits until the layout has placed the nodes (see isGraphDrawing).
+  const [isMotionPaused, setIsMotionPaused] = useState(false);
   const [isMotionMenuOpen, setIsMotionMenuOpen] = useState(false);
   const [isLegendVisible, setIsLegendVisible] = useState(false);
   const [motionLevel, setMotionLevel] = useState(1);
@@ -1057,6 +1062,9 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const [isHeldForCitation, setIsHeldForCitation] = useState(false);
   const turnRef = useRef<{ animation: Animation; durationMs: number } | null>(null);
   const [spacingLevel, setSpacingLevel] = useState(1);
+  // The Distance slider's position while it is dragged; the layout only runs again when it is released.
+  const [spacingDraft, setSpacingDraft] = useState(1);
+  const commitSpacing = () => setSpacingLevel(spacingDraft);
   const [areLabelsVisible, setAreLabelsVisible] = useState(false);
   const [areEntryPointsVisible, setAreEntryPointsVisible] = useState(false);
   const [isNeighborMode, setIsNeighborMode] = useState(false);
@@ -1066,6 +1074,10 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
   const [graphRelationships, setGraphRelationships] = useState<GraphRelationship[]>(relationships);
   const [graphError, setGraphError] = useState("");
   const [isGraphLoading, setIsGraphLoading] = useState(false);
+  // True while the force-directed layout places the nodes (it runs in steps, so the page stays responsive).
+  const [isGraphDrawing, setIsGraphDrawing] = useState(false);
+  // How far the layout has come, 0 to 100, counted in its steps.
+  const [drawingPercent, setDrawingPercent] = useState(0);
   const [isViewerStarting, setIsViewerStarting] = useState(false);
   const [neo4jStatus, setNeo4jStatus] = useState<Neo4jStatus>("checking");
 
@@ -1151,15 +1163,18 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     const gridSpacingY = 70;
     const columnSpacingY = 90;
     const columnSpacingX = 190;
-    const maxPerColumn = 12;
     const gutter = 280;
 
     const anchors: Record<string, { x: number; y: number; locked: boolean }> = {};
 
-    const gridColumns = Math.max(1, Math.ceil(Math.sqrt(middle.length)));
+    // The grid is made about as wide as it is high (not square in cells: a cell is wider than it is high), so a large
+    // graph still fits the panel instead of becoming a wide strip that cannot be zoomed out far enough.
+    const gridColumns = Math.max(1, Math.ceil(Math.sqrt((middle.length * gridSpacingY) / gridSpacingX)));
     const gridWidth = (gridColumns - 1) * gridSpacingX;
     const gridRows = Math.max(1, Math.ceil(middle.length / gridColumns));
     const gridOffsetY = ((gridRows - 1) * gridSpacingY) / 2;
+    // Topic and Event columns are as tall as the grid (at least 12 per column), so they add few columns.
+    const maxPerColumn = Math.max(12, Math.floor(((gridRows - 1) * gridSpacingY) / columnSpacingY) + 1);
 
     middle.forEach((node, index) => {
       const column = index % gridColumns;
@@ -1261,7 +1276,8 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     const graph = cytoscape({
       container: containerRef.current,
       elements,
-      minZoom: 0.25,
+      // Low enough to fit a few hundred nodes in the panel (Knowledge filter and full graph).
+      minZoom: 0.1,
       maxZoom: 2.5,
       wheelSensitivity: 0.55,
       style: [
@@ -1437,15 +1453,50 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
             fit: true,
             padding: 42,
           }
-        : {
-            name: "cose",
-            animate: false,
-            fit: true,
-            padding: 56,
-            nodeRepulsion: layoutSettings.nodeRepulsion,
-            idealEdgeLength: layoutSettings.idealEdgeLength,
-          },
+        : { name: "preset", fit: false },
     });
+    // The force-directed layout runs after the graph is created, in steps of `refresh` iterations, one step per frame,
+    // instead of all at once: with several hundred nodes it takes many seconds, and in one go it froze the page ("page
+    // not responding"). Kept in `layout` so a new graph can stop it.
+    const layoutRefresh = 10;
+    const layoutIterations = 400;
+    const layout = knowledgeAnchors
+      ? null
+      : graph.layout({
+          name: "cose",
+          animate: true,
+          refresh: layoutRefresh,
+          // 400 instead of the default 1000 iterations: about a third less time on the full graph (measured headless
+          // on 542 nodes: 18 s at 1000, 12 s at 400), at the cost of a slightly less settled picture.
+          numIter: layoutIterations,
+          // The nodes start without positions (the preset above sets none), so spread them before the first step.
+          randomize: true,
+          fit: true,
+          padding: 56,
+          nodeRepulsion: layoutSettings.nodeRepulsion,
+          idealEdgeLength: layoutSettings.idealEdgeLength,
+        } as cytoscape.LayoutOptions);
+    // Progress: every step moves every node, so one node's position events count the steps.
+    const progressNode = graph.nodes().first();
+    let layoutSteps = 0;
+    const countStep = () => {
+      layoutSteps += 1;
+      setDrawingPercent(Math.min(99, Math.round((layoutSteps * 100 * layoutRefresh) / layoutIterations)));
+    };
+    if (layout) {
+      setDrawingPercent(0);
+      setIsGraphDrawing(elements.length > 0);
+      if (!progressNode.empty()) {
+        progressNode.on("position", countStep);
+      }
+      layout.one("layoutstop", () => {
+        if (!progressNode.empty()) {
+          progressNode.off("position", undefined, countStep);
+        }
+        setIsGraphDrawing(false);
+      });
+      layout.run();
+    }
 
     graph.on("tap", "node", (event: EventObject) => {
       const data = event.target.data();
@@ -1568,8 +1619,10 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       window.cancelAnimationFrame(animationFrame);
       animationFrame = 0;
       resumeFloatingRef.current = null;
+      layout?.stop();
       graph.destroy();
       graphRef.current = null;
+      setIsGraphDrawing(false);
     };
   }, [elements, layoutSettings, knowledgeAnchors]);
 
@@ -1602,8 +1655,10 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
     if (!canvas || !GRAPH_MOTION_TURNS) {
       return;
     }
+    // Not while the layout is still placing the nodes: turning a picture that is still moving looks restless.
     const wantsTurn =
-      !isMotionPaused && !areLabelsVisible && !isPointerOverGraph && !isHeldForCitation && motionLevel > 0;
+      !isMotionPaused && !areLabelsVisible && !isPointerOverGraph && !isHeldForCitation && motionLevel > 0 &&
+      !isGraphDrawing;
     // Cytoscape keeps the canvas's screen box (getBoundingClientRect) for mouse coordinates and a scale factor, and
     // clears it only on CSS transitions, resizes and scrolls. Measured while turned, the box is larger than the canvas,
     // so clicks and wheel zoom would land wrong until cleared: clear it whenever the canvas stands upright again.
@@ -1655,7 +1710,7 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
       upright.onfinish = clearMouseCache;
       upright.oncancel = clearMouseCache;
     };
-  }, [isMotionPaused, areLabelsVisible, isPointerOverGraph, isHeldForCitation, isAutoFit, motionLevel]);
+  }, [isMotionPaused, areLabelsVisible, isPointerOverGraph, isHeldForCitation, isAutoFit, motionLevel, isGraphDrawing]);
 
   useEffect(() => {
     motionLevelRef.current = motionLevel;
@@ -1956,8 +2011,13 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
                   min="0"
                   max="3"
                   step="0.1"
-                  value={spacingLevel}
-                  onChange={(event) => setSpacingLevel(Number(event.target.value))}
+                  value={spacingDraft}
+                  // Every change of distance builds the graph again and runs its layout (many seconds on the full
+                  // graph), so it is applied when the slider is released, not at every step of a drag.
+                  onChange={(event) => setSpacingDraft(Number(event.target.value))}
+                  onPointerUp={commitSpacing}
+                  onKeyUp={commitSpacing}
+                  onBlur={commitSpacing}
                 />
               </label>
               <label className="motion-slider">
@@ -2043,9 +2103,10 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         </div>
       ) : null}
       <div className="graph-canvas" ref={containerRef} />
-      {(isGraphLoading || graphError) ? (
+      {(isGraphLoading || isGraphDrawing || graphError) ? (
         <div className={`graph-status${graphError ? " graph-status-error" : ""}`}>
-          {graphError || "Loading graph..."}
+          {graphError ||
+            (isGraphLoading ? "Loading graph..." : `Drawing graph (${graphNodes.length} nodes): ${drawingPercent} %...`)}
         </div>
       ) : null}
       {selection ? (
@@ -5144,6 +5205,18 @@ function ChatPanel({
   const [areReferencesShown, setAreReferencesShown] = useState(() =>
     readStored(CHAT_STORAGE_KEYS.referencesShown, false),
   );
+  // Fact citations under an answer: hidden until "Show facts" is clicked for that answer (there can be many).
+  const [factsShownFor, setFactsShownFor] = useState<Set<string>>(() => new Set());
+  const toggleFacts = (messageId: string) =>
+    setFactsShownFor((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => writeStored(CHAT_STORAGE_KEYS.threadId, threadId), [threadId]);
@@ -5335,28 +5408,38 @@ function ChatPanel({
               </div>
               {entry.citations && entry.citations.length > 0 ? (
                 <div className="chat-citations">
-                  {/* Node citations first (they can be clicked), then facts; each group keeps the answer's order. */}
-                  {[
-                    ...entry.citations.filter((citation) => citation.label !== "Fact"),
-                    ...entry.citations.filter((citation) => citation.label === "Fact"),
-                  ].map((citation) =>
-                    citation.label === "Fact" ? (
-                      // A fact (a ranking row, an expert share, an explorer result) has no node to select in the graph.
-                      <span key={`Fact-${citation.key}`} className="chat-citation-chip chat-citation-fact" title={citation.display_name}>
-                        {citation.key}: {citation.display_name.length > 60 ? `${citation.display_name.slice(0, 60)}…` : citation.display_name}
-                      </span>
-                    ) : (
-                    <button
-                      key={`${citation.label}-${citation.key}`}
-                      type="button"
-                      className="chat-citation-chip"
-                      onClick={() => selectCitation(citation)}
-                      title={`${citation.label}: ${citation.display_name}`}
-                    >
-                      {citation.display_name}
+                  {/* Node citations first (they can be clicked), then facts behind a toggle; each group keeps the
+                      answer's order. */}
+                  {entry.citations
+                    .filter((citation) => citation.label !== "Fact")
+                    .map((citation) => (
+                      <button
+                        key={`${citation.label}-${citation.key}`}
+                        type="button"
+                        className="chat-citation-chip"
+                        onClick={() => selectCitation(citation)}
+                        title={`${citation.label}: ${citation.display_name}`}
+                      >
+                        {citation.display_name}
+                      </button>
+                    ))}
+                  {entry.citations.some((citation) => citation.label === "Fact") ? (
+                    <button type="button" className="chat-citation-chip chat-citation-toggle" onClick={() => toggleFacts(entry.id)}>
+                      {factsShownFor.has(entry.id)
+                        ? "Hide facts"
+                        : `Show facts (${entry.citations.filter((citation) => citation.label === "Fact").length})`}
                     </button>
-                    ),
-                  )}
+                  ) : null}
+                  {factsShownFor.has(entry.id)
+                    ? entry.citations
+                        .filter((citation) => citation.label === "Fact")
+                        .map((citation) => (
+                          // A fact (a ranking row, an expert share, a list of sources) has no node to select in the graph.
+                          <span key={`Fact-${citation.key}`} className="chat-citation-chip chat-citation-fact" title={citation.display_name}>
+                            {citation.key}: {citation.display_name.length > 60 ? `${citation.display_name.slice(0, 60)}…` : citation.display_name}
+                          </span>
+                        ))
+                    : null}
                 </div>
               ) : null}
               {entry.droppedCitations && entry.droppedCitations.length > 0 ? (

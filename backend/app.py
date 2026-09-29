@@ -251,6 +251,19 @@ def graph_properties(properties):
     return {key: graph_value(value) for key, value in dict(properties).items()}
 
 
+# Node properties for the graph panel without the embedding vector (1536 numbers per embedded node): the panel never
+# uses it, and with a few hundred embedded nodes it made the response over 10 MB. Only its length is read.
+NODE_PROPERTIES = "n { .*, embedding: size(n.embedding) }"
+
+
+def graph_node_properties(properties):
+    props = dict(properties)
+    length = props.pop("embedding", None)
+    if length is not None:
+        props["embedding"] = f"[{length} numbers, not loaded in the graph view]"
+    return graph_properties(props)
+
+
 def graph_label(labels, properties):
     props = dict(properties)
     return (
@@ -300,7 +313,7 @@ def load_neo4j_graph(source):
                             WHERE NOT n:PipelineState
                             RETURN elementId(n) AS id,
                                    labels(n) AS labels,
-                                   properties(n) AS properties
+                                   """ + NODE_PROPERTIES + """ AS properties
                             """
                         )
                     )
@@ -331,7 +344,7 @@ def load_neo4j_graph(source):
                             UNWIND nodes AS n
                             RETURN DISTINCT elementId(n) AS id,
                                    labels(n) AS labels,
-                                   properties(n) AS properties
+                                   """ + NODE_PROPERTIES + """ AS properties
                             """,
                             relationship_types=relationship_types,
                         )
@@ -366,7 +379,7 @@ def load_neo4j_graph(source):
                 "label": graph_label(labels, properties),
                 "type": labels[0] if labels else "Node",
                 "summary": graph_summary(properties),
-                "properties": graph_properties(properties),
+                "properties": graph_node_properties(properties),
             }
         )
 
