@@ -161,14 +161,18 @@ Definitions:
 - A root cause is the underlying reason one or more events happened, for \
 example a gap in a requirement, a design decision, an implementation that \
 only covered part of the system, a missing test, or a process problem. It \
-is not the same as the event itself.
+is not the same as the event itself. A root cause explains a problem, a \
+delay, a defect, an incident or a change of plan; do not propose a root \
+cause for a routine step or a task that went as planned.
 - A code contribution means a specific code change contributed to an event, \
 for example a change that caused a regression or a change that resolved an \
 issue.
 - An affected component means the event concerns or impacts that component.
 - Cross-topic links are only allowed between one event in this topic and \
-one event in the candidate list from other topics. The cause must not \
-happen after the effect.
+one event in the candidate list from other topics, and only when one event \
+directly caused the other. Belonging to the same plan, release or decision \
+is not enough. The cause must not happen after the effect. Propose a pair \
+of events at most once, in one direction.
 
 Rules:
 - Only claim what the bundle supports. Do not use general knowledge.
@@ -501,10 +505,15 @@ def apply_causal_validation(parsed, bundle):
 
 
 def dedupe_cross_topic_links(all_links):
+    """Keeps one link per pair of events, in the direction proposed first.
+
+    Each topic is extracted in its own call, so the same pair can be proposed from both sides, sometimes in opposite
+    directions (A caused B, and B caused A). A pair gets at most one link.
+    """
     seen = set()
     kept = []
     for link in all_links:
-        key = (link["cause_event_id"], link["effect_event_id"])
+        key = frozenset((link["cause_event_id"], link["effect_event_id"]))
         if key in seen:
             continue
         seen.add(key)

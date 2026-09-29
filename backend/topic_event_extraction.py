@@ -459,6 +459,19 @@ def parses_as_timestamp(value):
         return False
 
 
+def cause_after_effect(cause_at, effect_at):
+    """True when the cause is timestamped after its effect, which no causal link may claim.
+
+    Both values have passed `parses_as_timestamp`. A date without a time (no offset) is compared by wall-clock time
+    against one with an offset, since the two cannot be compared as instants.
+    """
+    cause = datetime.fromisoformat(str(cause_at).replace("Z", "+00:00"))
+    effect = datetime.fromisoformat(str(effect_at).replace("Z", "+00:00"))
+    if (cause.tzinfo is None) != (effect.tzinfo is None):
+        cause, effect = cause.replace(tzinfo=None), effect.replace(tzinfo=None)
+    return cause > effect
+
+
 def resolve_topic(topic_out, known_topics):
     """Returns `(slug, is_new)`. `existing_topic_slug` is honoured only on an exact match."""
     if topic_out.existing_topic_slug and topic_out.existing_topic_slug in known_topics:
@@ -504,6 +517,9 @@ def apply_resolution(parsed, valid_identifiers, registry):
         if link.cause_event_slug == link.effect_event_slug:
             continue
         if link.cause_event_slug not in surviving_events or link.effect_event_slug not in surviving_events:
+            continue
+        if cause_after_effect(surviving_events[link.cause_event_slug]["occurred_at"],
+                              surviving_events[link.effect_event_slug]["occurred_at"]):
             continue
         kept_evidence = [identifier for identifier in link.evidence if identifier in valid_identifiers]
         discarded_evidence += len(link.evidence) - len(kept_evidence)
