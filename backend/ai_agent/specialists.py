@@ -10,7 +10,7 @@ import time
 
 from collaboration_layer import ACTIVITY_WEIGHTS
 
-from .db import NODE_NAME, fetch_nodes, node_text, read, similarities
+from .db import NODE_NAME, chunk_texts, fetch_nodes, node_text, read, similarities
 
 SOURCE_LABELS = [
     "MailMessage", "SlackMessage", "TeamsTranscriptSegment", "IssueVersion", "IssueComment",
@@ -264,19 +264,24 @@ def _collect(session, queries: list[tuple[int, str]], params: dict, timeout: flo
 
 
 def _packet(session, name: str, queries: list, entry_ids: list[str], settings: dict, question_vector: list[float],
-            extra_params: dict | None = None) -> dict:
+            extra_params: dict | None = None, reserved_ids: list[str] | None = None) -> dict:
+    """`reserved_ids` are always kept, within the same node limit: they take the places of the lowest-ranked nodes."""
     limits = settings["evidence"]
     timeout = settings["query_timeout_seconds"]
     priorities = _collect(session, queries, {"ids": entry_ids, **(extra_params or {})}, timeout)
+    reserved = [i for i in (reserved_ids or []) if i not in priorities][: limits["max_nodes_per_specialist"]]
+    for node_id in reserved:
+        priorities[node_id] = 2
     rows = fetch_nodes(session, list(priorities), timeout)
     similarity = similarities(session, list(priorities), question_vector, timeout)
 
     # Best priority first; among equal priority the most similar to the question (nodes without an embedding after
     # those with one), then by time. The kept nodes are then listed in time order.
-    ranked = sorted(rows.values(), key=lambda r: (
+    ranked = sorted((r for r in rows.values() if r["id"] not in reserved), key=lambda r: (
         priorities[r["id"]], r["id"] not in similarity, -similarity.get(r["id"], 0.0), r.get("at") or "9999", r["name"] or "",
     ))
-    kept = ranked[: limits["max_nodes_per_specialist"]]
+    kept = [rows[i] for i in reserved if i in rows]
+    kept += ranked[: limits["max_nodes_per_specialist"] - len(kept)]
     kept.sort(key=lambda r: (r.get("at") or "9999", r["name"] or ""))
 
     nodes = [
@@ -300,18 +305,233 @@ def _add_participation(session, packet: dict, entry_ids: list[str], settings: di
         packet["nodes"].append({**row, "priority": 1})
 
 
+# The sources a topic was built from (its Knowledge-layer bundle), by kind. Versions, comments, reviews, code changes
+# and transcript segments are left out: they belong to an issue, document, pull request or meeting that is listed.
+TOPIC_SOURCES = """
+MATCH (t:Topic) WHERE elementId(t) IN $ids
+MATCH (t)-[:DERIVED_FROM]->(s)
+WHERE s:Issue OR s:PullRequest OR s:Document OR s:MailMessage OR s:SlackMessage OR s:TeamsMeeting
+WITH t, s, [l IN labels(s) WHERE l <> 'Searchable'][0] AS label,
+     CASE WHEN s:Document THEN s.document_id + ' (' + split(s.title, ':')[0] + ')'
+          WHEN s:TeamsMeeting THEN s.meeting_id + ' (' + s.title + ')'
+          ELSE coalesce(s.display_name, s.name) END AS name
+ORDER BY name
+RETURN t.name AS topic, label, collect(DISTINCT name) AS names
+"""
+TOPIC_SOURCE_KINDS = [
+    ("Issue", "issues"), ("PullRequest", "pull requests"), ("Document", "documents"), ("MailMessage", "mails"),
+    ("SlackMessage", "Slack messages"), ("TeamsMeeting", "meetings"),
+]
+
+# Mails and Slack messages that name nothing, so no topic was built from them, but that are close to the topic in
+# meaning (the topic's embedding) and were sent within its period (first to last event, one day either side): an alert
+# or a customer's first mail written before the issue existed. The threshold was measured on the Kvitta data on
+# 2026-09-29: from 0.78 up only messages about the topic's own story, below it messages about other stories.
+UNLINKED_NEAR_TOPIC = """
+MATCH (t:Topic) WHERE elementId(t) IN $ids AND t.embedding IS NOT NULL
+MATCH (t)<-[:EVENT_OF_TOPIC]-(e:Event)
+WITH t, min(datetime(e.occurred_at)) - duration('P1D') AS first, max(datetime(e.occurred_at)) + duration('P1D') AS last
+MATCH (s:Searchable) WHERE (s:MailMessage OR s:SlackMessage) AND NOT (:Topic)-[:DERIVED_FROM]->(s)
+  AND datetime(s.sent_at) >= first AND datetime(s.sent_at) <= last
+WITH t, s, vector.similarity.cosine(t.embedding, s.embedding) AS similarity
+WHERE similarity >= $threshold
+WITH t, s ORDER BY similarity DESC
+RETURN t.name AS topic,
+       collect(DISTINCT s.display_name + ' (' + coalesce(s.sender_name, s.author_name, 'unknown') + ': "'
+               + CASE WHEN s:MailMessage THEN s.subject
+                      WHEN size(s.body) > $snippet THEN left(s.body, $snippet) + '...' ELSE s.body END
+               + '")')[..$limit] AS names
+"""
+UNLINKED_SNIPPET_CHARS = 160
+UNLINKED_SIMILARITY = 0.78
+MAX_UNLINKED = 5
+
+
+def topic_source_facts(session, entry_ids: list[str], timeout: float) -> list[str]:
+    """One line per entry topic naming every source it was built from, by kind, and the unlinked messages close to it:
+    a complete list for "which sources describe ..." questions, at the cost of one line instead of one evidence node
+    per source."""
+    by_topic: dict[str, dict[str, list[str]]] = {}
+    for row in read(session, TOPIC_SOURCES, {"ids": entry_ids}, timeout):
+        by_topic.setdefault(row["topic"], {})[row["label"]] = row["names"]
+    near = {row["topic"]: row["names"] for row in read(
+        session, UNLINKED_NEAR_TOPIC,
+        {"ids": entry_ids, "threshold": UNLINKED_SIMILARITY, "limit": MAX_UNLINKED, "snippet": UNLINKED_SNIPPET_CHARS},
+        timeout)}
+    facts = []
+    for topic, kinds in by_topic.items():
+        parts = [f"{title}: {', '.join(kinds[label])}" for label, title in TOPIC_SOURCE_KINDS if kinds.get(label)]
+        fact = f'The sources the topic "{topic}" was built from, by kind: ' + "; ".join(parts)
+        # An earlier version of a listed message (a Slack edit that added the issue key) is not new.
+        listed = {name for names in kinds.values() for name in names}
+        unlinked = [name for name in near.get(topic, []) if name.split(" (")[0] not in listed]
+        if unlinked:
+            fact += (". Also describing this story, found by meaning and time (they name no issue, pull request or "
+                     "document, so no link was drawn): " + ", ".join(unlinked))
+        facts.append(fact)
+    return facts
+
+
+# The reviews and code changes of every pull request an entry source names, and for a reply the review it answers.
+# Only pull requests: issue keys are named in almost every message, so following them mostly brought in unrelated
+# versions (measured on the Kvitta test questions on 2026-09-29), while a named pull request is a specific reference.
+REFERENCED_PARTS = """
+MATCH (s) WHERE elementId(s) IN $ids AND any(l IN labels(s) WHERE l IN $labels)
+MATCH (s)-[r:MENTIONS_PULL_REQUEST]->(p:PullRequest)
+WHERE r.extracted_by = 'reference-extraction-v1'
+MATCH (p)-[:HAS_PR_REVIEW|HAS_CODE_CHANGE]->(c:Searchable)
+OPTIONAL MATCH (c)-[:REPLY_TO_PR_REVIEW]->(original:Searchable)
+RETURN DISTINCT elementId(p) AS ref, elementId(c) AS id, elementId(original) AS original
+"""
+MAX_REFERENCE_PLACES = 1
+# A referenced part takes a place only if it is this similar to the question. Measured on 2026-09-29: the warning in
+# review-008 (reached through its reply) scored 0.651, unrelated parts 0.586 to 0.617.
+MIN_REFERENCE_SIMILARITY = 0.64
+
+
+def referenced_parts(session, entry_ids: list[str], question_vector: list[float], timeout: float) -> list[str]:
+    """When an entry source names a pull request ("as I wrote in my review of kvitta-mobile#6"), the review or code
+    change of it that best matches the question, so the record referred to is in the evidence and not only the
+    message about it. A reply is replaced by the review it answers: that is where the statement was made, and the
+    reply quotes it. At most `MAX_REFERENCE_PLACES`, only above `MIN_REFERENCE_SIMILARITY`, entry points excluded."""
+    rows = read(session, REFERENCED_PARTS, {"ids": entry_ids, "labels": SOURCE_LABELS}, timeout)
+    similarity = similarities(session, list({row["id"] for row in rows}), question_vector, timeout)
+    best: dict[str, dict] = {}
+    for row in rows:
+        score = similarity.get(row["id"])
+        if score is None or score < MIN_REFERENCE_SIMILARITY:
+            continue
+        if row["ref"] not in best or score > best[row["ref"]]["score"]:
+            best[row["ref"]] = {"id": row["original"] or row["id"], "score": score}
+    chosen = []
+    for part in sorted(best.values(), key=lambda p: -p["score"]):
+        if part["id"] not in entry_ids and part["id"] not in chosen:
+            chosen.append(part["id"])
+    return chosen[:MAX_REFERENCE_PLACES]
+
+
+# The topic most entry points were built into (at least two), for when no topic is itself an entry point.
+MAIN_TOPIC_OF_ENTRIES = """
+MATCH (t:Topic)-[:DERIVED_FROM]->(n) WHERE elementId(n) IN $ids
+WITH t, count(DISTINCT n) AS entries WHERE entries >= 2
+RETURN elementId(t) AS id ORDER BY entries DESC, t.slug LIMIT 1
+"""
+
+
 def sources(session, entry_ids, plan, settings, question_vector):
-    packet = _packet(session, "sources", SOURCES_QUERIES, entry_ids, settings, question_vector, {"labels": SOURCE_LABELS})
+    timeout = settings["query_timeout_seconds"]
+    reserved = referenced_parts(session, entry_ids, question_vector, timeout)
+    packet = _packet(session, "sources", SOURCES_QUERIES, entry_ids, settings, question_vector, {"labels": SOURCE_LABELS},
+                     reserved)
     _add_participation(session, packet, entry_ids, settings)
+    # The sources of the story: of the entry topics, or else of the topic most entry points belong to, so the list does
+    # not depend on whether search happened to return the topic node itself.
+    topic_ids = [row["id"] for row in read(session, "MATCH (t:Topic) WHERE elementId(t) IN $ids RETURN elementId(t) AS id",
+                                           {"ids": entry_ids}, timeout)]
+    if not topic_ids:
+        topic_ids = [row["id"] for row in read(session, MAIN_TOPIC_OF_ENTRIES, {"ids": entry_ids}, timeout)]
+    packet["facts"].extend(topic_source_facts(session, topic_ids, timeout))
     return packet
 
 
+# Every causal path of up to three steps that ends in one of the given events, oldest step first. Causal links run
+# within a topic (CAUSED) and across topics (CROSS_TOPIC_CAUSED).
+CAUSAL_PATHS_TO = """
+MATCH (e:Event) WHERE elementId(e) IN $ids
+MATCH path = (:Event)-[:CAUSED|CROSS_TOPIC_CAUSED*1..3]->(e)
+RETURN elementId(e) AS id, [n IN nodes(path) | {id: elementId(n), name: n.name, at: n.occurred_at}] AS steps
+"""
+MAX_CHAIN_FACTS = 2
+
+
+def causal_chain_facts(session, event_ids: list[str], timeout: float, question_vector: list[float]) -> list[str]:
+    """What led to each event in the packet, as the chains of causal links in the graph, oldest step first: one line
+    per event instead of several separate event texts, so the answer can follow a cause back across weeks and topics.
+    Only for events that no other listed event led to (the ends of the chains), at most `MAX_CHAIN_FACTS`, the events
+    most similar to the question first, so a chain from another story that shares a name with the question does not
+    push the relevant chain aside."""
+    paths: dict[str, list[list[dict]]] = {}
+    for row in read(session, CAUSAL_PATHS_TO, {"ids": event_ids}, timeout):
+        paths.setdefault(row["id"], []).append(row["steps"])
+    earlier = {step["id"] for chains in paths.values() for chain in chains for step in chain[:-1]}
+    ends = [event_id for event_id in paths if event_id not in earlier]
+
+    similarity = similarities(session, ends, question_vector, timeout)
+    facts = []
+    for event_id in sorted(ends, key=lambda i: -similarity.get(i, 0.0))[:MAX_CHAIN_FACTS]:
+        chains = paths[event_id]
+        # Keep only the longest chains: a chain that is the tail of a longer one says nothing new.
+        kept = [c for c in chains if not any(len(o) > len(c) and o[-len(c):] == c for o in chains)]
+        target = chains[0][-1]
+        lines = [" -> ".join(f'"{s["name"]}" ({str(s["at"])[:10]})' for s in chain[:-1]) for chain in kept]
+        facts.append(f'What led to "{target["name"]}" ({str(target["at"])[:10]}), from the causal links in the graph, '
+                     f"oldest step first: " + "; and ".join(f"{line} -> this event" for line in sorted(lines)))
+    return facts
+
+
 def causes(session, entry_ids, plan, settings, question_vector):
-    return _packet(session, "causes", CAUSES_QUERIES, entry_ids, settings, question_vector)
+    packet = _packet(session, "causes", CAUSES_QUERIES, entry_ids, settings, question_vector)
+    event_ids = [node["id"] for node in packet["nodes"] if node["label"] == "Event"]
+    packet["facts"].extend(causal_chain_facts(session, event_ids, settings["query_timeout_seconds"], question_vector))
+    return packet
 
 
 def architecture(session, entry_ids, plan, settings, question_vector):
     return _packet(session, "architecture", ARCHITECTURE_QUERIES, entry_ids, settings, question_vector)
+
+
+# Persons outside the team, such as a customer: eligible persons whose e-mail domain differs from the domain most
+# persons share, with every mail they sent. Their mail subjects are usually what they reported or asked for.
+OUTSIDE_PERSONS = """
+MATCH (p:Person:Searchable) WHERE p.email IS NOT NULL
+WITH collect(p) AS persons, [p IN collect(p) | split(p.email, '@')[1]] AS domains
+WITH persons, reduce(best = null, d IN domains |
+     CASE WHEN best IS NULL OR size([x IN domains WHERE x = d]) > size([x IN domains WHERE x = best]) THEN d ELSE best END)
+     AS team_domain
+UNWIND persons AS p
+WITH p, team_domain WHERE split(p.email, '@')[1] <> team_domain
+OPTIONAL MATCH (p)-[:SENT_MAIL]->(m:MailMessage)
+WITH p, team_domain, m ORDER BY m.sent_at
+RETURN p.name AS name, p.email AS email, team_domain,
+       collect(CASE WHEN m IS NULL THEN null ELSE {id: m.message_id, subject: m.subject, at: m.sent_at} END) AS mails
+"""
+MAX_OUTSIDE_MAILS = 8
+
+# Every community (the graph-algorithms layer's groups of people who work together) with its members.
+COMMUNITIES = """
+MATCH (p:Person)-[:MEMBER_OF_COMMUNITY]->(c:Community)
+WITH c, p ORDER BY p.name
+RETURN c.community_id AS community, collect(p.name) AS members
+ORDER BY community
+"""
+
+
+def community_facts(session, timeout: float) -> list[str]:
+    """One line listing every group and its members, so a question about groups, teams or how the people are divided
+    is answered from the layer that computed them, however the planner classifies it."""
+    rows = read(session, COMMUNITIES, None, timeout)
+    if not rows:
+        return []
+    groups = "; ".join(f"community {row['community']}: {', '.join(row['members'])}" for row in rows)
+    return [f"Groups of people who work more with each other than with the rest (Louvain community detection on who "
+            f"works with whom), {len(rows)} in total: {groups}"]
+
+
+def outside_person_facts(session, timeout: float) -> list[str]:
+    """One line per person outside the team with the mails they sent, "Re:"/"Fwd:" replies folded into their thread:
+    what a customer reported, even when search found only one of their mails."""
+    facts = []
+    for row in read(session, OUTSIDE_PERSONS, None, timeout):
+        threads: dict[str, list[str]] = {}
+        for mail in row["mails"]:
+            subject = mail["subject"] or ""
+            while subject[:4].lower() in ("re: ", "fw: ") or subject[:5].lower() == "fwd: ":
+                subject = subject.split(":", 1)[1].strip()
+            threads.setdefault(subject, []).append(f'{mail["id"]} {str(mail["at"])[:10]}')
+        listed = [f'"{subject}" ({", ".join(mails)})' for subject, mails in list(threads.items())[:MAX_OUTSIDE_MAILS]]
+        facts.append(f"{row['name']} ({row['email']}) is outside the team (the team's e-mail domain is "
+                     f"{row['team_domain']}). Mails they sent, by subject: " + ("; ".join(listed) or "none"))
+    return facts
 
 
 def people(session, entry_ids, plan, settings, question_vector):
@@ -319,6 +539,8 @@ def people(session, entry_ids, plan, settings, question_vector):
                      {"activity": PERSON_ACTIVITY_TYPES})
     _add_participation(session, packet, entry_ids, settings)
     timeout = settings["query_timeout_seconds"]
+    packet["facts"].extend(outside_person_facts(session, timeout))
+    packet["facts"].extend(community_facts(session, timeout))
     # A general "who" question (no person, meeting or other entity named) gets the full list of persons, so the answer
     # does not depend on which persons search happened to find.
     if "who" in plan.get("question_types", []) and not plan.get("entities"):
@@ -345,12 +567,26 @@ def people(session, entry_ids, plan, settings, question_vector):
 SPECIALIST_FUNCTIONS = {"sources": sources, "causes": causes, "architecture": architecture, "people": people}
 
 
+def _use_matched_chunks(session, packet: dict, chunk_ids_by_node: dict[str, list[str]], settings: dict) -> None:
+    """A node the search reached through chunks of its long text shows the model those chunks, in text order, instead
+    of the beginning of the text: the answer is in the part that matched. Each chunk is at most one chunk window long
+    (see `embedding_pass.split_text`), so the text is not cut to `max_text_chars` like other nodes."""
+    wanted = [chunk_id for node in packet["nodes"] for chunk_id in chunk_ids_by_node.get(node["id"], [])]
+    chunks = chunk_texts(session, wanted, settings["query_timeout_seconds"])
+    for node in packet["nodes"]:
+        matched = [chunks[chunk_id] for chunk_id in chunk_ids_by_node.get(node["id"], []) if chunk_id in chunks]
+        if matched:
+            node["text"] = "\n\n".join(chunk["text"] for chunk in sorted(matched, key=lambda c: c["chunk_index"]))
+
+
 def run_specialist(name: str, driver, database: str, entry_ids: list[str], plan: dict, settings: dict,
-                   followup=None, question_vector: list[float] | None = None) -> tuple[dict, list[dict]]:
+                   followup=None, question_vector: list[float] | None = None,
+                   chunk_ids_by_node: dict[str, list[str]] | None = None) -> tuple[dict, list[dict]]:
     """Runs one specialist in its own read session (specialists run in parallel; a session is not thread-safe).
 
-    `followup(session, packet) -> usage entries`, when given, extends the packet in the same session. Returns
-    (packet, usage). The session is closed when the `with` block ends, also on an error.
+    `followup(session, packet) -> usage entries`, when given, extends the packet in the same session.
+    `chunk_ids_by_node` maps an entry node to the chunks of its text the search matched. Returns (packet, usage). The
+    session is closed when the `with` block ends, also on an error.
     """
     started = time.perf_counter()
     usage: list[dict] = []
@@ -358,6 +594,8 @@ def run_specialist(name: str, driver, database: str, entry_ids: list[str], plan:
         with driver.session(database=database, default_access_mode="READ") as session:
             packet = SPECIALIST_FUNCTIONS[name](session, entry_ids, plan, settings, question_vector or [])
             packet["errors"] = []
+            if chunk_ids_by_node:
+                _use_matched_chunks(session, packet, chunk_ids_by_node, settings)
             if followup is not None:
                 try:
                     usage = followup(session, packet)

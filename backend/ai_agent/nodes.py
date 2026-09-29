@@ -276,6 +276,7 @@ def make_specialist(name: str):
         packet, usage = run_specialist(
             name, configurable["driver"], configurable["database"],
             [point["id"] for point in state["entry_points"]], state["plan"], settings, followup, question_vector,
+            {point["id"]: point["chunk_ids"] for point in state["entry_points"] if point.get("chunk_ids")},
         )
         errors = [_error(name, name, message) for message in packet["errors"]]
         followup_note = "; follow-up: " + " | ".join(packet.get("followup", ["off"]))

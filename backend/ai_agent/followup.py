@@ -199,7 +199,9 @@ SPECIALIST_TOOLS = {
     "sources": {
         "get_timeline": (
             _tool("get_timeline", "All versions, comments, reviews, code changes and mentioning messages of one issue, "
-                  "document or pull request, in time order.", "reference", "Issue key, pull request or document id/title."),
+                  "document or pull request, in time order. Use it when the evidence refers to an issue, pull request "
+                  "or document (for example in its Mentions) whose own records the question needs.", "reference",
+                  "Issue key, pull request or document id/title."),
             lambda s, a, t: _ids(read(s, TIMELINE, {"ids": _resolve(s, a, ["Issue", "Document", "PullRequest"], t)}, t)),
         ),
         "get_conversation": (
@@ -262,12 +264,22 @@ SPECIALIST_TOOLS = {
 }
 
 
+def _mentions(text: str) -> str:
+    """The node's own `Mentions:` line from its embedded text: the issues, pull requests and documents it names."""
+    for line in text.splitlines():
+        if line.startswith("Mentions:"):
+            return " " + line.strip()
+    return ""
+
+
 def compact_evidence(nodes: list[dict], facts: list[str]) -> str:
-    """Names and a one-line snippet per node: enough to judge what is missing, far cheaper than the full texts."""
+    """Names, a one-line snippet and what each node names: enough to judge what is missing, far cheaper than the full
+    texts. The mentions matter because a reference ("my review of kvitta-mobile#6") is often past the snippet."""
     lines = []
     for node in nodes:
-        snippet = " ".join((node.get("text") or "").split())[:SNIPPET_CHARS]
-        lines.append(f"- {node['label']} {node['name']}: {snippet}")
+        text = node.get("text") or ""
+        snippet = " ".join(text.split())[:SNIPPET_CHARS]
+        lines.append(f"- {node['label']} {node['name']}: {snippet}{_mentions(text)}")
     lines.extend(f"- fact: {fact[:SNIPPET_CHARS]}" for fact in facts)
     return "\n".join(lines) or "(nothing yet)"
 

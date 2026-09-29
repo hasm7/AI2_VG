@@ -1,118 +1,739 @@
 {
-  "about": "Test questions for the agent. expected_evidence: groups of node specs; a group passes when any spec matches a node in the evidence (label, plus name or a case-insensitive part of the name). expected_terms: groups of words; a group passes when any variant appears in the answer (case-insensitive). expected_facts: the same, on the facts in the evidence. Names of events, root causes and components come from the LLM layers and can change when those layers are rebuilt; update this file then.",
+  "about": "Test questions for the agent on the Kvitta data. q01-q10 are the demo questions in kvitta/demofrågor.md; q11-q18 check single layers, the chunks of the long design document and small talk. q19-q27 are control questions: similar questions in other words or about other stories, never used to tune the agent; if one fails, fix the agent in a general way, never the question. expected_evidence: groups of node specs; a group passes when any spec matches a node in the evidence (label, plus name or a case-insensitive part of the name). expected_terms: groups of words; a group passes when any variant appears in the answer (case-insensitive). expected_facts: the same, on the facts in the evidence. Names of events, root causes and components come from the LLM layers and can change when those layers are rebuilt; update this file then.",
   "questions": [
     {
       "id": "q01",
-      "question": "Varför blockerades AUTH-17?",
-      "goal": "Knowledge layer: the reason behind an event",
+      "question": "Varför fick en anställd hos Bergström & Co dubbla utbetalningar?",
+      "goal": "Demo 1: root cause across two storylines (offline decision in February, duplicate payout in March)",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "Event", "contains": "blocked"}]],
-      "expected_terms": [["säkerhet", "security"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "RootCause",
+            "contains": "duplicate"
+          },
+          {
+            "label": "Event",
+            "contains": "duplicate payout"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "offline"
+        ],
+        [
+          "export"
+        ]
+      ]
     },
     {
       "id": "q02",
-      "question": "Vilken kod ändrades för mobilfixen?",
-      "goal": "Sources: code changes",
+      "question": "Varnade någon för risken med dubbla utbetalningar innan det hände?",
+      "goal": "Demo 2: an early warning in a review of another pull request",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "CodeChange", "contains": "mobile_refresh.py"}]],
-      "expected_terms": [["mobile_refresh.py"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "PullRequestReview",
+            "name": "kvitta-mobile#6 review-008"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Nina"
+        ]
+      ]
     },
     {
       "id": "q03",
-      "question": "Vilka komponenter använder Session lifetime policy?",
-      "goal": "Architecture: dependencies",
+      "question": "Vem tyckte vad innan offlinebeslutet togs?",
+      "goal": "Demo 3: who argued what before a decision",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "Component", "contains": "session lifetime policy"}]],
-      "expected_terms": [["Mobile session refresh endpoint"], ["Web session refresh endpoint"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-006"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-007"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-010"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-003"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-004"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-005"
+          },
+          {
+            "label": "IssueComment",
+            "name": "comment-002"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Lucas"
+        ],
+        [
+          "Ahmed"
+        ],
+        [
+          "David"
+        ]
+      ]
     },
     {
       "id": "q04",
-      "question": "Vad var grundorsaken till mobilregressionen?",
-      "goal": "Root cause & impact: root causes",
+      "question": "Vilka källor beskriver Fortnox-incidenten?",
+      "goal": "Demo 4: sources about one event, including the two mails that name no issue key",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "RootCause", "contains": "mobile"}]],
-      "expected_terms": []
+      "expected_evidence": [
+        [
+          {
+            "label": "DocumentVersion",
+            "name": "doc-006 v1"
+          },
+          {
+            "label": "Document",
+            "name": "doc-006"
+          }
+        ]
+      ],
+      "expected_facts": [
+        [
+          "kvitta-api#55"
+        ],
+        [
+          "mail-006",
+          "mail-007"
+        ]
+      ],
+      "expected_terms": [
+        [
+          "KV-7"
+        ],
+        [
+          "#55",
+          "#58"
+        ],
+        [
+          "mail-006",
+          "mail-007"
+        ]
+      ]
     },
     {
       "id": "q05",
-      "question": "Vem kan mest om Mobile session refresh endpoint?",
-      "goal": "Expertise: expert on a component",
+      "question": "Hur och varför ändrades momskravet?",
+      "goal": "Demo 5: two versions of a requirement and the reason for the change",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "Person", "name": "Erik Nilsson"}, {"label": "Component", "contains": "mobile session refresh endpoint"}]],
-      "expected_terms": [["Erik Nilsson"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "DocumentVersion",
+            "name": "doc-001 v2"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "25"
+        ],
+        [
+          "12"
+        ],
+        [
+          "Anders"
+        ]
+      ]
     },
     {
       "id": "q06",
-      "question": "Var finns det en kunskapsrisk om någon slutar?",
-      "goal": "Graph algorithms: bus factor",
+      "question": "Var finns det en kunskapsrisk i teamet?",
+      "goal": "Demo 6: bus factor",
       "expected_route": "graph",
       "expected_evidence": [],
-      "expected_terms": [["Mobile session refresh endpoint"]]
+      "expected_terms": [
+        [
+          "Fortnox"
+        ],
+        [
+          "Ahmed"
+        ],
+        [
+          "Sofia"
+        ]
+      ]
     },
     {
       "id": "q07",
-      "question": "Vilka grupper finns i teamet?",
-      "goal": "Graph algorithms: communities",
+      "question": "Vem är länken mellan kunden och teamet, och vem samarbetar mest?",
+      "goal": "Demo 7: betweenness, communities and weighted degree",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "Community"}]],
-      "expected_terms": [["Anna Berg"], ["Priya Raman"]]
+      "expected_evidence": [],
+      "expected_terms": [
+        [
+          "Maria"
+        ],
+        [
+          "David"
+        ]
+      ]
     },
     {
       "id": "q08",
-      "question": "Vem har högst betweenness i teamet?",
-      "goal": "Ranking on a metric",
+      "question": "Stämmer pull requestens beskrivning av dubblettfixen med vad koden gör?",
+      "goal": "Demo 8: a claim in a PR description against the code and a review",
       "expected_route": "graph",
-      "expected_evidence": [],
-      "expected_facts": [["betweenness"]],
-      "expected_terms": [["Anna Berg"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "PullRequestReview",
+            "name": "kvitta-api#60 review-030"
+          },
+          {
+            "label": "PullRequestReview",
+            "name": "kvitta-api#60 review-031"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-042"
+          },
+          {
+            "label": "IssueComment",
+            "name": "comment-014"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "export"
+        ]
+      ]
     },
     {
       "id": "q09",
-      "question": "Vilka dokument beskriver kravet REQ-AUTH-SESSION och hur ändrades det?",
-      "goal": "Project goal: documents behind a requirement, and what changed",
+      "question": "Vad krävdes innan teamet sa go till releasen, och vad plockades bort?",
+      "goal": "Demo 9: what a decision depended on, across storylines",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "DocumentVersion", "name": "doc-001 v1"}], [{"label": "DocumentVersion", "name": "doc-001 v2"}]],
-      "expected_terms": [["inaktiv", "inactivity"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-043"
+          },
+          {
+            "label": "IssueComment",
+            "name": "comment-016"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-045"
+          },
+          {
+            "label": "DocumentVersion",
+            "name": "doc-005 v3"
+          },
+          {
+            "label": "Event",
+            "contains": "go approved"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "KV-7",
+          "Fortnox"
+        ],
+        [
+          "KV-8",
+          "dubbl",
+          "duplicate"
+        ],
+        [
+          "Visma"
+        ]
+      ]
     },
     {
       "id": "q10",
-      "question": "Vem sa att en fast 60-minutersgräns inte räckte innan kravet skrevs om?",
-      "goal": "Project goal: who discussed a decision before it was made",
+      "question": "Vilka problem har kunden haft under perioden?",
+      "goal": "Demo 10: meaning, not words (the mails never say problem)",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "TeamsTranscriptSegment", "name": "seg-003"}, {"label": "SlackMessage", "name": "slack-005"}, {"label": "PullRequestReview", "name": "backend-api#42 review-001"}, {"label": "IssueComment", "name": "comment-002"}]],
-      "expected_terms": [["Priya Raman"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "MailMessage",
+            "name": "mail-001"
+          },
+          {
+            "label": "MailMessage",
+            "name": "mail-007"
+          },
+          {
+            "label": "MailMessage",
+            "name": "mail-010"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "moms",
+          "VAT"
+        ],
+        [
+          "Fortnox"
+        ],
+        [
+          "dubbl",
+          "två gånger",
+          "twice",
+          "duplicate"
+        ]
+      ]
     },
     {
       "id": "q11",
-      "question": "Vilka källor beskriver att AUTH-17 blockerades?",
-      "goal": "Project goal: sources that describe the same event",
+      "question": "Vem kan mest om kvittoläsaren?",
+      "goal": "Expertise: expert on a component",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "IssueVersion", "name": "AUTH-17 v3"}, {"label": "IssueComment", "name": "comment-002"}, {"label": "SlackMessage", "name": "slack-006"}, {"label": "TeamsTranscriptSegment", "name": "seg-003"}]],
-      "expected_terms": [["AUTH-17 v3", "comment-002", "slack-006", "seg-003"]]
+      "expected_evidence": [
+        [
+          {
+            "label": "Person",
+            "name": "Sofia Berg"
+          },
+          {
+            "label": "Component",
+            "contains": "receipt reader"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Sofia"
+        ]
+      ]
     },
     {
       "id": "q12",
-      "question": "Täcker fixen i backend-api#42 även mobilen?",
-      "goal": "Project goal: where information is missing or contradictory",
+      "question": "Vilka grupper finns i teamet?",
+      "goal": "Graph algorithms: communities",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "PullRequestReview", "name": "backend-api#42 review-005"}, {"label": "Event", "contains": "limited to web"}, {"label": "RootCause", "contains": "mobile"}, {"label": "SlackMessage", "name": "slack-010"}, {"label": "SlackMessage", "name": "slack-011"}, {"label": "IssueComment", "name": "comment-005"}]],
-      "expected_terms": [["webb", "web"]]
+      "expected_evidence": [],
+      "expected_facts": [
+        [
+          "community collab-"
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Maria"
+        ],
+        [
+          "Anders"
+        ]
+      ]
     },
     {
       "id": "q13",
-      "question": "Vilka var med på sprint review-mötet?",
-      "goal": "Who took part in a meeting",
+      "question": "Vem har högst betweenness i teamet?",
+      "goal": "Ranking on a metric (Maria and Ahmed share the top)",
       "expected_route": "graph",
-      "expected_evidence": [[{"label": "TeamsMeeting", "name": "meet-002"}]],
-      "expected_terms": [["Anna Berg"], ["Anna Lindqvist"], ["Erik Nilsson"]]
+      "expected_evidence": [],
+      "expected_facts": [
+        [
+          "betweenness"
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Maria",
+          "Ahmed"
+        ]
+      ]
     },
     {
       "id": "q14",
+      "question": "Vilka komponenter är Fortnox client beroende av?",
+      "goal": "Architecture: dependencies",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "Component",
+            "contains": "fortnox client"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Fortnox authentication"
+        ]
+      ]
+    },
+    {
+      "id": "q15",
+      "question": "Vilka var med på go/no-go-mötet för Kvitta 1.0?",
+      "goal": "Who took part in a meeting",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "TeamsMeeting",
+            "name": "meet-010"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Maria"
+        ],
+        [
+          "David"
+        ],
+        [
+          "Ahmed"
+        ],
+        [
+          "Nina"
+        ]
+      ]
+    },
+    {
+      "id": "q16",
+      "question": "Vilka siffror ska följas upp varje vecka när kvittoläsaren körs för alla kunder?",
+      "goal": "Chunks: the answer is only in part 3 of the long design document DESIGN-RECEIPT-READER",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "DocumentVersion",
+            "name": "doc-002 v1"
+          },
+          {
+            "label": "DocumentVersion",
+            "name": "doc-002 v2"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "11"
+        ]
+      ]
+    },
+    {
+      "id": "q17",
+      "question": "Vilket datum använder kvittoläsaren på en hotellfaktura?",
+      "goal": "Chunks: the answer is only in part 3 of the long design document DESIGN-RECEIPT-READER",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "DocumentVersion",
+            "name": "doc-002 v1"
+          },
+          {
+            "label": "DocumentVersion",
+            "name": "doc-002 v2"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "utcheckning",
+          "check-out",
+          "checkout"
+        ]
+      ]
+    },
+    {
+      "id": "q18",
       "question": "Hej!",
       "goal": "Small talk: no graph work",
       "expected_route": "smalltalk",
       "expected_evidence": [],
       "expected_terms": []
+    },
+    {
+      "id": "q19",
+      "question": "Vilka källor finns om dubbelutbetalningen?",
+      "goal": "Control (never tuned against): like q04, another topic",
+      "expected_route": "graph",
+      "expected_evidence": [],
+      "expected_facts": [
+        [
+          "kvitta-api#60"
+        ]
+      ],
+      "expected_terms": [
+        [
+          "#60"
+        ],
+        [
+          "mail-010"
+        ]
+      ]
+    },
+    {
+      "id": "q20",
+      "question": "Vad ledde fram till att Visma-exporten flyttades till 1.1?",
+      "goal": "Control (never tuned against): a why question in another story",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-030"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-031"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-037"
+          },
+          {
+            "label": "Event",
+            "contains": "visma export moved"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Fortnox"
+        ],
+        [
+          "två veckor",
+          "not ready",
+          "inte klar",
+          "inte redo",
+          "inte färdig"
+        ]
+      ]
+    },
+    {
+      "id": "q21",
+      "question": "Vad har Anders Nyberg klagat på?",
+      "goal": "Control (never tuned against): like q10, the customer named instead of the role",
+      "expected_route": "graph",
+      "expected_evidence": [],
+      "expected_terms": [
+        [
+          "moms",
+          "VAT"
+        ],
+        [
+          "Fortnox"
+        ],
+        [
+          "dubbl",
+          "två gånger",
+          "twice",
+          "duplicate"
+        ]
+      ]
+    },
+    {
+      "id": "q22",
+      "question": "Varnade någon för Fortnox-avbrottet innan det hände?",
+      "goal": "Control (never tuned against): the right answer is no; nobody followed the Fortnox changelog",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "DocumentVersion",
+            "name": "doc-006 v1"
+          },
+          {
+            "label": "RootCause",
+            "contains": "changelog"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "changelog",
+          "ändringslogg",
+          "utvecklarlogg"
+        ]
+      ]
+    },
+    {
+      "id": "q23",
+      "question": "Hur är teamet uppdelat?",
+      "goal": "Control (never tuned against): like q12, other words",
+      "expected_route": "graph",
+      "expected_evidence": [],
+      "expected_facts": [
+        [
+          "community collab-"
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Maria"
+        ],
+        [
+          "Anders"
+        ]
+      ]
+    },
+    {
+      "id": "q24",
+      "question": "Vilka meddelanden handlade om offlinedebatten?",
+      "goal": "Control (never tuned against): messages about a debate, several of them name no issue",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "SlackMessage",
+            "name": "slack-003"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-004"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-005"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-006"
+          },
+          {
+            "label": "SlackMessage",
+            "name": "slack-007"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-006"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-007"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-005"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-008"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-009"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-010"
+          },
+          {
+            "label": "TeamsTranscriptSegment",
+            "name": "seg-011"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Lucas"
+        ],
+        [
+          "Ahmed"
+        ]
+      ]
+    },
+    {
+      "id": "q25",
+      "question": "Vem granskade Emmas första pull request?",
+      "goal": "Control (never tuned against): reviews of a pull request",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "PullRequest",
+            "name": "kvitta-web#3"
+          },
+          {
+            "label": "PullRequestReview",
+            "name": "kvitta-web#3 review-001"
+          },
+          {
+            "label": "PullRequestReview",
+            "name": "kvitta-web#3 review-002"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "Ahmed"
+        ]
+      ]
+    },
+    {
+      "id": "q26",
+      "question": "Vilken kodändring lagade spinnern i appen?",
+      "goal": "Control (never tuned against): code changes behind a fix",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "CodeChange",
+            "contains": "kvitta-mobile#9"
+          },
+          {
+            "label": "PullRequest",
+            "name": "kvitta-mobile#9"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "upload.ts"
+        ]
+      ]
+    },
+    {
+      "id": "q27",
+      "question": "Hur hanterar kvittoläsaren taxikvitton?",
+      "goal": "Control (never tuned against): chunks, the handling of taxi receipts is only in part 3 of DESIGN-RECEIPT-READER",
+      "expected_route": "graph",
+      "expected_evidence": [
+        [
+          {
+            "label": "DocumentVersion",
+            "name": "doc-002 v1"
+          },
+          {
+            "label": "DocumentVersion",
+            "name": "doc-002 v2"
+          }
+        ]
+      ],
+      "expected_terms": [
+        [
+          "bilnummer",
+          "car number",
+          "4711"
+        ]
+      ]
     }
   ]
 }

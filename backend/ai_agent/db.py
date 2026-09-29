@@ -39,6 +39,19 @@ def node_text(row: dict, max_chars: int) -> str:
     return text
 
 
+FETCH_CHUNKS = """
+MATCH (c:EmbeddingChunk) WHERE elementId(c) IN $ids
+RETURN elementId(c) AS id, c.chunk_index AS chunk_index, c.embedding_text AS text
+"""
+
+
+def chunk_texts(session, ids: list[str], timeout: float) -> dict[str, dict]:
+    """The embedded text of each chunk (a later part of a long text), with its position in the source."""
+    if not ids:
+        return {}
+    return {row["id"]: row for row in read(session, FETCH_CHUNKS, {"ids": ids}, timeout)}
+
+
 SIMILARITIES = """
 MATCH (n) WHERE elementId(n) IN $ids AND n.embedding IS NOT NULL
 RETURN elementId(n) AS id, vector.similarity.cosine(n.embedding, $vector) AS similarity

@@ -35,21 +35,22 @@ LOOKUP_ENTITY = (
     "CALL db.index.fulltext.queryNodes('entity_lookup', $q, {limit: $k}) YIELD node AS n, score" + _RETURN_NODE
 )
 
-# A hit on a chunk of a long text stands for its source node.
+# A hit on a chunk of a long text stands for its source node. `chunk_id` keeps which chunk matched, so the specialists
+# can show the model the part of the text that matched instead of the beginning of the source.
 VECTOR_SEARCH = f"""
 MATCH (hit:Searchable)
   SEARCH hit IN (VECTOR INDEX searchable_embedding FOR $vector LIMIT $k) SCORE AS score
 OPTIONAL MATCH (hit)-[:CHUNK_OF]->(source)
-WITH coalesce(source, hit) AS n, score
-{_RETURN_NODE}, score
+WITH coalesce(source, hit) AS n, score, CASE WHEN source IS NULL THEN null ELSE elementId(hit) END AS chunk_id
+{_RETURN_NODE}, score, chunk_id
 ORDER BY score DESC
 """
 
 FULLTEXT_SEARCH = f"""
 CALL db.index.fulltext.queryNodes('searchable_text', $q, {{limit: $k}}) YIELD node AS hit, score
 OPTIONAL MATCH (hit)-[:CHUNK_OF]->(source)
-WITH coalesce(source, hit) AS n, score
-{_RETURN_NODE}, score
+WITH coalesce(source, hit) AS n, score, CASE WHEN source IS NULL THEN null ELSE elementId(hit) END AS chunk_id
+{_RETURN_NODE}, score, chunk_id
 ORDER BY score DESC
 """
 
@@ -80,14 +81,19 @@ def _embed(client, settings: dict, text: str) -> tuple[list[float], dict]:
 
 
 def _fuse(ranked_lists: list[tuple[str, float, list[dict]]]) -> list[dict]:
-    """Reciprocal rank fusion, then one hit per `embedding_group` (the best one)."""
+    """Reciprocal rank fusion, then one hit per `embedding_group` (the best one). A node reached through chunks of its
+    text keeps the ids of those chunks, best match first."""
     fused: dict[str, dict] = {}
     for via, weight, rows in ranked_lists:
         for rank, row in enumerate(rows):
-            entry = fused.setdefault(row["id"], {**{k: row[k] for k in ("id", "label", "name", "grp")}, "score": 0.0, "via": []})
+            entry = fused.setdefault(
+                row["id"], {**{k: row[k] for k in ("id", "label", "name", "grp")}, "score": 0.0, "via": [], "chunk_ids": []},
+            )
             entry["score"] += weight / (RRF_K + rank + 1)
             if via not in entry["via"]:
                 entry["via"].append(via)
+            if row.get("chunk_id") and row["chunk_id"] not in entry["chunk_ids"]:
+                entry["chunk_ids"].append(row["chunk_id"])
 
     best_per_group: dict[str, dict] = {}
     for entry in sorted(fused.values(), key=lambda e: e["score"], reverse=True):
@@ -125,7 +131,8 @@ def find_entry_points(session, client, question: str, plan: dict, settings: dict
         ("fulltext", 1.0, fulltext_rows),
     ])
     entry_points = [
-        {"id": e["id"], "label": e["label"], "name": e["name"], "score": round(e["score"], 5), "via": e["via"]}
+        {"id": e["id"], "label": e["label"], "name": e["name"], "score": round(e["score"], 5), "via": e["via"],
+         "chunk_ids": e["chunk_ids"]}
         for e in fused[: search["entry_points"]]
     ]
     details = {
