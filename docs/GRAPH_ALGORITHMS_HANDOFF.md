@@ -1,155 +1,159 @@
-# Graph Algorithms Handoff
+# Layer 6: Graph Algorithms
 
-This document describes the Graph algorithm layer: the sixth middle-panel graph-building step, which precomputes collaboration-network metrics and bus-factor metrics using `networkx` and writes them as plain properties on existing nodes.
+The sixth graph-building step. With the Python library `networkx` (not Neo4j Graph Data Science) it computes
+collaboration-network metrics and communities from `WORKS_WITH`, bus factor from `Expertise`, and simple component
+counts, and writes them as properties on existing `Person`, `Topic` and `Component` nodes. It creates one node type of
+its own, `Community`. No model.
 
-The layer is implemented in `backend/graph_algorithms.py`, exposed by `backend/app.py`, and displayed in `GraphAlgorithmsPanel` inside `frontend/src/main.tsx`.
+**Verified on 2026-09-29** against `backend/graph_algorithms.py`, `backend/app.py`, `frontend/src/main.tsx` and the
+live graph.
 
-## Purpose
+Code: `backend/graph_algorithms.py`. UI: `GraphAlgorithmsPanel`, tab `Graph algorithms` (sixth of seven).
 
-Everything this layer needs already exists in the graph (`WORKS_WITH`, `Expertise`, `DEPENDS_ON`, `AFFECTED_COMPONENT`). Rather than adding new derived facts, it precomputes graph metrics — weighted degree, betweenness centrality, community membership, bus factor — so the AI chat agent and the graph view can filter and sort on them with ordinary Cypher, without running `networkx` at query time.
+## 1. Why it exists
 
-Uses the Python library `networkx`. Does not use Neo4j Graph Data Science.
+Everything it needs is already in the graph. Precomputing the metrics lets the agent and the graph panel sort and
+filter on them with plain Cypher instead of running graph algorithms per question.
 
-## Current Local State
+## 2. Collaboration graph metrics (per eligible person)
 
-From `/api/algorithms`:
+An undirected weighted graph: nodes = all eligible persons (same rule as layer 5; persons without any `WORKS_WITH` are
+isolated nodes); edges = `WORKS_WITH` with `weight` and `distance = 1 / weight`.
 
-| Field | Current value |
+| Property | Computation |
 | --- | --- |
-| Communities | 2 |
-| Persons | 5 |
-| Topics | 1 |
-| Components | 3 |
-| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
-| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
-| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
-| `last_collaboration_build_at` | `2026-09-23T18:10:20.780808+00:00` |
-| `last_algorithms_run_at` | `2026-09-23T18:10:21.590196+00:00` |
-| `needs_rerun` | `false` |
-| `stale_reasons` | `[]` |
+| `collab_weighted_degree` | `G.degree(weight="weight")`: total collaboration volume |
+| `collab_betweenness` | `networkx.betweenness_centrality(G, weight="distance", normalized=True)`, rounded to 4 decimals: how often the person lies on the shortest path between two others (0 to 1) |
+| `community_id` | the person's Louvain community |
 
-`counts.persons` and the `persons` table are scoped to eligible persons only (not `actor_type = "mailbox"`, not `identity_ambiguous = true`) — the same rule the Collaboration layer uses. The local dataset has 5 eligible persons out of 7 total, so these results exist but are not statistically meaningful — this is expected (see `NEW_LAYERS_WORK_ORDER.md`, section 7).
+**Communities:** `networkx.algorithms.community.louvain_communities(G, weight="weight", seed=42)` (fixed seed, so the
+same data gives the same groups). Sorted by size descending, then by the smallest `person_key` in the community, and
+named `collab-1`, `collab-2`, ... An isolated person is a community of one.
 
-Communities:
+## 3. Bus factor (per `Topic` and `Component`)
 
-| Community | Size | Members |
-| --- | ---: | --- |
-| `collab-1` | 3 | Anna Lindqvist, Erik Nilsson, Priya Raman |
-| `collab-2` | 2 | Anna Berg, Martin Ek |
+From the subject's `Expertise` entries sorted by `share` descending: `bus_factor` = the smallest number of top experts
+whose shares sum to at least 0.5; `expert_count` = number of entries; `top_expert` = the rank-1 person's name. A
+subject without expertise gets `bus_factor = 0`, `expert_count = 0`, `top_expert = null`. Bus factor 1 means one person
+holds at least half of the recorded knowledge.
 
-Bus factor:
+## 4. Component counts
 
-| Subject | Bus factor | Experts | Top expert |
-| --- | ---: | ---: | --- |
-| Mobile session refresh endpoint (Component) | 1 | 3 | Erik Nilsson |
-| Administrator session lifetime policy (Topic) | 2 | 4 | Anna Berg |
-| Session lifecycle policy (Component) | 2 | 4 | Priya Raman |
-| Web session refresh endpoint (Component) | 2 | 3 | Priya Raman |
+`depends_on_count` (outgoing `DEPENDS_ON`), `depended_on_by_count` (incoming `DEPENDS_ON`), `affected_event_count`
+(distinct events with `AFFECTED_COMPONENT` to it).
 
-(Component and topic names vary between rebuilds since the Architecture and Knowledge layers are LLM-derived.)
-
-Excluded persons (`Support`, `Anna`) never appear in `counts.persons`, the `persons` table, or receive `collab_*`/`community_id` properties at all — this is expected since they are not eligible in the first place, not merely because they have no `WORKS_WITH` edges.
-
-## Properties Written to Existing Nodes
-
-Before writing, all properties in the relevant row are `REMOVE`d from every node of that label, so stale values from a previous run never remain — even for a node that no longer qualifies (e.g. a component that lost all its dependencies).
+## 5. What is written
 
 | Label | Properties |
 | --- | --- |
-| `Person` | `collab_weighted_degree`, `collab_betweenness`, `community_id`, `algorithms_generated_by`, `algorithms_generated_at` |
+| `Person` (eligible) | `collab_weighted_degree`, `collab_betweenness`, `community_id`, `algorithms_generated_by`, `algorithms_generated_at` |
 | `Topic` | `bus_factor`, `expert_count`, `top_expert`, `algorithms_generated_by`, `algorithms_generated_at` |
 | `Component` | `bus_factor`, `expert_count`, `top_expert`, `depends_on_count`, `depended_on_by_count`, `affected_event_count`, `algorithms_generated_by`, `algorithms_generated_at` |
-
-`algorithms_generated_by` / `algorithms_generated_at` are used instead of the normal `generated_by` / `generated_at`, specifically so this layer never overwrites the stamp that `Topic` and `Component` nodes already carry from the Knowledge and Architecture layers — overwriting `generated_by` on those nodes would break their own layer's delete-by-`generated_by` rebuild logic.
-
-## Collaboration Graph Metrics
-
-Undirected weighted graph: nodes are all eligible persons (the same eligibility rule as the Collaboration layer), including persons with no `WORKS_WITH` edge (they appear as isolated nodes / singleton communities). Edges are every `WORKS_WITH`, with `weight` and `distance = 1 / weight`.
-
-- `collab_weighted_degree` = `G.degree(weight="weight")`.
-- `collab_betweenness` = `networkx.betweenness_centrality(G, weight="distance", normalized=True)`, rounded to 4 decimals.
-- Communities = `networkx.algorithms.community.louvain_communities(G, weight="weight", seed=42)`.
-
-Community IDs are assigned `collab-1`, `collab-2`, ... after sorting communities by size descending, then by the smallest `person_key` in the community ascending.
-
-## Bus Factor
-
-For each `Topic` and `Component`: read its `Expertise` nodes (via `EXPERTISE_IN`), sorted by `share` descending. `bus_factor` = the smallest number of top experts whose combined `share` is at least `0.5`. `expert_count` = number of `Expertise` nodes. `top_expert` = the rank-1 person's name. A subject with no expertise gets `bus_factor = 0`, `expert_count = 0`, `top_expert = null`.
-
-## Component Metrics
-
-`depends_on_count` (outgoing `DEPENDS_ON`), `depended_on_by_count` (incoming `DEPENDS_ON`), `affected_event_count` (distinct `Event` with `AFFECTED_COMPONENT` to it).
-
-## Graph Model
 
 ```cypher
 (:Person)-[:MEMBER_OF_COMMUNITY]->(:Community)
 ```
 
-`Community` is the only new node label, keyed by `community_id`, properties `size` and `display_name` (= `community_id`). Unlike the metric properties above, `Community` nodes and `MEMBER_OF_COMMUNITY` edges use the **normal** stamping (`derived`, `generated_by = "graph-algorithms-v1"`, `generated_at`) and are deleted by `generated_by` on rerun, same as any other layer's own nodes.
+`Community` (key `community_id`, constraint `community_key`): `size`, `display_name` (= `community_id`), `derived`,
+`generated_by = graph-algorithms-v1`, `generated_at`; the membership relationships carry the same stamp.
 
-## Constraint
+The metric properties use `algorithms_generated_by` / `algorithms_generated_at` instead of `generated_by`, because
+`Topic` and `Component` already carry `generated_by` from their own layers, and overwriting it would break those
+layers' delete-by-`generated_by` rebuilds.
 
-```cypher
-CREATE CONSTRAINT community_key IF NOT EXISTS FOR (n:Community) REQUIRE n.community_id IS UNIQUE
-```
+## 6. Run behaviour
 
-## Build/Rebuild Behavior
+Prerequisite: `last_collaboration_build_at` (else 409 `Run Expertise & collaboration layer first.`).
 
-1. Require `last_collaboration_build_at` to exist (else `409 {"error": "Run Expertise & collaboration layer first."}`).
-2. No model call. Compute all metrics into Python data structures first.
-3. `REMOVE` the algorithm properties from `Person`, `Topic`, `Component`; delete the previous `Community`/`MEMBER_OF_COMMUNITY` layer by `generated_by = "graph-algorithms-v1"`.
-4. Write the new `Community` nodes and `MEMBER_OF_COMMUNITY` edges, then the `Person`/`Topic`/`Component` metric properties.
-5. Update `PipelineState.last_algorithms_run_at`.
+1. Compute everything in Python.
+2. `REMOVE` the metric properties from **every** `Person`, `Topic` and `Component` (so no stale value survives on a
+   node that no longer qualifies).
+3. Delete this layer's `Community` nodes and memberships (`generated_by = graph-algorithms-v1`).
+4. Write communities and memberships, then the person, topic and component metrics.
+5. Set `PipelineState.last_algorithms_run_at`.
 
-## Pipeline State
+`networkx` is imported by the module; `backend/app.py` imports the module only inside the two routes, so a missing
+package makes these routes answer 503 without stopping the rest of the backend.
 
-| Property | Written by |
-| --- | --- |
-| `last_layer_build_at` | Knowledge layer |
-| `last_architecture_build_at` | Architecture layer |
-| `last_causal_build_at` | Causal layer |
-| `last_collaboration_build_at` | Collaboration layer |
-| `last_algorithms_run_at` | Graph algorithm layer (this layer's own timestamp) |
+## 7. Current state (2026-09-29)
 
-Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `knowledge`, `architecture`, `causal`, and `collaboration` — Knowledge is a direct upstream stage here, not merely an indirect one reached through Causal/Collaboration. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set. `last_layer_build_at` is also included in the `/api/algorithms` payload so the frontend can show "Last knowledge build" alongside the other upstream timestamps.
+Kvitta data. 2 communities, 8 memberships, 8 eligible persons, 10 topics, 18 components analysed; 2 nodes and 8
+relationships; not stale. Weighted degree, betweenness (recomputed by enumerating all shortest paths), communities,
+bus factor and component counts all matched an independent recomputation.
 
-## Backend API
+| Person | Weighted degree | Betweenness | Community |
+| --- | ---: | ---: | --- |
+| Maria Lindgren | 88 | 0.2857 | collab-2 |
+| Ahmed Karimi | 99 | 0.2857 | collab-1 |
+| David Okafor | 105 | 0.1429 | collab-1 |
+| Nina Petrova | 86 | 0.0 | collab-1 |
+| Sofia Berg | 71 | 0.0 | collab-1 |
+| Lucas Holm | 66 | 0.0 | collab-1 |
+| Emma Chen | 53 | 0.0 | collab-1 |
+| Anders Nyberg | 16 | 0.0 | collab-2 |
 
-`GET /api/algorithms` returns pipeline timestamps (including `last_layer_build_at`), `needs_rerun`, `stale_reasons`, `counts`, and the `persons` (sorted by `collab_betweenness` descending), `communities`, `bus_factor` (sorted by `bus_factor` ascending then name), `components` tables.
+Communities: `collab-1` the six developers (Ahmed, David, Emma, Lucas, Nina, Sofia); `collab-2` Maria Lindgren and
+the customer Anders Nyberg. David has the most collaboration; Maria (the only strong link to the customer) and Ahmed
+(the shortest path from the newcomer Emma to the others) have the highest betweenness. Because all seven team members
+work directly with each other, betweenness among them comes only from differences in weight.
 
-`POST /api/algorithms/run` returns the same payload plus `run_at`, `deleted_relationships`, `deleted_nodes`.
+Bus factor 1 (one person holds at least half), 13 subjects:
 
-Errors: `409` if Collaboration has not run; `500` otherwise. Requires the `networkx` package (added to `requirements.txt`); if it is not installed, both endpoints return `503` rather than breaking the rest of the backend, because the import is deferred to request time.
+| Subject | Experts | Top expert |
+| --- | ---: | --- |
+| Component Fortnox | 1 | Ahmed Karimi |
+| Component Fortnox authentication | 3 | Ahmed Karimi |
+| Component Fortnox client | 4 | Ahmed Karimi |
+| Component Receipt VAT rules | 3 | Sofia Berg |
+| Component Receipt image storage and retention | 3 | Sofia Berg |
+| Component Approval Limits API | 1 | Emma Chen |
+| Component Approval Limits Client | 3 | Emma Chen |
+| Component Expense sync endpoint | 1 | Lucas Holm |
+| Component Expense upload | 4 | Lucas Holm |
+| Topic Emma Chen onboarding first tasks | 3 | Emma Chen |
+| Topic Kvitta 1.0 release | 4 | Maria Lindgren |
+| Topic Upload spinner remains active after slow-network receipt upload | 2 | Nina Petrova |
+| Topic Visma export of approved expenses | 2 | Maria Lindgren |
 
-## Frontend UI
+Bus factor 2: 14 subjects, among them Component Receipt reader (Sofia), Payout export (Ahmed) and every other topic.
+Bus factor 3: Component Retry delivery (Lucas, 6 experts). The two knowledge risks in the story are Fortnox (Ahmed)
+and the VAT rules and image storage (Sofia); see `kvitta/demofrågor.md`, question 6.
 
-Tab `Graph algorithms` inside `BuildGraphLayersPanel`, rendered by `GraphAlgorithmsPanel`, sixth of seven inner tabs. Button text `Run graph algorithms` / `Running graph algorithms...`. Below the button and status row, a description line (`reference-description`) reads `Computes collaboration metrics, communities and bus factor from the existing graph. Metrics are stored as properties on existing nodes; communities are created as new Community nodes.` The counts are split in two rows: `Nodes and relationships:` (communities, and community memberships = `MEMBER_OF_COMMUNITY` relationships, returned as `counts.community_memberships`) and `Analyzed (existing nodes):` (eligible persons, topics, components), since the last three are existing nodes this layer writes metric properties onto rather than creates. Upstream timestamps shown: Last knowledge build, Last architecture build, Last causal build, Last collaboration build. One table per algorithm, each with a short caption (`knowledge-table-caption`) explaining it. In order:
+Component counts: most affecting events Retry delivery 6, then Offline expense sync endpoint, Receipt image storage
+and retention and Receipt reader 5 each; most dependencies Expense upload API (depends on 3); most depended on
+Fortnox (2).
 
-| Table | Columns | Sorted by | Caption |
-| --- | --- | --- | --- |
-| `Communities (node, Louvain community detection algorithm)` | Community (property), Size (property), Members (via MEMBER_OF_COMMUNITY) | community id | Four lines: what a community is (collaboration stronger inside the group than outside), how Louvain builds it (each person starts alone, people are moved while the grouping improves, groups are merged; WORKS_WITH weight pulls people together), why the result is stable (Louvain tries people in a random order; the fixed seed 42 makes reruns on the same data give the same groups), and how groups are numbered (`collab-1`, `collab-2`, … largest first). |
-| `Weighted degree (graph metric, written to Person node)` | Person (Person node), Weighted degree (property `collab_weighted_degree`) | weighted degree, highest first (client-side) | Four lines: how much each person collaborates in total; it adds up the WORKS_WITH weights (shared issues, PRs, meetings, mail threads, events); what high and low values mean; that it measures collaboration volume, not importance for holding the team together (see Betweenness centrality). |
-| `Betweenness centrality (betweenness centrality algorithm, written to Person node)` | Person (Person node), Betweenness (property `collab_betweenness`) | betweenness, highest first | Four lines: how often a person lies on the shortest path between two others; how it is computed (shortest path per pair, distance = 1 / weight, share of paths through the person, 0 to 1); what a high value means (bridge, vulnerability, bottleneck); that it measures network position, not collaboration volume (see Weighted degree). |
-| `Bus factor (algorithm on expertise shares, written to Topic and Component nodes)` | Subject type (node label), Subject (Topic or Component node), Bus factor (property `bus_factor`), Experts (property `expert_count`), Top expert (property `top_expert`) | bus factor ascending, then name | A block caption (`div.knowledge-table-caption` with one `p` per block and bold block labels): a one-line summary, then **How it is calculated** (expert shares from the Expertise & collaboration layer, sorted largest first, summed until at least 50%), **Bus factor** (how bad it is if the top expert disappears), **Experts** (how many people there are to ask; Top expert), **Together** (how evenly knowledge is spread; why it is sorted lowest first). |
-| `Component metrics (simple counts, written to Component node)` | Component (Component node), Depends on (property `depends_on_count`), Depended on by (property `depended_on_by_count`), Affected events (property `affected_event_count`) | name | A block caption: simple counts of existing relationships, not an algorithm; then one block each for **Depends on** (outgoing DEPENDS_ON, Architecture layer), **Depended on by** (incoming DEPENDS_ON, Architecture layer) and **Affected events** (incoming AFFECTED_COMPONENT, Root cause & impact layer), each saying what is counted and what a high value means. |
+## 8. What the data needs for this layer
 
-`Communities` comes first because it is the only node type this layer creates. The two person tables are both built from the `persons` payload; the community of each person is visible in the `Communities` Members column. `components[].bus_factor` is still returned by the API but no longer shown, since the `Bus factor` table already covers it.
+- Enough eligible people (10 or more) for Louvain to find several real groups, and people who connect groups, so
+  betweenness varies.
+- Components and topics where knowledge is concentrated (bus factor 1) and others where it is spread.
+- Components that many others depend on, and components affected by many events.
 
-## Graph Visualization Filter
+## 9. API
 
-```python
-"Algorithms": [
-    "MEMBER_OF_COMMUNITY",
-]
-```
+`GET /api/algorithms`: timestamps (`last_layer_build_at`, `last_architecture_build_at`, `last_causal_build_at`,
+`last_collaboration_build_at`, `last_algorithms_run_at`), `needs_rerun`, `stale_reasons`, `counts` (`communities`,
+`community_memberships`, `persons` (eligible), `topics`, `components`), `persons` (eligible, by betweenness
+descending), `communities`, `bus_factor` (topics and components, bus factor ascending then name), `components`.
 
-Node color added: `Community` (`#a3e635`).
+`POST /api/algorithms/run`: the same plus `run_at`, `deleted_relationships`, `deleted_nodes`. Errors 409, 503
+(networkx missing), 500.
 
-## Important Boundaries
+## 10. UI
 
-- Reads and writes Neo4j only; never touches PostgreSQL.
-- Calls no model; uses `networkx` locally.
-- Never overwrites `generated_by` on `Topic`/`Component`/`Person` nodes it did not create — uses `algorithms_generated_by` instead.
-- `Community` nodes are the only ones this layer deletes by `generated_by` on rebuild; the metric properties are cleared with `REMOVE` instead, since they live on nodes owned by other layers.
-- Depends on the Architecture, Causal, and Collaboration layers all having run at least once.
+Tab `Graph algorithms`. Button `Run graph algorithms` / `Running graph algorithms...`. Description: `Computes
+collaboration metrics, communities and bus factor from the existing graph. Metrics are stored as properties on
+existing nodes; communities are created as new Community nodes.` Counts under `Nodes and relationships:` and
+`Analyzed (existing nodes):`. Tables, each with an explanatory caption: `Communities (node, Louvain community
+detection algorithm)`, `Weighted degree (graph metric, written to Person node)`, `Betweenness centrality (betweenness
+centrality algorithm, written to Person node)`, `Bus factor (algorithm on expertise shares, written to Topic and
+Component nodes)`, `Component metrics (simple counts, written to Component node)`.
+
+Graph filter `Algorithms`: `MEMBER_OF_COMMUNITY`.
+
+## 11. Boundaries
+
+- Reads and writes Neo4j only; no model; uses `networkx` locally.
+- Never writes `generated_by` on nodes it did not create; clears its metrics with `REMOVE`.
+- Deletes only its own `Community` nodes and memberships.

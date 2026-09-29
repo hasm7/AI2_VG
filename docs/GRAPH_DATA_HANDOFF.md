@@ -1,602 +1,367 @@
-# Graph Database Handoff Specification
+# Graph Data Handoff: the Neo4j Memory Graph
 
-This document describes the current Neo4j graph model, how it is derived from PostgreSQL, and how the backend/frontend use it.
+This is the reference for the Neo4j graph: every node label, its key and properties, every relationship type, which
+code creates it, the constraints and indexes, the bookkeeping node, the graph API and the graph panel.
 
-The information below was checked against the local Neo4j database read-only. The previous README is not treated as authoritative.
+**Verified on 2026-09-29** against the live database (Neo4j 2026.08.1 Enterprise, read-only session: labels,
+relationship types with their start and end labels, every property key and value type per label, constraints,
+indexes) and against the code that writes the graph (`viewer/app.py` for the import, one module per layer in
+`backend/`).
 
-## Current Neo4j Snapshot
+Related: `docs/SQL_DATA_HANDOFF.md` (the rows this is built from), `docs/PIPELINE_AND_LINKS_HANDOFF.md` (how layers
+depend on each other), one `docs/*_LAYER_HANDOFF.md` per layer.
 
-Current node counts:
+## 1. What the graph is
 
-| Label | Count |
-| --- | ---: |
-| `CodeChange` | 7 |
-| `Community` | 2 |
-| `Component` | 3 |
-| `Document` | 2 |
-| `DocumentVersion` | 3 |
-| `Event` | 10 |
-| `Expertise` | 14 |
-| `File` | 4 |
-| `Issue` | 2 |
-| `IssueComment` | 5 |
-| `IssueVersion` | 7 |
-| `MailMessage` | 4 |
-| `Module` | 2 |
-| `Person` | 7 |
-| `PipelineState` | 1 |
-| `PullRequest` | 2 |
-| `PullRequestReview` | 6 |
-| `Repository` | 1 |
-| `RootCause` | 3 |
-| `SlackMessage` | 12 |
-| `TeamsMeeting` | 2 |
-| `TeamsTranscriptSegment` | 9 |
-| `Topic` | 1 |
+PostgreSQL holds the source records. Neo4j holds the same records as nodes, plus everything the layers derive from
+them: explicit references, topics and events, code structure and components, root causes, expertise, collaboration,
+communities, metrics and search vectors. Neo4j can always be rebuilt from PostgreSQL: import, then build the seven
+layers in order.
 
-Current relationship counts:
+Three kinds of content live in the graph:
 
-| Type | Count |
-| --- | ---: |
-| `ABOUT_TOPIC` | 2 |
-| `ACTED_IN_EVENT` | 19 |
-| `AFFECTED_COMPONENT` | 10 |
-| `AUTHORED_DOCUMENT` | 2 |
-| `AUTHORED_DOCUMENT_VERSION` | 3 |
-| `AUTHORED_PR` | 2 |
-| `CAUSED` | 6 |
-| `CHANGED_ISSUE_VERSION` | 7 |
-| `COMMENTED_ON_ISSUE` | 4 |
-| `COMPONENT_EVIDENCED_BY` | 12 |
-| `CONTAINS_FILE` | 4 |
-| `CONTAINS_MODULE` | 2 |
-| `CONTRIBUTED_TO` | 5 |
-| `CREATED_ISSUE` | 2 |
-| `DEPENDS_ON` | 2 |
-| `DERIVED_FROM` | 51 |
-| `EVENT_OF_TOPIC` | 10 |
-| `EVIDENCED_BY` | 29 |
-| `EXPERTISE_EVIDENCED_BY` | 93 |
-| `EXPERTISE_IN` | 14 |
-| `HAS_CODE_CHANGE` | 7 |
-| `HAS_DOCUMENT_VERSION` | 3 |
-| `HAS_EXPERTISE` | 14 |
-| `HAS_ISSUE_COMMENT` | 5 |
-| `HAS_ISSUE_VERSION` | 7 |
-| `HAS_PR_REVIEW` | 6 |
-| `HAS_ROOT_CAUSE` | 6 |
-| `HAS_TEAMS_TRANSCRIPT_SEGMENT` | 9 |
-| `IMPLEMENTED_IN` | 3 |
-| `MAIL_RECIPIENT` | 8 |
-| `MEMBER_OF_COMMUNITY` | 5 |
-| `MENTIONS_DOCUMENT` | 12 |
-| `MENTIONS_ISSUE` | 22 |
-| `MENTIONS_PULL_REQUEST` | 21 |
-| `MODIFIES_FILE` | 7 |
-| `NEXT_DOCUMENT_VERSION` | 1 |
-| `NEXT_ISSUE_VERSION` | 5 |
-| `OWNS_ISSUE` | 2 |
-| `PARTICIPATED_IN_MEETING` | 8 |
-| `PART_OF_REPOSITORY` | 3 |
-| `REPLY_TO_ISSUE_COMMENT` | 1 |
-| `REPLY_TO_PR_REVIEW` | 1 |
-| `REVIEWED_PR` | 4 |
-| `ROOT_CAUSE_EVIDENCED_BY` | 15 |
-| `ROOT_CAUSE_IN_COMPONENT` | 5 |
-| `SENT_MAIL` | 4 |
-| `SENT_SLACK_MESSAGE` | 12 |
-| `SLACK_THREAD_REPLY_TO` | 2 |
-| `SPOKE_TEAMS_TRANSCRIPT_SEGMENT` | 9 |
-| `WORKS_WITH` | 7 |
-| `WROTE_ISSUE_COMMENT` | 5 |
-| `WROTE_PR_REVIEW` | 6 |
-
-(`Event`, `EVENT_OF_TOPIC`, `CAUSED`, and the counts of everything downstream of the Knowledge layer vary slightly between runs, because the LLM does not propose exactly the same events every time. This snapshot is from the full pipeline rebuild performed for the staleness follow-up work order.)
-
-## Source of Truth and Build Order
-
-PostgreSQL is the source-preserving layer. Neo4j is the derived relationship/memory layer.
-
-The intended build order is:
-
-1. Import SQL source groups from the SQL viewer (`viewer/app.py`).
-2. Run deterministic reference extraction (`backend/reference_extraction.py`) to create `MENTIONS_*` edges.
-3. Run interpreted knowledge extraction (`backend/topic_event_extraction.py`) to create `Topic`, `Event`, and causal/event evidence relationships.
-4. Run the Architecture layer (`backend/architecture_layer.py`) to create `Repository`/`Module`/`File`/`Component` structure.
-5. Run the Causal layer (`backend/causal_layer.py`) to create `RootCause` and cross-topic/code/component causal links.
-6. Run the Collaboration layer (`backend/collaboration_layer.py`) to create `Expertise` and `WORKS_WITH`.
-7. Run the Graph algorithm layer (`backend/graph_algorithms.py`) to create `Community` and precomputed metrics.
-8. Run embeddings (`backend/embedding_pass.py`) to add vector properties and vector/fulltext indexes.
-
-Steps 4-7 are each gated on their prerequisites (see each layer's own handoff document) and must be run in that order; the backend returns `409` if a layer's prerequisites are missing.
-
-`PipelineState {id: "singleton"}` stores timestamps for these stages:
-
-| Property | Meaning |
-| --- | --- |
-| `last_import_at` | A source import last wrote copied source data. |
-| `last_extraction_at` | Reference extraction last rebuilt `MENTIONS_*`. |
-| `last_layer_build_at` | Knowledge layer last rebuilt `Topic`/`Event`. |
-| `last_architecture_build_at` | Architecture layer last rebuilt `Repository`/`Module`/`File`/`Component`. |
-| `last_causal_build_at` | Causal layer last rebuilt `RootCause` and causal links. |
-| `last_collaboration_build_at` | Collaboration layer last rebuilt `Expertise`/`WORKS_WITH`. |
-| `last_algorithms_run_at` | Graph algorithm layer last ran. |
-| `last_embedding_at` | Embedding pass last ran. |
-| `last_embedding_failures` | Number of nodes that failed in the last embedding run (embedding layer's own marker). |
-| `embedding_config` | Fingerprint of the configuration the last embedding run used (embedding layer's own marker). |
-
-`PipelineState` is excluded from `/api/graph` visualization.
-
-Current `PipelineState` snapshot (after a full rebuild of every stage, in order):
-
-| Property | Value |
-| --- | --- |
-| `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
-| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
-| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
-| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
-| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
-| `last_collaboration_build_at` | `2026-09-23T18:10:20.780808+00:00` |
-| `last_algorithms_run_at` | `2026-09-23T18:10:21.590196+00:00` |
-| `last_embedding_at` | `2026-09-23T18:10:21.842346+00:00` |
-
-See `ARCHITECTURE_LAYER_HANDOFF.md`, `CAUSAL_LAYER_HANDOFF.md`, `COLLABORATION_LAYER_HANDOFF.md`, and `GRAPH_ALGORITHMS_HANDOFF.md` for the full detail on each of the four newer layers.
-
-## Pipeline Staleness
-
-Implemented in `backend/pipeline_staleness.py`. This is the single place that computes whether a layer is stale (`needs_rerun` / `needs_layer_rerun`) and why. Every layer's `GET` and `POST` response reads its staleness from here instead of computing it locally.
-
-A stage is stale not only when its *direct* upstream has moved on, but also when that upstream is itself stale — staleness propagates transitively through the whole pipeline. For example, if Reference extraction is stale, Architecture, Causal, Collaboration, Algorithms, and Embeddings are all stale too, even though only Architecture and Embeddings list References as a *direct* upstream.
-
-Three constants define the pipeline:
-
-```python
-TIMESTAMP_BY_STAGE = {
-    "import": "last_import_at",
-    "references": "last_extraction_at",
-    "knowledge": "last_layer_build_at",
-    "architecture": "last_architecture_build_at",
-    "causal": "last_causal_build_at",
-    "collaboration": "last_collaboration_build_at",
-    "algorithms": "last_algorithms_run_at",
-    "embeddings": "last_embedding_at",
-}
-
-UPSTREAM_BY_STAGE = {
-    "references": ["import"],
-    "knowledge": ["references"],
-    "architecture": ["import", "references"],
-    "causal": ["knowledge", "architecture"],
-    "collaboration": ["import", "knowledge", "architecture", "causal"],
-    "algorithms": ["knowledge", "architecture", "causal", "collaboration"],
-    "embeddings": ["import", "references", "knowledge", "architecture", "causal", "collaboration", "algorithms"],
-}
-
-STAGE_LABELS = {
-    "import": "Import",
-    "references": "Reference extraction",
-    "knowledge": "Knowledge layer",
-    "architecture": "Architecture layer",
-    "causal": "Root cause & impact layer",
-    "collaboration": "Expertise & collaboration layer",
-    "algorithms": "Graph algorithms",
-    "embeddings": "Embeddings",
-}
-```
-
-`import` is a source, not a layer; it never has a `stale` status of its own, only a timestamp other stages compare against.
-
-`compute_staleness(pipeline_state)` returns `{stage: {"stale": bool, "reasons": [str]}}` for every stage except `"import"`, evaluated in `UPSTREAM_BY_STAGE` order (which is already dependency order, so every stage's upstream stages are always resolved before it):
-
-1. If a stage's own timestamp is missing, it is stale with the single reason `"Never built."`, and no further rules are checked for it.
-2. Otherwise, for each of its upstream stages `U`, in the order listed in `UPSTREAM_BY_STAGE`:
-   - if `U`'s timestamp exists and is newer than the stage's own timestamp, add the reason `"<label of U> was rebuilt after this layer."`;
-   - if `U` is not `import` and `U` is itself stale, add the reason `"<label of U> is stale."`.
-3. The stage is stale if it collected at least one reason.
-
-A missing upstream timestamp is always covered by rule 1 turning that upstream stale, which in turn is picked up by the second bullet of rule 2 as `"<label> is stale."` — there is no separate case for "upstream missing but not stale."
-
-Every layer's state payload includes both the boolean field (named `needs_rerun`, except the Knowledge layer's `needs_layer_rerun`, for backward compatibility) and a `stale_reasons: string[]` field with the human-readable reasons, in the order `compute_staleness` produced them. The frontend renders each reason on its own line under the stale warning.
-
-`backend/pipeline_staleness.py` also owns the one `read_pipeline_state(tx)` query that reads all eight timestamps at once; every layer module's own `read_pipeline_state` now delegates to it, so prerequisite checks (the `409` responses) and staleness computation always see a consistent snapshot of `PipelineState`.
-
-## SQL to Graph Model
-
-| Source | SQL tables | Graph labels | Relationships |
+| Kind | Written by | Marked by | Deleted by |
 | --- | --- | --- | --- |
-| Mail | `mail_messages` | `MailMessage`, `Person` | `SENT_MAIL`, `MAIL_RECIPIENT` |
-| Slack | `slack_messages` | `SlackMessage`, `Person` | `SENT_SLACK_MESSAGE`, `SLACK_THREAD_REPLY_TO` |
-| Teams | `teams_meetings`, `teams_transcript_segments` | `TeamsMeeting`, `TeamsTranscriptSegment`, `Person` | `PARTICIPATED_IN_MEETING`, `HAS_TEAMS_TRANSCRIPT_SEGMENT`, `SPOKE_TEAMS_TRANSCRIPT_SEGMENT` |
-| Issues | `issues`, `issue_versions`, `issue_comments` | `Issue`, `IssueVersion`, `IssueComment`, `Person` | `CREATED_ISSUE`, `OWNS_ISSUE`, `COMMENTED_ON_ISSUE`, `HAS_ISSUE_VERSION`, `NEXT_ISSUE_VERSION`, `CHANGED_ISSUE_VERSION`, `HAS_ISSUE_COMMENT`, `WROTE_ISSUE_COMMENT`, `REPLY_TO_ISSUE_COMMENT` |
-| Docs | `document_versions` | `Document`, `DocumentVersion`, `Person` | `AUTHORED_DOCUMENT`, `HAS_DOCUMENT_VERSION`, `NEXT_DOCUMENT_VERSION`, `AUTHORED_DOCUMENT_VERSION` |
-| PRs | `pr_versions`, `pr_reviews`, `pr_versions.code_changes` | `PullRequest`, `PullRequestReview`, `CodeChange`, `Person` | `AUTHORED_PR`, `REVIEWED_PR`, `HAS_PR_REVIEW`, `WROTE_PR_REVIEW`, `REPLY_TO_PR_REVIEW`, `HAS_CODE_CHANGE` |
-| References | Graph text scan | No new nodes | `MENTIONS_ISSUE`, `MENTIONS_PULL_REQUEST`, `MENTIONS_DOCUMENT` |
-| Knowledge | Graph bundles around issues | `Topic`, `Event` | `ABOUT_TOPIC`, `DERIVED_FROM`, `EVENT_OF_TOPIC`, `EVIDENCED_BY`, `CAUSED`, `ACTED_IN_EVENT` |
-| Architecture | `CodeChange.file_path`, PR/review/document/message bundles | `Repository`, `Module`, `File`, `Component` | `CONTAINS_MODULE`, `CONTAINS_FILE`, `MODIFIES_FILE`, `IMPLEMENTED_IN`, `PART_OF_REPOSITORY`, `DEPENDS_ON`, `COMPONENT_EVIDENCED_BY` |
-| Causal | Topic-centered bundles around events | `RootCause` | `CROSS_TOPIC_CAUSED`, `HAS_ROOT_CAUSE`, `ROOT_CAUSE_IN_COMPONENT`, `ROOT_CAUSE_EVIDENCED_BY`, `CONTRIBUTED_TO`, `AFFECTED_COMPONENT` |
-| Collaboration | Activity relationships already in the graph | `Expertise` | `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH` |
-| Algorithms | `WORKS_WITH` graph, `Expertise`, `DEPENDS_ON`, `AFFECTED_COMPONENT` | `Community` | `MEMBER_OF_COMMUNITY` |
+| **Source nodes and relationships** (copies of SQL rows) | the SQL import (`viewer/app.py`) | no marker; relationships have no properties except `MAIL_RECIPIENT.recipient_type` | never (the import only merges) |
+| **Derived nodes and relationships** | layers 1 to 6 and the chunk nodes of layer 7 | `derived = true` and `generated_by = <layer version>` (layer 1 uses `extracted_by`) | the owning layer, by that marker, on rebuild |
+| **Derived properties on existing nodes** | layer 6 (metrics) and layer 7 (vectors) | `algorithms_generated_by` / `embedding_version` | overwritten or removed by the owning layer |
 
-## Constraints and Indexes
+## 2. Current snapshot
 
-Uniqueness constraints:
+The Kvitta data (`data/kvitta_seed.sql`), imported and built layer by layer on 2026-09-29, through Graph algorithms.
+**The Embeddings layer has not been run on this data yet**, so there are no `Searchable` labels, vectors or
+`EmbeddingChunk` nodes, and `last_embedding_at` is absent. Without `PipelineState`: 538 nodes and 2 847
+relationships; nothing is stale.
 
-| Constraint | Label | Key |
-| --- | --- | --- |
-| `person_key` | `Person` | `person_key` |
-| `mail_message_key` | `MailMessage` | `source_instance`, `message_id` |
-| `slack_message_key` | `SlackMessage` | `source_instance`, `workspace_id`, `channel_id`, `message_id`, `version_number` |
-| `teams_meeting_key` | `TeamsMeeting` | `source_instance`, `meeting_id` |
-| `transcript_segment_key` | `TeamsTranscriptSegment` | `source_instance`, `meeting_id`, `segment_id` |
-| `issue_node_key` | `Issue` | `source_instance`, `issue_id` |
-| `issue_version_key` | `IssueVersion` | `source_instance`, `issue_id`, `version_number` |
-| `issue_comment_key` | `IssueComment` | `source_instance`, `comment_id` |
-| `document_node_key` | `Document` | `source_instance`, `document_id` |
-| `document_version_key` | `DocumentVersion` | `source_instance`, `document_id`, `version_number` |
-| `pull_request_key` | `PullRequest` | `source_instance`, `repository`, `pr_number` |
-| `pull_request_review_key` | `PullRequestReview` | `source_instance`, `repository`, `pr_number`, `source_id` |
-| `code_change_key` | `CodeChange` | `source_instance`, `repository`, `pr_number`, `version_number`, `file_path` |
-| `topic_slug` | `Topic` | `slug` |
-| `event_key` | `Event` | `topic_slug`, `slug` |
-| `repository_key` | `Repository` | `source_instance`, `name` |
-| `module_key` | `Module` | `source_instance`, `repository`, `path` |
-| `file_key` | `File` | `source_instance`, `repository`, `path` |
-| `component_key` | `Component` | `source_instance`, `repository`, `slug` |
-| `root_cause_slug` | `RootCause` | `slug` |
-| `expertise_key` | `Expertise` | `person_key`, `subject_label`, `subject_key` |
-| `community_key` | `Community` | `community_id` |
+| Label | Count | Created by |
+| --- | ---: | --- |
+| `MailMessage` | 14 | import |
+| `SlackMessage` | 50 | import |
+| `TeamsMeeting` | 10 | import |
+| `TeamsTranscriptSegment` | 45 | import |
+| `Issue` | 12 | import |
+| `IssueVersion` | 34 | import |
+| `IssueComment` | 17 | import |
+| `Document` | 6 | import |
+| `DocumentVersion` | 10 | import |
+| `PullRequest` | 14 | import |
+| `PullRequestReview` | 33 | import |
+| `CodeChange` | 39 | import |
+| `Person` | 10 | import (identity resolution) |
+| `Topic` | 10 | Knowledge layer |
+| `Event` | 51 | Knowledge layer |
+| `Repository` | 3 | Architecture layer |
+| `Module` | 13 | Architecture layer |
+| `File` | 23 | Architecture layer |
+| `Component` | 18 | Architecture layer |
+| `RootCause` | 15 | Root cause & impact layer |
+| `Expertise` | 109 | Expertise & collaboration layer |
+| `Community` | 2 | Graph algorithms |
+| `EmbeddingChunk` | not built yet | Embeddings (only for texts over 12 000 characters; `doc-002` is the only one) |
+| `PipelineState` | 1 | every stage (bookkeeping) |
+| `Searchable` (extra label) | not built yet | Embeddings; on every embedded node |
 
-Search indexes (owned by the Embedding layer, see `EMBEDDING_LAYER_HANDOFF.md`):
+Per stage: import 294 nodes and 617 relationships; Reference extraction 293 relationships; Knowledge 61 nodes and 733
+relationships; Architecture 57 and 188; Root cause & impact 15 and 186; Expertise & collaboration 109 and 822; Graph
+algorithms 2 and 8.
 
-- `searchable_embedding`: vector index (1536, cosine) on `:Searchable(embedding)`, one index across all layers
-- `searchable_text`: fulltext index on `:Searchable(embedding_text)`
-- `entity_lookup`: fulltext on `Person`, `Issue`, `Document`, `PullRequest`, `Topic` properties `name`, `display_name`, `title`
-- `issue_key_lookup`: fulltext on `Issue.issue_key`
+LLM-derived counts (events, root causes, components, expertise and everything built on them) vary a little between
+rebuilds, because the model does not propose exactly the same output every time.
 
-All four are `ONLINE` (checked 2026-09-24). The first `embedding-v2` run dropped the twelve per-label v1 vector indexes
-(`mailmessage_embedding` ... `rootcause_embedding`).
+## 3. Conventions
 
-## Shared `Person` Model
+- **Keys.** Every source node is keyed by the SQL primary key of its row (without `version_number` where the node
+  stands for the whole object). Keys are enforced by uniqueness constraints (section 7).
+- **`name` and `display_name`.** Every node that is shown has `display_name`, and source nodes also `name` (the same
+  value). The graph API labels a node with `display_name`, else `name`, `title`, `subject`, `person_key`.
+- **Timestamps** are ISO 8601 **strings** with offset (`2026-03-03T14:25:00+01:00`), copied from PostgreSQL. The
+  layers' own timestamps (`generated_at`, `extracted_at`, `embedded_at`, `PipelineState`) are UTC ISO strings
+  (`...+00:00`).
+- **Raw JSON properties** (`recipients_raw`, `participants_raw`, `versions_raw`, `comments_raw`, `reviews_raw`,
+  `code_changes_raw`) are JSON strings kept for context. No layer scans or traverses them; use the first-class nodes.
+- **Relationship direction** is fixed per type (tables below). Queries should match the stated direction.
+- **The `Searchable` label** is an extra label on embedded nodes; it is never a node's type (the graph API skips it).
 
-`Person` nodes are resolved globally before source relationships are written. Import code never creates one-off persons per table row; it writes canonical person clusters and then relationships match by `person_key`.
+## 4. Source nodes (written by the import)
 
-Resolution happens in `viewer/person_identity.py`:
-
-1. Collect observations from every person-bearing SQL field.
-2. Merge by normalized email.
-3. Merge by source ID. `SOURCE_ID_IS_GLOBAL = True`, so source IDs are treated as globally unique.
-4. Use name-only observations only when exactly one established identity carries that normalized name.
-5. Mark ambiguous name-only observations with `identity_ambiguous = true`.
-
-Current `Person` nodes:
-
-| Person key | Name | Emails | Source IDs | Actor type | Confidence |
-| --- | --- | --- | --- | --- | --- |
-| `email:anna.berg@example.com` | Anna Berg | `anna.berg@example.com` | `u-annab` | person | strong |
-| `email:anna.lindqvist@example.com` | Anna Lindqvist | `anna.lindqvist@example.com` | `u-anna` | person | strong |
-| `email:erik.nilsson@example.com` | Erik Nilsson | `erik.nilsson@example.com` | `u-erik` | person | strong |
-| `email:martin.ek@northwind.example.com` | Martin Ek | `martin.ek@northwind.example.com` | | person | strong |
-| `email:support@example.com` | Support | `support@example.com` | | mailbox | strong |
-| `source:u-priya` | Priya Raman | | `u-priya` | person | strong |
-| `name:anna` | Anna | | | person | weak, ambiguous |
-
-## Source Object Nodes
+The import is described row by row in `docs/SQL_DATA_HANDOFF.md`, section 9. Properties below are exactly those found
+on the live nodes (embedding properties, section 6, are left out here).
 
 ### `MailMessage`
 
-Key: `(source_instance, message_id)`.
-
-Copied properties include `source_instance`, `message_id`, `name`, `display_name`, `sender_address`, `sender_name`, `recipients_raw`, `subject`, `body`, `sent_at`, `in_reply_to_id`, `source_url`.
-
-Relationships:
-
-```cypher
-(:Person)-[:SENT_MAIL]->(:MailMessage)
-(:MailMessage)-[:MAIL_RECIPIENT {recipient_type}]->(:Person)
-```
-
-Current data: 4 mail nodes, 4 `SENT_MAIL`, 8 `MAIL_RECIPIENT`. Reply IDs are stored as `in_reply_to_id`; no explicit mail-reply relationship exists.
+Key `(source_instance, message_id)`. Properties: `source_instance`, `message_id`, `name` (= `message_id`),
+`display_name` (= `message_id`), `sender_address`, `sender_name`, `recipients_raw`, `subject`, `body`, `sent_at`,
+`in_reply_to_id` (absent when NULL), `source_url`. No reply relationship; `in_reply_to_id` is a property.
 
 ### `SlackMessage`
 
-Key: `(source_instance, workspace_id, channel_id, message_id, version_number)`.
-
-Copied properties include `source_instance`, `workspace_id`, `channel_id`, `message_id`, `version_number`, `channel_name`, `author_source_id`, `author_name`, `author_email`, `body`, `sent_at`, `version_at`, `thread_root_id`, `source_url`, `name`, `display_name`.
-
-Relationships:
-
-```cypher
-(:Person)-[:SENT_SLACK_MESSAGE]->(:SlackMessage)
-(:SlackMessage)-[:SLACK_THREAD_REPLY_TO]->(:SlackMessage)
-```
-
-Current data: 12 Slack version nodes, including `slack-006` versions 1 and 2. Two thread replies exist.
+One node per **version**. Key `(source_instance, workspace_id, channel_id, message_id, version_number)`. Properties:
+`source_instance`, `workspace_id`, `channel_id`, `message_id`, `version_number`, `channel_name`, `name` and
+`display_name` (both = `message_id`, **without** version, so the two versions of `slack-026` share a display name),
+`author_source_id`, `author_name`, `author_email`, `body`, `sent_at`, `version_at`, `thread_root_id`, `source_url`.
 
 ### `TeamsMeeting`
 
-Key: `(source_instance, meeting_id)`.
-
-Copied properties include `source_instance`, `meeting_id`, `title`, `started_at`, `ended_at`, `participants_raw`, `source_url`, `name`, `display_name`.
-
-Relationships:
-
-```cypher
-(:Person)-[:PARTICIPATED_IN_MEETING]->(:TeamsMeeting)
-(:TeamsMeeting)-[:HAS_TEAMS_TRANSCRIPT_SEGMENT]->(:TeamsTranscriptSegment)
-```
-
-Current data: 2 meeting nodes, 8 participant edges.
+Key `(source_instance, meeting_id)`. Properties: `source_instance`, `meeting_id`, `name`, `display_name` (=
+`meeting_id`), `title`, `started_at`, `ended_at`, `participants_raw`, `source_url`. Not embedded (its title is in
+every segment's text).
 
 ### `TeamsTranscriptSegment`
 
-Key: `(source_instance, meeting_id, segment_id)`.
-
-Copied properties include `source_instance`, `meeting_id`, `segment_id`, `sequence_number`, `speaker_source_id`, `speaker_name`, `start_offset_ms`, `end_offset_ms`, `body`, `name`, `display_name`.
-
-Relationships:
-
-```cypher
-(:TeamsMeeting)-[:HAS_TEAMS_TRANSCRIPT_SEGMENT]->(:TeamsTranscriptSegment)
-(:Person)-[:SPOKE_TEAMS_TRANSCRIPT_SEGMENT]->(:TeamsTranscriptSegment)
-```
-
-Current data: 9 segment nodes and 9 speaker edges. Segment order is stored in `sequence_number`; no `NEXT_SEGMENT` relationship exists.
+Key `(source_instance, meeting_id, segment_id)`. Properties: `source_instance`, `meeting_id`, `segment_id`, `name`,
+`display_name` (= `segment_id`), `sequence_number`, `speaker_source_id`, `speaker_name`, `start_offset_ms`,
+`end_offset_ms`, `body`. No time of its own: layers use the meeting's `started_at`. No `NEXT_SEGMENT` relationship;
+order is `sequence_number`.
 
 ### `Issue`
 
-Key: `(source_instance, issue_id)`.
-
-Parent `Issue` nodes combine stable identity from `issues` with latest state from the highest `issue_versions.version_number`.
-
-Properties include `source_instance`, `issue_id`, `issue_key`, `issue_type`, `title`, `description`, `acceptance_criteria`, `status`, `priority`, `creator_name`, `creator_source_id`, `assignee_name`, `assignee_source_id`, `created_at`, latest `version_at`, latest `version_number`, `version_count`, `versions_raw`, `comment_count`, `comments_raw`, `source_url`, `name`, `display_name`.
-
-Relationships:
-
-```cypher
-(:Person)-[:CREATED_ISSUE]->(:Issue)
-(:Person)-[:OWNS_ISSUE]->(:Issue)
-(:Person)-[:COMMENTED_ON_ISSUE]->(:Issue)
-(:Issue)-[:HAS_ISSUE_VERSION]->(:IssueVersion)
-(:Issue)-[:HAS_ISSUE_COMMENT]->(:IssueComment)
-```
-
-Current data: `AUTH-17` and `AUTH-19`.
+Key `(source_instance, issue_id)`. Identity from `issues` plus the **latest** `issue_versions` row. Properties:
+`source_instance`, `issue_id`, `issue_key`, `name`, `display_name` (= `issue_key`), `issue_type`, `title`,
+`description`, `acceptance_criteria`, `status`, `priority`, `creator_name`, `creator_source_id`, `assignee_name`,
+`assignee_source_id`, `created_at`, `version_at`, `version_number` (latest), `version_count`, `versions_raw` (all
+versions, summary fields), `comment_count`, `comments_raw` (latest version of each comment), `source_url`. Not embedded
+(its versions are).
 
 ### `IssueVersion`
 
-Key: `(source_instance, issue_id, version_number)`.
-
-One node per SQL `issue_versions` row. Properties include all version fields plus `name`/`display_name` as `<issue_key> v<version_number>`.
-
-Relationships:
-
-```cypher
-(:Issue)-[:HAS_ISSUE_VERSION]->(:IssueVersion)
-(:IssueVersion)-[:NEXT_ISSUE_VERSION]->(:IssueVersion)
-(:Person)-[:CHANGED_ISSUE_VERSION]->(:IssueVersion)
-```
-
-Current data: 7 version nodes and 5 `NEXT_ISSUE_VERSION` links.
+Key `(source_instance, issue_id, version_number)`. Properties: `source_instance`, `issue_id`, `version_number`, `name`,
+`display_name` (`KV-7 v3`), `issue_type`, `title`, `description`, `acceptance_criteria`, `status`, `priority`,
+`assignee_source_id`, `assignee_name` (absent when NULL), `changed_by_id`, `changed_by_name`, `version_at`,
+`source_url`.
 
 ### `IssueComment`
 
-Key: `(source_instance, comment_id)`.
-
-One node per latest comment row; `version_count` records how many SQL versions that comment has.
-
-Relationships:
-
-```cypher
-(:Issue)-[:HAS_ISSUE_COMMENT]->(:IssueComment)
-(:Person)-[:WROTE_ISSUE_COMMENT]->(:IssueComment)
-(:IssueComment)-[:REPLY_TO_ISSUE_COMMENT]->(:IssueComment)
-```
-
-Current data: 5 comment nodes and one reply (`comment-003` replies to `comment-002`).
+Latest version of each comment. Key `(source_instance, comment_id)`. Properties: `source_instance`, `comment_id`,
+`name`, `display_name` (= `comment_id`), `issue_id`, `author_source_id`, `author_name`, `body`, `created_at`,
+`version_at`, `version_number`, `version_count`, `reply_to_comment_id` (absent when NULL), `source_url`.
 
 ### `Document`
 
-Key: `(source_instance, document_id)`.
-
-Parent `Document` nodes hold latest document state. Earlier versions are retained in `versions_raw`.
-
-Properties include `source_instance`, `document_id`, `document_type`, `title`, `body`, `content_format`, `author_name`, `author_source_id`, `created_at`, `version_at`, `version_number`, `change_summary`, `versions_raw`, `source_url`, `name`, `display_name`.
-
-Relationships:
-
-```cypher
-(:Person)-[:AUTHORED_DOCUMENT]->(:Document)
-(:Document)-[:HAS_DOCUMENT_VERSION]->(:DocumentVersion)
-```
-
-Current data: `doc-001` (`REQ-AUTH-SESSION`) and `doc-002` (`Session refresh path`).
+Latest version of a document. Key `(source_instance, document_id)`. Properties: `source_instance`, `document_id`,
+`name`, `display_name` (= `document_id`), `document_type`, `title`, `body`, `content_format`, `author_name`,
+`author_source_id`, `created_at`, `version_at`, `version_number`, `change_summary`, `versions_raw` (**earlier**
+versions only), `source_url`. Not embedded (its versions are). Its title's leading identifier (`REQ-VAT`) is what text
+references resolve to.
 
 ### `DocumentVersion`
 
-Key: `(source_instance, document_id, version_number)`.
-
-One node per SQL `document_versions` row.
-
-Relationships:
-
-```cypher
-(:Document)-[:HAS_DOCUMENT_VERSION]->(:DocumentVersion)
-(:DocumentVersion)-[:NEXT_DOCUMENT_VERSION]->(:DocumentVersion)
-(:Person)-[:AUTHORED_DOCUMENT_VERSION]->(:DocumentVersion)
-```
-
-Current data: 3 version nodes and one version-chain edge for `doc-001`.
+Key `(source_instance, document_id, version_number)`. Properties: `source_instance`, `document_id`, `version_number`,
+`name`, `display_name` (`doc-001 v2`), `document_type`, `title`, `body`, `content_format`, `author_source_id`,
+`author_name`, `created_at`, `version_at`, `change_summary`, `source_url`.
 
 ### `PullRequest`
 
-Key: `(source_instance, repository, pr_number)`.
-
-Parent `PullRequest` nodes hold latest PR state. Reviews and code changes are also retained in raw JSON properties.
-
-Properties include `source_instance`, `repository`, `pr_number`, `title`, `description`, `author_name`, `author_source_id`, `state`, `created_at`, `version_at`, `version_number`, `base_commit`, `head_commit`, `code_changes_raw`, `reviews_raw`, `source_url`, `name`, `display_name`.
-
-Relationships:
-
-```cypher
-(:Person)-[:AUTHORED_PR]->(:PullRequest)
-(:Person)-[:REVIEWED_PR]->(:PullRequest)
-(:PullRequest)-[:HAS_PR_REVIEW]->(:PullRequestReview)
-(:PullRequest)-[:HAS_CODE_CHANGE]->(:CodeChange)
-```
-
-Current data: `backend-api#42` and `backend-api#47`.
+Latest version of a PR. Key `(source_instance, repository, pr_number)`. Properties: `source_instance`, `repository`,
+`pr_number`, `name`, `display_name` (`kvitta-api#58`), `title`, `description`, `author_name`, `author_source_id`,
+`state`, `created_at`, `version_at`, `version_number`, `base_commit`, `head_commit`, `code_changes_raw` (latest
+version's array), `reviews_raw` (latest version of each review), `source_url`.
 
 ### `PullRequestReview`
 
-Key: `(source_instance, repository, pr_number, source_id)`.
-
-One node per latest review/comment row. `version_count` records how many SQL versions that review entry has.
-
-Relationships:
-
-```cypher
-(:PullRequest)-[:HAS_PR_REVIEW]->(:PullRequestReview)
-(:Person)-[:WROTE_PR_REVIEW]->(:PullRequestReview)
-(:PullRequestReview)-[:REPLY_TO_PR_REVIEW]->(:PullRequestReview)
-```
-
-Current data: 6 review nodes and one reply (`review-003` replies to `review-002`).
+Latest version of each review entry. Key `(source_instance, repository, pr_number, source_id)`. Properties:
+`source_instance`, `repository`, `pr_number`, `source_id`, `name`, `display_name` (`kvitta-api#60 review-030`),
+`entry_type`, `version_number`, `version_count`, `pr_version_number`, `reviewed_commit`, `author_source_id`,
+`author_name`, `body`, `created_at`, `version_at`, `reply_to_source_id`, `review_group_id`, `file_path`,
+`line_number`, `diff_side` (the last five absent when NULL), `source_url`.
 
 ### `CodeChange`
 
-Key: `(source_instance, repository, pr_number, version_number, file_path)`.
+One node per element of `pr_versions.code_changes`, for **every** PR version. Key
+`(source_instance, repository, pr_number, version_number, file_path)`. Properties: `source_instance`, `repository`,
+`pr_number`, `version_number`, `file_path`, `name`, `display_name` (`kvitta-api#58 app/integrations/fortnox/client.py`,
+without the version; several nodes can share it), `change_type`, `before_summary`, `after_summary`, `diff`.
 
-One node is created for each object in each `pr_versions.code_changes` JSONB array. This means a file can appear more than once across PR versions because `version_number` is part of the key.
+### `Person`
 
-Properties include parent PR key fields plus `file_path`, `change_type`, `before_summary`, `after_summary`, `diff`, `name`, `display_name`.
+Key `person_key`. Written by every import from the identity registry (`docs/SQL_DATA_HANDOFF.md`, section 7).
+Properties: `person_key`, `name`, `email`, `source_id` (absent when none), `emails`, `source_ids`, `names` (lists),
+`identity_confidence` (`strong`/`weak`), `identity_ambiguous` (bool), `actor_type` (`person`/`mailbox`). Layer 6 adds
+`collab_weighted_degree`, `collab_betweenness`, `community_id`, `algorithms_generated_by`, `algorithms_generated_at`
+to eligible persons; layer 7 adds the embedding properties to eligible persons.
 
-Relationship:
+**Eligible person** (used by layers 5, 6, 7 and the agent): `actor_type <> 'mailbox'` and
+`identity_ambiguous <> true`. Today 8 of 10 (the two mailboxes `support@kvitta.se` and `alerts@kvitta.se` are
+excluded).
 
-```cypher
-(:PullRequest)-[:HAS_CODE_CHANGE]->(:CodeChange)
-```
+## 5. Derived nodes (written by the layers)
 
-Current data: 7 code-change nodes.
+Every derived node has `derived = true`, `generated_by`, `generated_at`, `display_name`. LLM-derived nodes also have
+`model`.
 
-## Deterministic Reference Layer
+| Label | Layer (`generated_by`) | Key | Other properties |
+| --- | --- | --- | --- |
+| `Topic` | Knowledge (`topic-event-extraction-v1`) | `slug` | `name`, `topic_type` (`requirement`, `defect`, `incident`, `decision`, `other`), `summary`; layer 6 adds `bus_factor`, `expert_count`, `top_expert`, `algorithms_generated_*` |
+| `Event` | Knowledge | `(topic_slug, slug)` | `name`, `event_type` (`created`, `decided`, `blocked`, `changed`, `resolved`, `regressed`, `other`), `occurred_at` (ISO string from the evidence), `summary` |
+| `Repository` | Architecture (`architecture-layer-v1`) | `(source_instance, name)` | none beyond the stamp |
+| `Module` | Architecture | `(source_instance, repository, path)` | `path` = directory of a file path, `(root)` for top level; `display_name` `<repository>:<path>` |
+| `File` | Architecture | `(source_instance, repository, path)` | `file_name`, `extension`, `change_count` (number of `CodeChange` nodes on it) |
+| `Component` | Architecture | `(source_instance, repository, slug)` | `name`, `component_type` (`service`, `endpoint`, `job`, `data_store`, `library`, `ui`, `external_system`, `other`), `summary`; layer 6 adds `bus_factor`, `expert_count`, `top_expert`, `depends_on_count`, `depended_on_by_count`, `affected_event_count`, `algorithms_generated_*` |
+| `RootCause` | Root cause & impact (`causal-layer-v1`) | `slug` | `name`, `cause_type` (`requirement_gap`, `design_decision`, `implementation_gap`, `missing_test`, `process`, `external`, `other`), `summary` |
+| `Expertise` | Expertise & collaboration (`collaboration-layer-v1`) | `(person_key, subject_label, subject_key)` | `score`, `share`, `rank`, `activity_count`, `first_activity_at`, `last_activity_at`; `subject_label` `Topic` or `Component`; `subject_key` = topic slug or `<source_instance>/<repository>/<component slug>`; `display_name` `<person> – <subject>` |
+| `Community` | Graph algorithms (`graph-algorithms-v1`) | `community_id` (`collab-1`, ...) | `size` |
+| `EmbeddingChunk` | Embeddings (`embedding-v3`) | none (found by `generated_by STARTS WITH "embedding-"`) | `chunk_of_label`, `chunk_index`, `chunk_count`, embedding properties; also labelled `Searchable` |
+| `PipelineState` | every stage | `id = "singleton"` | section 8 |
 
-Implemented in `backend/reference_extraction.py`.
+Full semantics per label: the matching layer document.
 
-This layer scans graph text for explicit identifiers and creates only relationships:
+## 6. Embedding properties
 
-```cypher
-(:SourceNode)-[:MENTIONS_ISSUE]->(:Issue)
-(:SourceNode)-[:MENTIONS_PULL_REQUEST]->(:PullRequest)
-(:SourceNode)-[:MENTIONS_DOCUMENT]->(:Document)
-```
+Written by layer 7 on 15 labels (`MailMessage`, `SlackMessage`, `TeamsTranscriptSegment`, `IssueVersion`,
+`IssueComment`, `DocumentVersion`, `PullRequest`, `PullRequestReview`, `CodeChange`, `Topic`, `Event`, `Component`,
+`RootCause`, eligible `Person`, `Community`), together with the label `Searchable`: `embedding` (1536 floats),
+`embedding_text`, `embedding_model`, `embedding_source_hash`, `embedding_version`, `embedding_group`,
+`embedding_is_latest`, `embedding_parts`, `embedded_at`. Not embedded: `Issue`, `Document`, `TeamsMeeting`,
+`Repository`, `Module`, `File`, `Expertise`, `PipelineState`, mailbox and ambiguous persons. Details:
+`docs/EMBEDDING_LAYER_HANDOFF.md`.
 
-Relationship properties:
+## 7. Relationships
 
-| Property | Meaning |
+### 7.1 Source relationships (import)
+
+No properties unless listed. Counts from 2026-09-29.
+
+| Type | From | To | Created when | Count |
+| --- | --- | --- | --- | ---: |
+| `SENT_MAIL` | `Person` | `MailMessage` | sender resolves | 14 |
+| `MAIL_RECIPIENT` {`recipient_type`} | `MailMessage` | `Person` | each resolvable recipient | 31 |
+| `SENT_SLACK_MESSAGE` | `Person` | `SlackMessage` | author resolves (every version) | 50 |
+| `SLACK_THREAD_REPLY_TO` | `SlackMessage` (reply, every version) | `SlackMessage` (root, every version existing at import) | `thread_root_id` set and not the message itself | 31 |
+| `PARTICIPATED_IN_MEETING` | `Person` | `TeamsMeeting` | each resolvable participant, **and** each resolvable speaker | 57 |
+| `HAS_TEAMS_TRANSCRIPT_SEGMENT` | `TeamsMeeting` | `TeamsTranscriptSegment` | always | 45 |
+| `SPOKE_TEAMS_TRANSCRIPT_SEGMENT` | `Person` | `TeamsTranscriptSegment` | speaker resolves | 45 |
+| `CREATED_ISSUE` | `Person` | `Issue` | creator resolves | 12 |
+| `OWNS_ISSUE` | `Person` | `Issue` | latest assignee, else creator, resolves | 12 |
+| `COMMENTED_ON_ISSUE` | `Person` | `Issue` | once per distinct resolvable comment author | 14 |
+| `HAS_ISSUE_VERSION` | `Issue` | `IssueVersion` | always | 34 |
+| `NEXT_ISSUE_VERSION` | `IssueVersion` | `IssueVersion` | between neighbours in version order | 22 |
+| `CHANGED_ISSUE_VERSION` | `Person` | `IssueVersion` | `changed_by` resolves | 34 |
+| `HAS_ISSUE_COMMENT` | `Issue` | `IssueComment` | always | 17 |
+| `WROTE_ISSUE_COMMENT` | `Person` | `IssueComment` | author resolves | 17 |
+| `REPLY_TO_ISSUE_COMMENT` | `IssueComment` | `IssueComment` | `reply_to_comment_id` set and parent already imported | 1 |
+| `AUTHORED_DOCUMENT` | `Person` | `Document` | latest version's author resolves | 6 |
+| `HAS_DOCUMENT_VERSION` | `Document` | `DocumentVersion` | latest author resolves (else no versions at all) | 10 |
+| `NEXT_DOCUMENT_VERSION` | `DocumentVersion` | `DocumentVersion` | between neighbours | 4 |
+| `AUTHORED_DOCUMENT_VERSION` | `Person` | `DocumentVersion` | that version's author resolves | 10 |
+| `AUTHORED_PR` | `Person` | `PullRequest` | latest version's author resolves | 14 |
+| `REVIEWED_PR` | `Person` | `PullRequest` | once per distinct resolvable review author (including the PR author when replying) | 26 |
+| `HAS_PR_REVIEW` | `PullRequest` | `PullRequestReview` | always | 33 |
+| `WROTE_PR_REVIEW` | `Person` | `PullRequestReview` | author resolves | 33 |
+| `REPLY_TO_PR_REVIEW` | `PullRequestReview` | `PullRequestReview` | `reply_to_source_id` set, same PR, parent already imported | 6 |
+| `HAS_CODE_CHANGE` | `PullRequest` | `CodeChange` | every element of every version | 39 |
+
+(`SLACK_THREAD_REPLY_TO` is 31 for 27 reply rows because each reply to `slack-026` links to both of its versions.
+`PARTICIPATED_IN_MEETING` is 57, the sum of the participant lists; every speaker is also a listed participant.)
+
+### 7.2 Derived relationships (layers)
+
+All have `derived = true` and `generated_by` (or `extracted_by`) and `generated_at` (or `extracted_at`), plus the
+listed properties.
+
+| Type | From | To | Layer | Extra properties | Count |
+| --- | --- | --- | --- | --- | ---: |
+| `MENTIONS_ISSUE` | any scanned source node | `Issue` | 1 References | `matched_text`, `source_property` | 175 |
+| `MENTIONS_PULL_REQUEST` | any scanned source node | `PullRequest` | 1 | same | 62 |
+| `MENTIONS_DOCUMENT` | any scanned source node | `Document` | 1 | same | 56 |
+| `ABOUT_TOPIC` | `Issue` | `Topic` | 2 Knowledge | | 12 |
+| `DERIVED_FROM` | `Topic` | every node of the issue's evidence bundle | 2 | | 388 |
+| `EVENT_OF_TOPIC` | `Event` | `Topic` | 2 | | 51 |
+| `EVIDENCED_BY` | `Event` | cited source node | 2 | | 159 |
+| `ACTED_IN_EVENT` | `Person` | `Event` | 2 | | 96 |
+| `CAUSED` | `Event` | `Event` (same topic) | 2 | `explanation`, `evidence` (list of identifiers) | 27 |
+| `CONTAINS_MODULE` | `Repository` | `Module` | 3 Architecture | | 13 |
+| `CONTAINS_FILE` | `Module` | `File` | 3 | | 23 |
+| `MODIFIES_FILE` | `CodeChange` | `File` | 3 | | 39 |
+| `PART_OF_REPOSITORY` | `Component` | `Repository` | 3 | | 18 |
+| `IMPLEMENTED_IN` | `Component` | `File` | 3 | | 17 |
+| `DEPENDS_ON` | `Component` | `Component` (same repository) | 3 | `dependency_type` (`calls`, `reads_from`, `writes_to`, `shares_logic_with`, `depends_on`), `explanation`, `evidence` | 13 |
+| `COMPONENT_EVIDENCED_BY` | `Component` | cited source node | 3 | | 65 |
+| `HAS_ROOT_CAUSE` | `Event` | `RootCause` | 4 Root cause & impact | `explanation`, `evidence` | 22 |
+| `ROOT_CAUSE_IN_COMPONENT` | `RootCause` | `Component` | 4 | | 24 |
+| `ROOT_CAUSE_EVIDENCED_BY` | `RootCause` | cited source node | 4 | | 50 |
+| `CONTRIBUTED_TO` | `CodeChange` | `Event` | 4 | `contribution_type` (`introduced`, `resolved`, `partially_resolved`, `related`), `explanation`, `evidence` | 31 |
+| `AFFECTED_COMPONENT` | `Event` | `Component` | 4 | `explanation`, `evidence` | 53 |
+| `CROSS_TOPIC_CAUSED` | `Event` | `Event` (other topic) | 4 | `explanation`, `evidence` | 6 |
+| `HAS_EXPERTISE` | `Person` | `Expertise` | 5 Expertise & collaboration | | 109 |
+| `EXPERTISE_IN` | `Expertise` | `Topic` or `Component` | 5 | | 109 |
+| `EXPERTISE_EVIDENCED_BY` | `Expertise` | each counted activity node | 5 | | 580 |
+| `WORKS_WITH` | `Person` | `Person` (once per pair, from the smaller `person_key`) | 5 | `weight`, `shared_work_items` (max 50 names), `work_item_types` | 24 |
+| `MEMBER_OF_COMMUNITY` | `Person` | `Community` | 6 Graph algorithms | | 8 |
+| `CHUNK_OF` | `EmbeddingChunk` | its source node | 7 Embeddings | | not built yet |
+
+## 8. `PipelineState`
+
+One node `(:PipelineState {id: "singleton"})`, created by the first stage that runs. It holds one timestamp per stage
+and two embedding markers. Excluded from `/api/graph`.
+
+| Property | Written by | Current value |
+| --- | --- | --- |
+| `last_import_at` | every SQL import | `2026-09-29T17:15:20.511655+00:00` |
+| `last_extraction_at` | Reference extraction | `2026-09-29T17:28:14.292527+00:00` |
+| `last_layer_build_at` | Knowledge layer | `2026-09-29T17:47:24.549087+00:00` |
+| `last_architecture_build_at` | Architecture layer | `2026-09-29T17:53:42.692863+00:00` |
+| `last_causal_build_at` | Root cause & impact layer | `2026-09-29T18:55:47.397134+00:00` |
+| `last_collaboration_build_at` | Expertise & collaboration layer | `2026-09-29T19:07:23.811324+00:00` |
+| `last_algorithms_run_at` | Graph algorithms | `2026-09-29T19:21:59.242785+00:00` |
+| `last_embedding_at` | Embeddings | absent (not run on the Kvitta data yet) |
+| `last_embedding_failures` | Embeddings | absent |
+| `embedding_config` | Embeddings | absent; fingerprint of the embedding configuration once run |
+
+Staleness is computed from these timestamps (`docs/PIPELINE_AND_LINKS_HANDOFF.md`, section 4).
+
+## 9. Constraints and indexes
+
+### 9.1 Uniqueness constraints (22)
+
+Each constraint also creates a RANGE index of the same name. Created with `IF NOT EXISTS` by the import or the layer
+that owns the label.
+
+| Constraint | Label | Properties | Created by |
+| --- | --- | --- | --- |
+| `person_key` | `Person` | `person_key` | import |
+| `mail_message_key` | `MailMessage` | `source_instance`, `message_id` | import |
+| `slack_message_key` | `SlackMessage` | `source_instance`, `workspace_id`, `channel_id`, `message_id`, `version_number` | import |
+| `teams_meeting_key` | `TeamsMeeting` | `source_instance`, `meeting_id` | import |
+| `transcript_segment_key` | `TeamsTranscriptSegment` | `source_instance`, `meeting_id`, `segment_id` | import |
+| `issue_node_key` | `Issue` | `source_instance`, `issue_id` | import |
+| `issue_version_key` | `IssueVersion` | `source_instance`, `issue_id`, `version_number` | import |
+| `issue_comment_key` | `IssueComment` | `source_instance`, `comment_id` | import |
+| `document_node_key` | `Document` | `source_instance`, `document_id` | import |
+| `document_version_key` | `DocumentVersion` | `source_instance`, `document_id`, `version_number` | import |
+| `pull_request_key` | `PullRequest` | `source_instance`, `repository`, `pr_number` | import |
+| `pull_request_review_key` | `PullRequestReview` | `source_instance`, `repository`, `pr_number`, `source_id` | import |
+| `code_change_key` | `CodeChange` | `source_instance`, `repository`, `pr_number`, `version_number`, `file_path` | import |
+| `topic_slug` | `Topic` | `slug` | Knowledge |
+| `event_key` | `Event` | `topic_slug`, `slug` | Knowledge |
+| `repository_key` | `Repository` | `source_instance`, `name` | Architecture |
+| `module_key` | `Module` | `source_instance`, `repository`, `path` | Architecture |
+| `file_key` | `File` | `source_instance`, `repository`, `path` | Architecture |
+| `component_key` | `Component` | `source_instance`, `repository`, `slug` | Architecture |
+| `root_cause_slug` | `RootCause` | `slug` | Root cause & impact |
+| `expertise_key` | `Expertise` | `person_key`, `subject_label`, `subject_key` | Expertise & collaboration |
+| `community_key` | `Community` | `community_id` | Graph algorithms |
+
+### 9.2 Search and lookup indexes (owned by the Embeddings layer)
+
+| Index | Type | On | Config |
+| --- | --- | --- | --- |
+| `searchable_embedding` | VECTOR | `:Searchable(embedding)` | 1536 dimensions, cosine, HNSW m 16, ef_construction 100, quantization BINARY (server default) |
+| `searchable_text` | FULLTEXT | `:Searchable(embedding_text)` | analyzer `standard-no-stop-words` |
+| `entity_lookup` | FULLTEXT | `Person`, `Issue`, `Document`, `PullRequest`, `Topic` on `name`, `display_name`, `title` | same analyzer |
+| `issue_key_lookup` | FULLTEXT | `Issue.issue_key` | same analyzer |
+
+Plus Neo4j's two built-in LOOKUP indexes (nodes, relationships). All ONLINE.
+
+## 10. Graph API and graph panel
+
+### 10.1 `GET /api/graph?source=<filter>`
+
+Implemented by `load_neo4j_graph` in `backend/app.py`. `All` returns every node except `PipelineState` and every
+relationship. Any other filter returns only the relationships of the listed types and the nodes at either end of them.
+An unknown filter answers 400.
+
+| Filter (button) | Relationship types |
 | --- | --- |
-| `derived` | `true` |
-| `extracted_by` | `reference-extraction-v1` |
-| `matched_text` | Exact matched text. |
-| `source_property` | Property where the text was found. |
-| `extracted_at` | Extraction timestamp. |
-
-Scanned labels/properties:
-
-| Label | Properties |
-| --- | --- |
-| `MailMessage` | `subject`, `body` |
-| `SlackMessage` | `body` |
-| `TeamsMeeting` | `title` |
-| `TeamsTranscriptSegment` | `body` |
-| `Issue` | `title`, `description` |
-| `IssueVersion` | `title`, `description`, `acceptance_criteria` |
-| `IssueComment` | `body` |
-| `Document` | `title`, `body` |
-| `DocumentVersion` | `title`, `body`, `change_summary` |
-| `PullRequest` | `title`, `description` |
-| `PullRequestReview` | `body` |
-| `CodeChange` | `before_summary`, `after_summary` |
-
-Current reference-edge counts:
-
-- `MENTIONS_ISSUE`: 22
-- `MENTIONS_PULL_REQUEST`: 21
-- `MENTIONS_DOCUMENT`: 12
-
-The extraction pass deletes only relationships with `extracted_by = "reference-extraction-v1"` before rebuilding.
-
-## Interpreted Knowledge Layer
-
-Implemented in `backend/topic_event_extraction.py`.
-
-This layer builds issue-centered bundles and uses the OpenAI Responses API with structured output to create interpreted `Topic` and `Event` nodes.
-
-Current graph has:
-
-- 1 `Topic`
-- 10 `Event`
-- 2 `ABOUT_TOPIC`
-- 51 `DERIVED_FROM`
-- 10 `EVENT_OF_TOPIC`
-- 29 `EVIDENCED_BY`
-- 19 `ACTED_IN_EVENT`
-- 6 `CAUSED`
-
-(These counts vary slightly run to run; see the note under the node/relationship count tables above.)
-
-Model constants in code:
-
-| Constant | Value |
-| --- | --- |
-| `OPENAI_MODEL` | `gpt-5.6-terra` |
-| `OPENAI_REASONING_EFFORT` | `medium` |
-| `EXTRACTION_VERSION` | `topic-event-extraction-v1` |
-
-Graph model:
-
-```cypher
-(:Issue)-[:ABOUT_TOPIC]->(:Topic)
-(:Topic)-[:DERIVED_FROM]->(:SourceNode)
-(:Event)-[:EVENT_OF_TOPIC]->(:Topic)
-(:Event)-[:EVIDENCED_BY]->(:SourceNode)
-(:Person)-[:ACTED_IN_EVENT]->(:Event)
-(:Event)-[:CAUSED {explanation, evidence}]->(:Event)
-```
-
-`Topic` properties: `slug`, `name`, `topic_type`, `summary`, `derived`, `generated_by`, `model`, `generated_at`, `display_name`.
-
-`Event` properties: `topic_slug`, `slug`, `name`, `event_type`, `occurred_at`, `summary`, `derived`, `generated_by`, `model`, `generated_at`, `display_name`.
-
-The layer deletes only nodes/relationships with `generated_by = "topic-event-extraction-v1"` before rebuilding.
-
-## Embedding Layer
-
-Implemented in `backend/embedding_pass.py`. Full description: `EMBEDDING_LAYER_HANDOFF.md`.
-
-| Setting | Value |
-| --- | --- |
-| Version | `embedding-v3` |
-| Provider / model | OpenAI `text-embedding-3-large` |
-| Dimensions | 1536 |
-| Similarity | cosine |
-
-15 labels get a vector, so every layer has an entry point: the source retrieval units plus `CodeChange`, `Topic`,
-`Event`, `Component`, `RootCause`, eligible `Person` nodes and `Community`. Each text carries the node's context from the
-other layers (mentions, causal links with explanations, root causes, dependencies, expertise, collaboration, community,
-bus factor). Embedded nodes get the label `Searchable` and the properties `embedding`, `embedding_text`,
-`embedding_model`, `embedding_source_hash`, `embedding_version`, `embedding_group`, `embedding_is_latest`,
-`embedding_parts`, `embedded_at`. A text too long for the model is split, and its extra parts become the layer's own
-`EmbeddingChunk:Searchable` nodes, linked `(:EmbeddingChunk)-[:CHUNK_OF]->(source)` (none exist with the current data).
-The pass is incremental: a node is re-embedded only when its text, group, latest flag, the model or the version
-changed, unless `force=True`.
-
-## Frontend Filter Mapping
-
-`backend/app.py` maps frontend filters to relationship types:
-
-| Filter | Relationship types |
-| --- | --- |
-| `All` | All relationships and all non-`PipelineState` nodes. |
+| `All` (`Full graph`) | everything |
 | `Mail` | `SENT_MAIL`, `MAIL_RECIPIENT` |
 | `Slack` | `SENT_SLACK_MESSAGE`, `SLACK_THREAD_REPLY_TO` |
 | `Teams` | `PARTICIPATED_IN_MEETING`, `HAS_TEAMS_TRANSCRIPT_SEGMENT`, `SPOKE_TEAMS_TRANSCRIPT_SEGMENT` |
@@ -606,101 +371,38 @@ changed, unless `force=True`.
 | `References` | `MENTIONS_ISSUE`, `MENTIONS_PULL_REQUEST`, `MENTIONS_DOCUMENT` |
 | `Knowledge` | `ABOUT_TOPIC`, `DERIVED_FROM`, `EVENT_OF_TOPIC`, `EVIDENCED_BY`, `CAUSED`, `ACTED_IN_EVENT` |
 | `Architecture` | `CONTAINS_MODULE`, `CONTAINS_FILE`, `MODIFIES_FILE`, `IMPLEMENTED_IN`, `PART_OF_REPOSITORY`, `DEPENDS_ON`, `COMPONENT_EVIDENCED_BY` |
-| `Causal` | `CAUSED`, `CROSS_TOPIC_CAUSED`, `HAS_ROOT_CAUSE`, `ROOT_CAUSE_IN_COMPONENT`, `ROOT_CAUSE_EVIDENCED_BY`, `CONTRIBUTED_TO`, `AFFECTED_COMPONENT` |
-| `Collaboration` | `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH` |
+| `Causal` (button `Causes`) | `CAUSED`, `CROSS_TOPIC_CAUSED`, `HAS_ROOT_CAUSE`, `ROOT_CAUSE_IN_COMPONENT`, `ROOT_CAUSE_EVIDENCED_BY`, `CONTRIBUTED_TO`, `AFFECTED_COMPONENT` |
+| `Collaboration` (button `Expertise`) | `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH` |
 | `Algorithms` | `MEMBER_OF_COMMUNITY` |
-| `Embeddings` | `CHUNK_OF` (chunk nodes of long texts; empty with the current data). Button labelled `Chunks`, in the graph panel's bottom row, left-aligned. |
+| `Embeddings` (button `Chunks`, bottom row) | `CHUNK_OF` |
 
-When a specific filter is selected, `/api/graph` returns nodes connected by those relationship types. Shared `Person` nodes can therefore appear in multiple filters.
+Response: `{"source", "nodes": [{"id", "label", "type", "summary", "properties"}], "relationships": [{"id",
+"source", "target", "label", "sourceType", "properties"}]}`. `type` is the first label that is not `Searchable`;
+`sourceType` is the filter the relationship type belongs to. `CAUSED` is in both `Knowledge` and `Causal`, and
+`sourceType` reports the first (`Knowledge`).
 
-`Entry points` button (bottom row, left, next to `Chunks`): a toggle, not a filter. When on, every embedded node (the AI's
-entry points, label `Searchable`) in the current filter gets a thick pink ring (`#ec4899`, 6 px); when off, no rings.
-It does not change `activeSource` and sends nothing to the backend. The frontend detects embedded nodes by the
-`embedding_model` property (`isEmbedded` in the Cytoscape element data) and toggles the class `entry-point` on them,
-the same way `Labels` toggles `labels-hidden`. A selected node keeps its blue border (`#1d4ed8`, 4 px).
+### 10.2 The graph panel (left box)
 
-`Motion` (top row, right; added 2026-09-29): the whole graph turns slowly as one picture instead of every node floating
-on its own (`GRAPH_MOTION_TURNS` in `GraphView`; set it to `false` for the earlier float). The Cytoscape canvas
-(`.graph-canvas`) is turned with the Web Animations API, which the browser runs on the compositor, so Cytoscape draws
-nothing again; the float moved every node about 30 times a second and each move made Cytoscape draw the whole graph
-again. Measured in headless Chrome: 52 frames a second while turning against 7 while floating (59 with motion off).
-The beige grid behind the graph is a layer of its own (`.context-box::before`), so it stands still. Cytoscape does
-not know about the turn, so a click would land on the wrong node while turned: with the pointer anywhere over the
-graph box the graph turns back upright in 0.5 s and stands still, and it turns again when the pointer leaves. It also
-stands upright while Motion is paused, while labels are shown (they would turn upside down) and at speed 0. The
-Motion panel's `Speed` slider sets the pace: one turn in `GRAPH_TURN_SECONDS` = 120 s at speed 1. Two things the turn
-needs: the canvas has `z-index: 1` to lie over the grid layer, so every box over the graph needs `z-index: 2` (the
-property panel `.selection-panel` had none and ended up behind the graph); and Cytoscape keeps the canvas's screen box
-(`findContainerClientCoords`, from `getBoundingClientRect`) for mouse coordinates and a scale factor, clearing it only
-on CSS transitions, resizes and scrolls. Measured while turned, that box is larger, so clicks and wheel zoom would land
-wrong: the turn effect clears it (`invalidateContainerClientCoordsCache`) whenever the canvas stands upright again.
-Checked in headless Chrome: a citation clicked while the graph turns, then the pointer into the graph and a click on
-the ringed node opens that node's property panel on top, at the same zoom.
+`GraphView` in `frontend/src/main.tsx` draws the response with Cytoscape. Filter buttons across the top; the bottom
+row holds `Chunks` and `Entry points` on the left and the SQL viewer button and Neo4j status on the right.
 
-A turned picture shows only what Cytoscape drew in view, so a zoomed-in graph would turn with its edges cut off.
-`Auto fit` (a toggle in the Motion panel, on by default): before the graph starts turning, it zooms out to the whole
-visible graph (`fit`, padding 56, `GRAPH_AUTO_FIT_MS` = 450 ms) and then turns; if the pointer comes back during the
-fit, the fit stops where it is. Off: it turns only when every visible node lies inside the circle centred in the canvas
-that a turn never cuts (`graphFitsTurningCircle`: diameter the canvas's shorter side), and stands still otherwise. A
-chat citation rings and centres a node and holds the graph still, upright and zoomed in (`isHeldForCitation`), until
-the pointer has been in the graph box and left it again; then Auto fit zooms out and the turn starts.
+- **Entry points** (toggle): rings every embedded node (any node with `embedding_model`) in the shown filter, so the
+  AI's search entry points are visible. Display only.
+- **Motion** (added 2026-09-29): the whole graph turns slowly as one picture (`GRAPH_MOTION_TURNS = true`,
+  `GRAPH_TURN_SECONDS = 120` per turn at speed 1). With the pointer over the graph it turns back upright and stands
+  still so clicks land correctly; it also stands still while paused, while labels are shown and at speed 0. `Auto fit`
+  zooms out to the whole visible graph (`GRAPH_AUTO_FIT_MS = 450`) before turning.
+- **Citations from the chat** ring and centre the cited node and hold the graph still until the pointer has been in
+  the graph box and left it.
+- Every node and every relationship of the chosen filter is sent to the browser and drawn. That is fine at today's
+  size and will not be at thousands of nodes (`docs/SCALING_HANDOFF.md`). The panel is fragile: change it carefully and
+  in isolation.
 
-## Backend API
+## 11. What is not modelled as graph structure
 
-| Endpoint | Method | Purpose |
-| --- | --- | --- |
-| `/api/graph?source=<filter>` | `GET` | Graph nodes and relationships for a filter or `All`. |
-| `/api/neo4j/status` | `GET` | Neo4j connectivity check. |
-| `/api/viewer/start` | `POST` | Starts the SQL viewer child process. |
-| `/api/viewer/stop` | `POST` | Stops the SQL viewer child process. |
-| `/api/references` | `GET` | Current reference extraction state and edges. |
-| `/api/references/extract` | `POST` | Rebuilds deterministic reference edges. |
-| `/api/knowledge` | `GET` | Current `Topic`/`Event` knowledge layer. |
-| `/api/knowledge/build` | `POST` | Rebuilds LLM-driven knowledge layer. |
-| `/api/architecture` | `GET` | Current `Repository`/`Module`/`File`/`Component` architecture layer. |
-| `/api/architecture/build` | `POST` | Rebuilds the architecture layer (deterministic structure plus LLM components). |
-| `/api/causal` | `GET` | Current `RootCause`/causal-link layer. |
-| `/api/causal/build` | `POST` | Rebuilds the causal layer. |
-| `/api/collaboration` | `GET` | Current `Expertise`/`WORKS_WITH` collaboration layer. |
-| `/api/collaboration/build` | `POST` | Rebuilds the collaboration layer (deterministic). |
-| `/api/algorithms` | `GET` | Current graph algorithm results (`Community`, precomputed metrics). |
-| `/api/algorithms/run` | `POST` | Runs the `networkx`-based graph algorithm layer. |
-| `/api/embeddings` | `GET` | Embedding state by label. |
-| `/api/embeddings/build` | `POST` | Runs incremental or forced embedding pass. |
-| `/api/ai/chat` | `POST` | Optional LangGraph/OpenAI chat agent. |
-
-The graph response shape is:
-
-```json
-{
-  "source": "All",
-  "nodes": [
-    {
-      "id": "neo4j-element-id",
-      "label": "display label",
-      "type": "NodeLabel",
-      "summary": "short summary",
-      "properties": {}
-    }
-  ],
-  "relationships": [
-    {
-      "id": "neo4j-relationship-element-id",
-      "source": "source-node-element-id",
-      "target": "target-node-element-id",
-      "label": "RELATIONSHIP_TYPE",
-      "sourceType": "Mail",
-      "properties": {}
-    }
-  ]
-}
-```
-
-## What Is Not Modeled as First-Class Graph Structure
-
-- Mail replies are stored as `MailMessage.in_reply_to_id`, not as a relationship.
-- Transcript sequence is stored as `TeamsTranscriptSegment.sequence_number`, not as `NEXT_SEGMENT`.
-- Files and commits are not separate nodes; they are properties on `CodeChange`/`PullRequest`.
-- SQL raw JSON properties such as `versions_raw`, `comments_raw`, `reviews_raw`, and `code_changes_raw` are kept for source context, but traversal should prefer first-class version/comment/review/code-change nodes.
-- `MENTIONS_*` edges mean a text names an entity; they do not imply implementation, causality, ownership, or dependency.
-- `Topic`/`Event` is issue-centered. PRs and documents are not independent topic candidates yet.
+- Mail replies (`in_reply_to_id`) and transcript order (`sequence_number`) are properties, not relationships.
+- Commits are properties (`base_commit`, `head_commit`, `reviewed_commit`), not nodes.
+- Earlier versions of issue comments and PR reviews exist only in SQL (and in the parents' raw JSON).
+- `MENTIONS_*` means "this text names that entity", nothing more: not implementation, causality, ownership or
+  dependency. Interpretation starts in the Knowledge layer.
+- Topics are built per issue. A PR or document that no issue connects to has no topic.

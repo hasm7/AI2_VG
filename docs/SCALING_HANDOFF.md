@@ -1,7 +1,8 @@
 # Scaling Handoff: When the Data Grows
 
 What to check before loading much more data. **Not decided and not scheduled**; a checklist for when it becomes
-relevant. Written 2026-09-26 against the current code; recheck the references before acting.
+relevant. Written 2026-09-26; every code reference below was checked again against the code on 2026-09-29 and still
+holds. Recheck before acting. For the size of the next example dataset, see `docs/DATA_GENERATION_GUIDE.md`, section 2.
 
 ## What does not change
 
@@ -15,11 +16,11 @@ same types, never new types**. The agent's specialists therefore keep covering e
 - **Agent cost per question stays about the same**: 8 entry points, at most 8 nodes per specialist (1200 characters
   each), capped follow-ups and explorer, a budget per question. The answer does not read more because the graph grew.
 - **Embeddings**: incremental (only changed texts are re-embedded), capped lists in every text, chunking of long
-  texts, batching and retries (`docs/EMBEDDING_LAYER_HANDOFF.md`, sections 5.0, 5.7, 8).
+  texts, batching and retries (`docs/EMBEDDING_LAYER_HANDOFF.md`, sections 4.8, 5, 8).
 
 ## A few times today's data (300-400 nodes)
 
-Assessed 2026-09-27 (today's graph: 107 nodes). Three to four times today's size needs no changes; the list below
+Assessed 2026-09-27 (the graph then had 107 nodes; 108 on 2026-09-29). Three to four times today's size needs no changes; the list below
 becomes relevant at thousands of nodes.
 
 - Speed: queries stay in milliseconds, far from the 10 s query timeout.

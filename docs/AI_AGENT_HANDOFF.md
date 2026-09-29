@@ -1,32 +1,37 @@
 # AI Agent Handoff
 
-This document describes the graph question-answering agent behind `Chat with AI` and its view in `Configure AI agent`.
-It is implemented in `backend/ai_agent/`, exposed as `POST /api/ai/chat` and `GET /api/ai/agent` in `backend/app.py`,
-and used by `ChatPanel` and `ConfigureAgentPanel` in `frontend/src/main.tsx`.
+The graph question-answering agent behind `Chat with AI`, and its view in `Configure AI agent`. Implemented in
+`backend/ai_agent/`, exposed by `backend/app.py` (`POST /api/ai/chat`, `GET /api/ai/agent`,
+`POST /api/ai/agent/settings`, `GET|POST /api/ai/agent/evaluation`), used by `ChatPanel` and `ConfigureAgentPanel` in
+`frontend/src/main.tsx`.
 
-**Status (2026-09-25):** all five steps of the plan are done (section 11): the full flow runs, the specialists have
-their bounded model follow-up, the explorer runs read-only Cypher, `Configure AI agent` draws the flow, the state and
-the last run, edits the settings, and runs a test set of 14 questions scored in code. Chosen models after comparing
-them on the test set (section 9): `gpt-4o` for the planner and the answer, `gpt-4o-mini` for the specialists and the
-explorer; 14 of 14 pass at about $0.008 per question. The previous agent (`backend/langgraph_agent/`) was removed.
+**Verified on 2026-09-29** against the code in `backend/ai_agent/` (graph, nodes, specialists, settings, test
+questions), `backend/ai_agent/evaluation_history.json` and the frontend constants. The agent reads the graph only; it
+depends on every layer (`docs/PIPELINE_AND_LINKS_HANDOFF.md`).
 
-## 1. Design Principles
+**Status.** Built and working. Current models (`settings.json`, since 2026-09-27): planner, explorer and answer
+`gpt-6-sol`; specialists and summary `gpt-6-luna`. The test set of 14 questions passed 14 of 14 in all six runs on
+2026-09-28 with these models, $0.108 to $0.137 per run (about $0.008 per question). **The test questions are written
+for today's data** (names of events, root causes, components, people); they must be rewritten when a new dataset is
+loaded (section 9).
 
-- **Let code fetch, let the model think.** Retrieval (lookup, hybrid search, traversal through the layers) is
-  ordinary code. A model is called to understand the question (planner), for one bounded follow-up per specialist,
-  as a fallback explorer, and to write the answer.
-- **Plan once, no supervisor loop.** The planner decides once which specialists run. There is no model call between
-  steps to decide the next step, so the cost per question is predictable.
-- **Specialists follow the graph's layers**, because each layer has its own relationships and its own questions.
-- **Every model step is capped**: rounds, tool calls, extra nodes, rows, characters; a budget per question stops the
-  optional steps. No prompt carries the full history or a large schema.
+## 1. Design principles
+
+- **Let code fetch, let the model think.** Retrieval (lookup, hybrid search, walking the layers) is ordinary code. A
+  model is called to understand the question (planner), for one bounded follow-up per specialist, as a fallback
+  explorer, to summarise long conversations, and to write the answer.
+- **Plan once, no supervisor loop.** The planner decides once which specialists run; no model call decides the next
+  step. Cost per question is predictable. (Decided: no loop from `check` back to the planner.)
+- **Specialists follow the graph's layers.**
+- **Every model step is capped** (rounds, tool calls, extra nodes, rows, characters) and a budget per question stops
+  the optional steps.
 - **Every node and edge is declared**, so the compiled graph can be drawn completely in `Configure AI agent`.
 
-## 2. Pattern
+## 2. Flow
 
-Plan-and-execute with parallel fan-out (LangGraph's orchestrator-worker pattern), with a corrective step:
+Plan-and-execute with parallel fan-out (LangGraph orchestrator-worker), with one corrective step:
 
-```
+```text
 START -> prepare -> summarize -> planner -+-> answer                                   (small talk)
                                           +-> entry -+-> sources      -+
                                                      +-> causes       -+-> check -+-> answer -> END
@@ -35,526 +40,218 @@ START -> prepare -> summarize -> planner -+-> answer                            
 ```
 
 `entry` starts the chosen specialists with `Send`; they run in parallel and each appends its packet to `evidence`.
-`check` runs once after all of them.
+`check` runs once after all of them. `entry` goes straight to `check` when there are no entry points or no
+specialists.
 
 ## 3. Nodes
 
-| Node | Kind | Does | Reads | Writes |
-| --- | --- | --- | --- | --- |
-| `prepare` | code | Loads `settings.json`, computes layer staleness (`pipeline_staleness`), splits the stored conversation into the last `history_turns` turns (word for word) and the turns still to be summarized (section 5.1) | `question`, `stored_history`, `conversation_summary`, `summarized_messages` | `settings`, `staleness`, `recent_history`, `pending_history`, `conversation_summary`, `summarized_messages` |
-| `summarize` | model, 1 call, only when turns left the window | Works the turns that left the recent window into the running summary (section 5.1); does nothing otherwise | `pending_history`, `conversation_summary`, `summarized_messages`, `settings` | `conversation_summary`, `summarized_messages`, `usage` |
-| `planner` | model, 1 call, structured output (`PlanOut`) | The question rewritten to stand on its own (`standalone_question`, section 5.1), then question types, language, entities, English keywords, specialists, all for that standalone question | `question`, `conversation_summary`, `recent_history`, `settings` | `plan`, `usage` |
-| `entry` | code + 1 embedding call | Searches with `standalone_question`: lookup (issue keys, PR refs, document ids exactly; names via `entity_lookup`), vector search (`searchable_embedding`, Cypher `SEARCH`), fulltext (`searchable_text`, English keywords); merged by reciprocal rank fusion, best hit per `embedding_group`. Then the fan-out | `question`, `plan`, `settings`, `usage` | `entry_points`, `usage`, `errors` |
-| `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions/comments/reviews/code changes of an entry issue, document or PR, evidence of entry events, nodes that mention an entry issue/PR/document | `question`, `plan`, `entry_points`, `settings`, `usage` | `evidence`, `usage`, `errors` |
-| `causes` | code + model follow-up | Events, root causes and topics: entry events, events evidenced by entry sources, root causes of entry events, events a code change contributed to, root causes in an entry component, events of an entry issue's topic | same | same |
-| `architecture` | code + model follow-up | Components: entry components, components affected by entry events, holding entry root causes, evidenced by entry sources, implemented in files an entry code change or PR modifies, dependency neighbours | same | same |
-| `people` | code + model follow-up | Eligible persons and communities: entry persons, actors of entry events, authors of entry sources, experts on entry subjects, community members, meeting participants, mail recipients; who took part in an entry meeting or mail as a citable item on that meeting or mail; for `ranking` questions the metric tables as facts, and one "What X's knowledge of Y rests on" fact per expert ranked 1-2 on each topic and component (`expertise_basis`, see below); for a general `who` question (no entity named) the list of every person in the graph as a fact (`person_roster`, see below) | same | same |
-| `check` | code | Enough evidence? No entry points, no evidence, a `why` question without causal evidence, or a `ranking` question without metrics means no. Its routing also reads `explorer_ran`, `usage`, `settings` | `plan`, `entry_points`, `evidence`, `explorer_ran`, `usage`, `settings` | `sufficiency` |
-| `explorer` | model + read-only Cypher | Runs at most once, only when `check` says no, the explorer is on and the budget allows (section 4) | `question`, `evidence`, `sufficiency`, `settings` | `evidence`, `usage`, `explorer_ran` |
-| `answer` | model, 1 streamed call | Answers from the evidence only, cites references in square brackets (a node's name, or `fact-N` for a fact; see below), mentions stale layers, answers in the planner's `language`. Refuses in code (no model call) when a fetch failed | `question`, `conversation_summary`, `recent_history`, `plan`, `staleness`, `evidence`, `errors`, `settings` | `final_answer`, `citations`, `dropped_citations`, `usage` |
-
-**Citations.** In the answer's evidence text (`_evidence_text` in `nodes.py`) every node starts with its reference
-in square brackets (its name), and every distinct fact gets its own reference `fact-1`, `fact-2`, ... (numbered per
-question; the same fact from two specialists keeps one number), since a fact has no node. `_citations` resolves every
-bracket in the answer against these references: a node becomes a citation with its label, a fact a citation with
-label `Fact` (`FACT_LABEL`) and the fact text as `display_name`. Anything else ends up in `dropped_citations`, shown in
-the chat as "Unresolved references". In the chat a node citation is a chip that finds the node in the graph (switching
-the filter to `All` when needed), rings it (class `citation-target`: black `#000000`, 7 px, drawn over the entry-point
-and selected rings; black because node colours cover every hue) and centres it; any open property list is closed and the selection cleared. The property list
-opens only when the ringed node itself is clicked; any tap in the graph, another citation or a filter change removes
-the ring (`trySelectPending` and the core `tap` handler in `GraphView`). Under an answer the node chips come first,
-then the fact chips, each group in the order the answer cites them. In the answer text the square-bracket references
-are hidden by default and shown with the `[ ]` button in the message box's corner (`chat-references-button`, left of
-the speaker; hidden in a new tab, kept across `New` and a reload). Only the display changes: the answer, its citations, the
-test scoring and the conversation history keep the brackets. Hidden (`withoutReferences` in `TypewriterText`), every
-bracket is removed, unresolved ones too, since the "Unresolved references" line under the answer still reports them,
-and line breaks are kept so paragraphs never move: a line holding only references is removed with one line break; a
-reference at the start of a line is removed with the spaces after it; elsewhere a reference is removed with the spaces
-(not line breaks) before it ("was blocked [AUTH-17 v3]." reads "was blocked."). A bracket still being typed is hidden
-until it closes, and spaces and line breaks at the end of the typed text are held back until the next visible
-character, so no empty line appears and disappears while typing (seen 2026-09-28 with a line of references between two
-paragraphs). While typing, a whole reference is passed over in one step (`skipReferences`), so it causes no pause and no
-blip. Shown (`parseChatInline` with references on), every `[...]`, brackets included, is typed out in deep blue
-(`chat-inline-reference`, `#1d4ed8`); a fact
-citation is a dashed chip (`chat-citation-fact`) showing `fact-N` and the start of the fact, with the full text on
-hover, and is not clickable. Before facts had references, the answer model sometimes put a whole `Fact:` line in
-brackets, which showed as unresolved although the claim was grounded.
-
-Every node also appends one `trace` entry (time and a summary) through the `traced` wrapper in `nodes.py`.
-
-A specialist ranks candidates by priority (0 = the entry point itself, 1 = one step away, 2 = further, 3 = added by
-its follow-up), keeps `max_nodes_per_specialist`, and returns their `embedding_text` (cut to `max_text_chars`), which
-already carries each node's context from every layer. Nodes without an embedded text (`Issue`, `Document`) get a short
-fallback text.
-
-**Selection among equal priority** (added 2026-09-28). Among candidates of the same priority, the ones most similar
-to the question are kept: the cosine between the question's embedding (`question_vector`, computed once in `entry`
-and passed to the specialists) and each node's stored `embedding`, computed in Neo4j (`db.similarities`,
-`vector.similarity.cosine`). Nodes without an embedding (`Issue`, `Document`, `TeamsMeeting`) come after those with
-one; equal similarity falls back to time, oldest first. The kept nodes are then listed in time order. Before, equal
-priority was decided by time alone, oldest first, so early, general records were kept and later, more relevant ones
-were cut once there were more candidates than places. The follow-up's extra nodes are chosen the same way (below).
-Test set after the change: 14 of 14, $0.104, the same as before. The test set has no question where more candidates
-than places decide the answer, so it shows no gain either; that shows only with more data or such a question.
-
-How often a specialist has more candidates than places (`max_nodes_per_specialist` = 8), counted 2026-09-27 with
-every node in the graph as the single entry point (read-only, no model calls):
-
-| Specialist | Cases with more than 8 candidates | Most candidates |
-| --- | ---: | ---: |
-| `sources` | 3 of 107 | 29 |
-| `causes` | 14 of 107 | 10 |
-| `architecture` | 0 of 107 | 3 |
-| `people` | 0 of 107 | 4 |
-
-A real question has up to 8 entry points (`search.entry_points`), and their candidates add up, so more candidates than
-places happens more often than the table shows, most for `sources` and `causes`. How often per test question was not
-measured, since the test run does not store the entry points.
-
-## 4. Model Follow-up and Explorer (`followup.py`)
-
-**Specialist follow-up.** After the code fetch, one model call (`models.specialists`) sees the question and a compact
-view of the packet (label, name and a 160-character snippet per node, not the full texts). It either replies DONE or
-calls up to `max_calls_per_round` of its own tools; there are `max_rounds` rounds (1 by default, so the results are not
-sent back to the model). At most `max_extra_nodes` new nodes are added, the most similar to the question first (nodes
-without an embedding after, in the order the tools gave them). It is skipped when the budget is already spent.
-A failed follow-up only means no extra evidence; it is not an error.
-
-| Specialist | Tools (fixed, parameterised Cypher; name arguments are resolved case-insensitively) |
-| --- | --- |
-| `sources` | `get_timeline(reference)`: versions, comments, reviews, code changes and mentioning messages of an issue, document or PR, in time order. `get_conversation(reference)`: a message's Slack thread, mail reply chain, or a segment's whole meeting. `search_sources(query)`: fulltext restricted to source labels |
-| `causes` | `get_causal_chain(event)`: events up to three causal steps away. `get_root_causes(subject)`: root causes of an event, in a component, or behind a topic. `search_causes(query)` |
-| `architecture` | `get_component(component)`: the component, its dependency neighbours and the code changes to its files. `get_file_history(path)`. `search_architecture(query)` |
-| `people` | `get_person(name)`: the profile and the people they work with. `get_experts(subject)`: expertise shares and ranks on a topic or component, and what each expert's knowledge rests on (facts). `rank(metric)`: betweenness, weighted degree or bus factor (facts) |
-
-**Explorer.** A model (`models.explorer`) with one tool, `run_cypher`. Every query goes through
-`cypher_guard.enforce_read_only` (rejects writes, adds a LIMIT of `max_rows`) and runs in a read transaction with the
-query timeout. At most `max_queries` queries; each result is cut to `max_rows` rows and `max_result_chars` characters
-before the model sees it (`_cut_result`), and a cut result ends with a note saying so, including when the row limit
-was reached, so the model knows it has not seen everything and can narrow the query (the prompt says how); errors are
-shown to the model so it can correct the query. Element ids in the rows become evidence nodes (at most
-`max_extra_nodes`, taken from all rows before any cut), the rows become facts. All facts together stay within
-`max_result_chars`. The space is filled from the latest query backwards, since a later query usually narrows or
-corrects an earlier one (for example after a cut result); the result that does not fit is shortened with a note, not
-dropped, and the kept results reach the answer in the order the queries ran. (Before 2026-09-27 a cut
-result was a few characters over the limit and was dropped entirely, so the largest results reached the answer as no
-fact at all.) Its prompt holds a compact, fixed schema (labels,
-key properties, every relationship type written as `-[:TYPE]->`) and asks for case-insensitive text matching.
-The executed queries are listed in the trace.
-
-**What expertise rests on** (`expertise_basis` in `specialists.py`, added 2026-09-28). Expertise shares alone let the
-answer say only that someone holds "most of the recorded knowledge". This read-only query follows the Expertise layer's
-own `EXPERTISE_EVIDENCED_BY` from each `Expertise` node to the activity nodes it counted, and how the person is linked
-to each (the relationship types of `ACTIVITY_WEIGHTS` in `collaboration_layer.py`, so it counts what the layer counts).
-Each expert gets one fact, for example "What Erik Nilsson's knowledge of Mobile session refresh endpoint rests on
-(rank 1, 62.5 % of the recorded activity): wrote pull request backend-api#47; took part in event "..."; ...". The
-weightiest kinds come first, as the layer weighs them (pull requests before messages), at most
-`MAX_BASIS_ACTIVITIES` = 6 per expert, then "... and N more". `people` adds it for ranking questions for the experts
-ranked 1 to `MAX_BASIS_EXPERTS` = 2 on every topic and component (8 facts, about 2 800 characters, with today's
-data); `get_experts` adds it for every expert on the one subject asked about. The answer prompt asks to say briefly
-what someone's knowledge rests on when the answer says they know something. Nothing is written and the embeddings are
-unchanged.
-
-**Every person, for "who is in the project"** (`person_roster` in `specialists.py`, added 2026-09-28). Search keeps at
-most `entry_points` hits, chosen by similarity, so a general "who" question could miss a person by chance and the
-answer still stated a total (seen: "four persons" without Martin Ek; asked "not five?", the answer then agreed that it
-had missed him, although he is the customer, not a team member). When the planner types a question `who` and names no
-entity, `people` adds one fact listing every person in the graph: e-mail address (a different domain usually means
-another organisation, such as a customer), community, what they did counted per kind (`ROSTER_PHRASES`: pull
-requests, reviews, documents, issues, Slack, mails sent and received, meetings, events) and the subjects of up to two
-mails they sent, which often show their role. Mailboxes and name-only identities that could be several persons are
-listed apart, as "Not counted as people". At most `MAX_ROSTER` = 30 persons, then "... and N more"; about 1 600
-characters today. Three answer-prompt rules go with it: tell the people who work in the project apart from others who
-appear (a customer, another organisation, a shared mailbox) and say why; say "all", "only" or a total only when the
-evidence holds a complete list; and when the user questions an answer, check the evidence again, keep what holds and
-explain why, never agree just because the user suggests it, and do not open with "you are right" unless the evidence
-shows the answer was wrong. Checked with "Vilka är med i detta projekt?" followed by "inte 5 personer?", twice: four
-team members and Martin Ek as an external contact from Northwind both times; the follow-up explains that five
-persons appear, of whom four work in the project.
-
-## 5. State
-
-`backend/ai_agent/state.py`, one question per run. The conversation is kept outside the graph (`graph.py`, per
-`thread_id`, at most 200 threads) and passed in with every question, so every question starts from a clean state.
-
-| Field | Content | Merge |
+| Node | Kind | Does |
 | --- | --- | --- |
-| `question` | The question as the user wrote it | overwrite |
-| `stored_history`, `conversation_summary`, `summarized_messages` | Passed in: the thread's stored messages, its running summary, and how many of the stored messages the summary covers | overwrite |
-| `recent_history`, `pending_history` | Set by `prepare`: the last `history_turns` turns; the messages that left that window and are not in the summary yet | overwrite |
-| `settings`, `staleness` | Settings for this question; `{stage: {stale, reasons}}` | overwrite |
-| `plan` | `standalone_question`, `question_types`, `language`, `entities`, `keywords_en`, `specialists`, `route`, `reason` | overwrite |
-| `entry_points` | `id`, `label`, `name`, `score`, `via` (lookup, vector, fulltext) | overwrite |
-| `question_vector` | The question's embedding from `entry`, passed to the specialists to rank their candidates | overwrite |
-| `evidence` | One packet per specialist and the explorer: `specialist`, `nodes` (`id`, `label`, `name`, `at`, `priority`, `text`), `facts`, `candidates`, `errors`, `followup` (log), `ms` | **appended** |
-| `sufficiency`, `explorer_ran` | `{ok, reason}`; whether the explorer ran | overwrite |
-| `final_answer`, `citations`, `dropped_citations` | The answer; resolved and unresolved references | overwrite |
-| `usage` | Per model call: `node`, `model`, `input_tokens`, `cached_tokens`, `output_tokens`, `cost_usd`, `priced` | **appended** |
-| `trace` | Per node run: `node`, `ms`, `summary` | **appended** |
-| `errors` | Per failed fetch: `node`, `tool`, `error` | **appended** |
+| `prepare` | code | Loads `settings.json`, computes layer staleness, splits the stored conversation into the last `history_turns` turns (word for word) and the turns still to be summarised |
+| `summarize` | model (1 call, only when turns left the window) | Folds those turns into the running summary (at most `conversation_summary.max_chars`); on failure keeps the old summary and retries the same turns next time |
+| `planner` | model (1 call, structured `PlanOut`) | `standalone_question` (the question rewritten to stand on its own), `question_types` (`smalltalk`, `lookup`, `why`, `ranking`, `who`, `timeline`, `impact`, `other`), `language`, `entities`, `keywords_en`, `specialists`, `reason`. Route `smalltalk` only when the types are exactly `["smalltalk"]`. **Safety rule:** a graph question with no usable specialist runs every enabled specialist |
+| `entry` | code + 1 embedding call | Searches with the standalone question: exact lookup (issue keys, PR refs, document identifiers; names via `entity_lookup`), vector search (`searchable_embedding`, Cypher `SEARCH`), fulltext (`searchable_text`, on the English keywords); merged by reciprocal rank fusion (`RRF_K = 60`), best hit per `embedding_group`, at most `search.entry_points`. Also stores the question vector |
+| `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions, comments, reviews and code changes of an entry issue, document or PR, the evidence of entry events, and nodes that mention an entry issue, PR or document |
+| `causes` | code + follow-up | Events, root causes, topics: entry events, events citing entry sources, root causes of entry events and events of entry root causes, events an entry code change contributed to, root causes in an entry component, events of an entry issue's topic, events affecting an entry component |
+| `architecture` | code + follow-up | Components: entry components; components affected by entry events, holding entry root causes, evidenced by entry sources, implemented in files an entry code change or PR modifies; dependency neighbours |
+| `people` | code + follow-up | Eligible persons and communities: entry persons, actors of entry events, people linked by activity to entry sources, experts on entry subjects, community members, meeting participants, mail recipients; participation lists of an entry meeting or mail as a citable item; for `ranking` questions the metric tables as facts and "what X's knowledge rests on" facts; for a general `who` question (no entity) the list of every person as a fact |
+| `check` | code | Not enough when: no entry points; no evidence; a `why` question where `causes` ran and found no nodes; a `ranking` question without any facts. Otherwise enough |
+| `explorer` | model + read-only Cypher | Runs at most once, only when `check` says not enough, the explorer is enabled and the budget allows |
+| `answer` | model (1 streamed call) | Answers from the evidence only, cites references in square brackets, mentions stale layers, answers in the planner's language. **Refuses in code** (no model call) when any fetch failed |
 
-A node may not share its name with a state field in LangGraph, hence `final_answer` rather than `answer`. The `Send`
-payload to a specialist carries the `usage` so far, so each parallel specialist can check the budget.
+Every node emits a status line to the chat as it starts and appends one `trace` entry (time, summary) through the
+`traced` wrapper.
 
-### 5.1 Long conversations
+**Evidence selection inside a specialist.** Candidates get a priority (0 = the entry point itself, 1 = one step away,
+2 = further, 3 = added by the follow-up). The best `evidence.max_nodes_per_specialist` are kept; among equal priority,
+the ones most similar to the question (cosine between the question vector and the node's stored `embedding`, computed
+in Neo4j) come first; nodes without an embedding (`Issue`, `Document`, `TeamsMeeting`) after those with one; then
+time. Kept nodes are listed in time order with their `embedding_text` cut to `evidence.max_text_chars`; nodes without
+an embedded text get a short fallback text.
 
-Two parts keep a long conversation together (added 2026-09-27).
+**Citations.** In the answer's evidence text every node starts with its reference in brackets (its name), and every
+distinct fact gets `fact-1`, `fact-2`, ... The answer's brackets are resolved against these: a node becomes a
+citation with its label, a fact a citation labelled `Fact`; anything else is reported as unresolved.
 
-**Standalone question.** Only the planner and the answer see the conversation; entry search, the specialists and the
-explorer see one question. So the planner first rewrites the question to stand on its own (`standalone_question`,
-the first field of `PlanOut`): "Vem granskade fixen för den?" becomes "Vem granskade fixen för AUTH-17?". Entry
-search (vector, lookup, fulltext), the specialists (through the `Send` payload) and the explorer all use it
-(`search_question` in `nodes.py`); `entities` and `keywords_en` are taken from it too. The answer sees the original
-question, the conversation and, when it differs, the resolved question. No extra model call. `Configure AI agent`
-shows it under Last run as "Understood as", and the planner's trace summary as "understood as".
+## 4. Specialist follow-up and explorer (`followup.py`)
 
-**Running summary.** The last `history_turns` turns are given word for word. Turns before them are worked into a
-running summary (at most `conversation_summary.max_chars`) by the `summarize` node, one call per question and only
-when a turn has left the window (from the fourth question on with 3 turns). The planner and the answer get the summary
-before the recent turns, as "Earlier in the conversation (summary)". The prompts say the conversation is context, not
-evidence; the summary is never cited. Per thread `graph.py` stores the messages (up to `STORED_HISTORY_MESSAGES` = 24),
-the summary and how many messages it covers; a message is dropped from the store only once it is in the summary, and a
-failed summary call keeps the old summary and retries the same turns on the next question. With the summary off
-(`conversation_summary.enabled = false`), no summary is used or kept, and the store simply keeps the last 24 messages.
+**Follow-up.** After the code fetch, one model call (`models.specialists`) sees the question and a compact view of the
+packet (label, name, 160-character snippet per node). It replies DONE or calls up to `max_calls_per_round` of its own
+tools; `max_rounds` rounds (1: results are not sent back). At most `max_extra_nodes` new nodes are added, most similar
+to the question first. Skipped when the budget is spent. A failed follow-up is not an error.
 
-Limit: the conversation lives in the backend's memory. `New` (a new `thread_id`) or a backend restart starts a new
-conversation. A page reload keeps the `thread_id` (the tab's storage, section 8), so the backend still knows the
-conversation after a reload unless the backend was restarted in between; then the chat still shows the old messages,
-but the next question starts without its history.
-
-## 6. Settings
-
-`backend/ai_agent/settings.json`, read at the start of every question (an edit applies to the next question, no
-restart). Missing keys fall back to `DEFAULTS` in `settings.py`. Edited from the tab through
-`POST /api/ai/agent/settings` (section 8), or in the file.
-
-| Key | Current | Meaning |
-| --- | --- | --- |
-| `models.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `gpt-6-luna`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-sol` (since 2026-09-27; not yet run on the test set, which passed 14/14 with `gpt-4o`, `gpt-4o-mini`, `gpt-4o-mini`, `gpt-4o`) | Model per model step; only models with a price can be chosen |
-| `reasoning_effort.summarize`, `.planner`, `.specialists`, `.explorer`, `.answer` | `none`, `low`, `low`, `low`, `low` (defaults in `settings.py`: `none`, `none`, `none`, `low`, `low`) | `reasoning.effort` per model step, one of `none`, `low`, `medium`, `high`. Sent only when the step's model is a reasoning model (`is_reasoning_model`: name starts with `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`); other models reject the parameter, so it has no effect on them. Reasoning tokens are billed as output tokens. Every reasoning model given a price must accept all four values (the `gpt-6` and `gpt-5.6` models do; plain `gpt-5` and the o-series do not accept `none`) |
-| `history_turns` | 3 | Earlier turns the planner and the answer see word for word |
-| `conversation_summary.enabled`, `.max_chars` | `true`, 1500 | Running summary of the turns before those (section 5.1); model `models.summarize` (`gpt-6-luna`, effort `none`) |
-| `budget_usd_per_question` | 0.05 | Above this, optional steps (follow-ups, explorer) are skipped; the answer always runs |
-| `specialists.<name>` | all `true` | Turn a specialist off |
-| `specialist_followup` | enabled, 1 round, 2 calls per round, 4 extra nodes | Follow-up caps |
-| `explorer` | enabled, 3 queries, 25 rows, 4000 characters, 6 extra nodes | Explorer caps |
-| `search.vector_k`, `fulltext_k`, `lookup_k`, `entry_points` | 10, 10, 3, 8 | Hits per search and entry points kept |
-| `evidence.max_nodes_per_specialist`, `max_text_chars` | 8, 1200 | Size of each evidence packet from the code fetch |
-| `query_timeout_seconds` | 10 | Timeout on every Neo4j query |
-| `prices_usd_per_million_tokens` | `gpt-4o`, `gpt-4o-mini`, `gpt-5.6-terra`, `gpt-6-luna`, `gpt-6-sol`, `text-embedding-3-large` | Used for `cost_usd`, and decides which models can be chosen. Checked 2026-09-27 against OpenAI's pricing page (developers.openai.com/api/docs/pricing), Standard tier, which the agent uses. `gpt-6-sol` and `gpt-6-luna` have promotional prices (Sol until 2026-11-21, Luna's end date not stated): update them here when the promotion ends, or the cost is counted too low. Not updated automatically; a model missing here is counted as 0 with `priced: false` |
-
-The query embedding always uses the embedding layer's model and dimensions (`EMBEDDING_MODEL`,
-`EMBEDDING_DIMENSIONS` from `embedding_pass.py`); it is not a setting, since vector search needs the same model.
-
-## 7. Neo4j Sessions and Connections
-
-One driver per question (`stream_chat`), closed by its `with` block when the question ends, also when the stream is
-interrupted. Every session is opened in a `with` block (`prepare`, `entry`, each specialist in `run_specialist`, the
-explorer) and closed when the block ends, also on an error. Each parallel specialist has its own session, since a
-session is not thread-safe; its follow-up runs in the same session. All sessions are read sessions and every query
-runs in a read transaction with a timeout.
-
-Checked on 2026-09-25 by watching the server (`dbms.listConnections`, `SHOW TRANSACTIONS`) every 50 ms during a
-question with two parallel specialists: 0 backend connections before, at most 2 during (one per specialist), 0
-connections and 0 running transactions one second after.
-
-## 8. API and Frontend
-
-`POST /api/ai/chat` with `{"message", "thread_id"}`, streamed as Server-Sent Events: `status`, `token`, `tool_error`,
-`sources`, `done`. `done` also carries `usage`, `cost_usd`, `plan`, `entry_points`, `sufficiency` and `trace`.
-
-`status` is one line per step as it starts (`traced` in `nodes.py`), shown in the chat beside the thinking animation:
-"Preparing...", "Summarizing the conversation...", "Planning...", "Finding entry points in the graph...", then one line
-for the specialists, "Checking the evidence...", "Exploring the graph..." (only when the explorer runs) and "Writing
-the answer...". The specialists run in parallel, and each sends its line as it starts, so a line naming only itself
-was overwritten by whichever started last. Each now sends the same line built from the plan (`_specialists_status`),
-for example "Specialists causes, architecture and sources are fetching...", or "Specialist people is fetching..."
-when there is one.
-
-`GET /api/ai/agent` (read-only, `describe.py`): `nodes` (`id`, `title`, `kind`, `model`, `enabled`, `description`,
-`reads`, `writes`), `edges` (`source`, `target`, `conditional`, `label`), `state` (`name`, `type`, `merge`,
-`description`, `written_by`, `read_by`), `settings`, `available_models`, `reasoning_models` (the available models
-that take a reasoning effort) and `reasoning_efforts`.
-
-`POST /api/ai/agent/settings` (`settings.save_settings`): a partial settings object. Every value is checked before
-anything is written: known groups and keys only, whole numbers where required, ranges (`EDITABLE_NUMBERS`), booleans
-for on/off, specialists by name, models only from `available_models` (those with a price), reasoning efforts only from `REASONING_EFFORTS` and
-for known steps. Prices cannot be changed
-here. A wrong value answers `400` with the reason and leaves the file unchanged.
-
-`GET /api/ai/agent/evaluation`: the test questions, the last run and the run history. `POST` runs every test question
-(calls OpenAI), streamed as Server-Sent Events: `progress` per question with its result, then `done` with the run. Nodes and edges come from `get_compiled_graph().get_graph()`,
-so the drawing matches what runs; state fields and merge rules come from `AgentState`; descriptions, reads and writes
-come from `NODE_INFO` in `describe.py` (keep it in step with `nodes.py`).
-
-`Configure AI agent` tab (`ConfigureAgentPanel`), in order:
-
-| Part | Content |
+| Specialist | Tools (fixed, parameterised Cypher; names resolved case-insensitively) |
 | --- | --- |
-| Agent flow | SVG drawn top-down: a node's row is its longest path from the start, so the parallel specialists share a row. Blue = code, violet = model call, green = code + bounded model follow-up, dark pills = start/end; a node turned off in the settings is faded. Dashed edges are conditional, with their label (the four Send edges share one). Edges that skip rows run in their own lane along the side. After a question in the chat, the nodes and edges it went through are amber, with time and cost under each node. Clicking a node selects it |
-| Node details | Title, kind, model, description, the state fields it reads and writes, and its last-run summary |
-| State | Hidden until `Show state` is pressed (`Hide state` hides it again; hidden again after a reload). Every `AgentState` field: type, merge rule, written by, read by, meaning; rows used by the selected node are highlighted |
-| Entry points | The nodes every chosen specialist started from for the latest chat question (all get the same question, plan and entry points; there is no separate message per specialist), as a table (number, node, label, found by lookup/vector/fulltext), best first by the fused score (not shown). The heading is always shown; before any question, for small talk, or when nothing was found, a short line says so |
-| Last run | Question, plan (route, types, specialists, keywords, entities, language), the planner's reason, check result, total cost, and per node: time, model, tokens in, cached, out, cost, summary |
-| Conversation cost | Every question in the current chat: number, time, question (cut to 120 characters, full text on hover), cost; the total above the table stays in view while the table scrolls (`agent-session-costs`, 280 px). `New` empties it, as it starts a new conversation; a reload keeps it. Test questions are not counted. A question that ends in an error is not listed |
-| Settings | Set off by a divider above and below (`agent-section-divider`). An editable form (`AgentSettingsForm`): models per step, reasoning effort per step (a step's select is disabled while its model is not a reasoning model; the caption explains effort and its cost), budget, history turns, query timeout, specialists on/off, follow-up and explorer caps, search and evidence sizes. Model steps and specialists are listed in the order they run in the drawing (planner,
-specialists, explorer, answer; sources, causes, architecture, people), since the backend returns the keys
-alphabetically. `Save settings` / `Undo changes`; after a save the drawing reloads, so models and on/off states show at once |
-| Test questions | `Run test questions` asks for confirmation with the expected cost (the last run's, or $0.015 per question), then shows progress. The results table is hidden until `Show questions and results` is pressed (`Hide questions and results` hides it again; hidden again after a reload); its columns have fixed widths and break long words. Per question: result, each expected evidence group (found, cited), each expected word and fact, specialists (and explorer), cost, time, the answer. Then the history of runs: passed, cost, cost per question, time, models. The last part of the tab, so its last table has `layer-last-table` |
+| `sources` | `get_timeline(reference)`, `get_conversation(reference)` (Slack thread, mail reply chain, or a segment's meeting), `search_sources(query)` |
+| `causes` | `get_causal_chain(event)` (up to three causal steps), `get_root_causes(subject)`, `search_causes(query)` |
+| `architecture` | `get_component(component)`, `get_file_history(path)`, `search_architecture(query)` |
+| `people` | `get_person(name)`, `get_experts(subject)` (shares, ranks and what each expert's knowledge rests on), `rank(metric)` (betweenness, weighted degree, bus factor) |
 
-The last run is kept in `App` (`lastAgentRun`), set by `ChatPanel` through `onRunComplete` when a `done` event arrives.
-The same callback (`handleRunComplete`) appends the question and its cost to `sessionCosts` in `App`.
+**Explorer.** A model (`models.explorer`) with one tool, `run_cypher`. Every query passes
+`cypher_guard.enforce_read_only` (rejects writes, adds a `LIMIT` of `max_rows`) and runs in a read transaction with
+the query timeout. At most `max_queries` queries; each result is cut to `max_rows` rows and `max_result_chars`
+characters, with a note when it was cut; errors are shown to the model so it can correct itself. Element ids in the
+rows become evidence nodes (at most `max_extra_nodes`); the rows become facts, filled from the latest query backwards
+within `max_result_chars`. Its prompt holds a compact fixed schema of labels, key properties and every relationship
+type.
 
-`ChatPanel` stays mounted and is only hidden while another center tab is open, so the conversation (and an answer
-still streaming) survives switching to `Configure AI agent` and back. The thread id is made per conversation
-(`newThreadId`): in a new tab and by the `New` button, so either starts a new conversation in the chat window and in the
-backend's history alike.
+**What expertise rests on** (`expertise_basis`). For each expert ranked 1 to `MAX_BASIS_EXPERTS` = 2 on a subject,
+one fact listing the activities the Expertise layer counted (`EXPERTISE_EVIDENCED_BY`) and how the person is linked
+to each, weightiest kinds first, at most `MAX_BASIS_ACTIVITIES` = 6 then `... and N more`. `people` adds these for
+ranking questions (every topic and component); `get_experts` for one subject.
 
-The chat also survives a page reload in the same tab (added 2026-09-28). A page reloads on its own when the Vite dev
-server's websocket drops (the Vite client then polls and calls `location.reload()`: after sleep, a long-hidden tab or a
-network change) or when the browser discards an inactive tab to save memory; before, that emptied the chat. The thread
-id, the messages, the unsent text, the sound and references choices (`ChatPanel`), and `lastAgentRun` and
-`sessionCosts` (`App`) are written to the tab's `sessionStorage` (`CHAT_STORAGE_KEYS`, `readStored`, `writeStored`)
-whenever they change and read back on load. Messages read back are marked `restored` and shown whole at once, silently
-(`TypewriterText` `instant`); an answer that was still streaming when the page reloaded and has no text shows "The
-answer was interrupted when the page reloaded. Please ask again." Closing the tab clears the storage; a new tab starts
-empty. Every read falls back to the default and a failed write is ignored, so the chat works without storage, only
-without surviving a reload.
+**Every person** (`person_roster`). For a `who` question that names no entity, one fact listing every person: emails
+(another domain usually means another organisation), community, activity counts per kind (`ROSTER_PHRASES`), mails
+received, subjects of up to two sent mails; mailboxes and ambiguous names listed apart as "Not counted as people". At
+most `MAX_ROSTER` = 30 persons. The answer prompt asks to tell project members from outsiders, to say "all" or a
+total only when the evidence holds a complete list, and not to agree with a user's correction unless the evidence
+shows the answer was wrong.
 
-The `New` button, sits in the top right corner of the message box, above `Send`
-(`chat-new-button`, a small outlined box in muted colours, positioned absolutely in `chat-input-row`); it is always shown, but disabled until the chat has messages and while an answer
-streams. It empties the messages,
-keeps any unsent text in the box, and in `App` (`onNewChat`) empties `sessionCosts` and clears `lastAgentRun`, so `Last run`, `Entry points`, the
-highlighted path in the agent drawing and the last-run summary in the node details are reset as before any question. The old
-thread stays in the backend's memory until it is pushed out (at most 200 threads).
+## 5. State and conversations
 
-Answers are shown as a small, safe part of Markdown (`renderChatMarkdown`, from `parseChatBlocks` and
-`parseChatInline`, no library): paragraphs, `- ` bullet and `1. ` numbered lists, `**bold**`, `*italic*` and `` `code` ``; a
-heading line is shown as a bold paragraph (`chat-md-heading`), and tables, links and HTML stay plain text. A `*` opens
-italic only before a non-space and closes it only after one, so "5 * 3" stays as it is; the prompt does not ask for
-italic, so the support is a fallback for when the model writes it anyway. It is parsed as it is typed out, so a marker
-being typed never shows: an unclosed `**`, `*` or backtick makes the rest bold, italic or code, a single `*` at the end
-is held back, and a last line holding only a list marker is left out until its text arrives.
+`backend/ai_agent/state.py`, one question per run: `question`, `stored_history`, `conversation_summary`,
+`summarized_messages`, `recent_history`, `pending_history`, `settings`, `staleness`, `plan`, `entry_points`,
+`question_vector`, `evidence` (appended), `sufficiency`, `explorer_ran`, `final_answer`, `citations`,
+`dropped_citations`, `usage` (appended), `trace` (appended), `errors` (appended).
 
-Typing pace (`TypewriterText`, reworked 2026-09-29): the pace is set in time, not per frame: about
-`TYPING_CHARS_PER_SECOND` = 50 characters a second, faster when far behind the streamed text
-(`TYPING_CATCH_UP_PER_SECOND` = 0.66 of what is still untyped, per second). Before, it was a fixed step per frame, so
-a busy page typed slower: with the graph panel's motion on, headless Chrome drew about 7 frames a second instead of 60
-(software rendering; a real browser does better, but the pattern is the same). Three changes: the step is the time
-since the last frame times the pace, so fewer frames show more characters each; each Markdown block is memoized
-(`ChatMarkdownBlock`, compared by `sameChatBlock`), so only the block being typed renders again instead of the whole
-answer on every frame; and streamed text no longer cancels the frame already asked for (the frame reads the latest
-text through a ref), which with a token every 40 ms and a frame every 150-200 ms had cancelled most frames. The chat
-scrolls along at most every `TYPING_SCROLL_EVERY_MS` = 120 ms. Measured in headless Chrome with the graph's motion on
-and a stubbed answer of about 2 650 characters (no model call): all at once, 70 s before (15 characters a second in the
-last quarter) against 13 s after (110); streamed at 300 characters a second, 35-41 s before (49 in the last quarter)
-against 28 s after (87) at the same frame rate. Headless timings vary a lot between runs with the frame rate.
+Conversations are kept outside the graph in `graph.py`, per `thread_id` (at most `MAX_THREADS` = 200), with up to
+`STORED_HISTORY_MESSAGES` = 24 messages, the running summary and how many messages it covers; a message is dropped
+only after it is in the summary. Only the planner and the answer see the conversation; search, specialists and the
+explorer see the standalone question. The conversation lives in backend memory: a backend restart forgets it.
 
-The answer prompt
-(`ANSWER_PROMPT`, "How to write the answer") asks for exactly this Markdown (file paths always in backticks), for a
-direct answer first, a level of detail that matches the question (a broad question gets an overview in everyday
-words, with file paths, pull request numbers and ids only where they help; a specific technical question gets the full
-detail), every part of a several-part question in its own paragraph in the question's order (a part read
-widely: "how is the project structured" can mean code, roles and way of working), structure and history in separate
-paragraphs, short paragraphs, lists for three or more parallel items that belong together, references at the end of
-the sentence they support, and for
-analysis terms (bus factor, betweenness, weighted degree, expertise share and rank, community, root cause) to be
-explained in everyday words, with the term at most once in parentheses; it defines each term for the model. Added
-2026-09-28; before, the model wrote `**bold**` that the chat showed as asterisks, and gave terms such as "the bus factor
-is 1" as reasons.
+## 6. Settings (`backend/ai_agent/settings.json`)
 
-The AI's bubble is only as wide as its text (`align-self: flex-start`), with a small floated icon
-(`ThinkingOrbit still`) at its start. The icon is rendered inside `chat-message-content` (for an answer inside its first
-paragraph, TypewriterText's `leading`), not beside it: only a float in the same block counts in the bubble's width. Beside it (before 2026-09-28) the bubble came out one icon too narrow, so
-the word being typed kept dropping to the next line and jumping back up, about once per word (measured in headless
-Chrome: 14-23 upward jumps per answer before, 0 after, at widths 360-720 px).
+Read at the start of every question (an edit applies at once, no restart). Missing keys fall back to `DEFAULTS` in
+`settings.py`. Editable from the tab (`POST /api/ai/agent/settings`, validated: known keys, ranges in
+`EDITABLE_NUMBERS`, booleans, models only from those with a price, efforts only from `none`, `low`, `medium`, `high`;
+prices only in the file).
 
-The right panel follows the chat (added 2026-09-29). `ChatPanel` reports when it is working (`onBusyChange`, from
-Send until the answer has come in) and which layers the answer drew on (`onLayersUsed`, empty on Send and New);
-`App` passes both to `RightGraphicsPanel` (`isThinking`, `usedLayers`; the used layers are kept in the tab's storage
-with the chat). While the AI works, the knowledge graphic at the bottom gets a glow that breathes in two layers at
-different speeds (rose at the centre through violet into blue), red light signals travelling along its lines
-(`knowledgeEdges`, one signal per line) and a brighter core, and every label of the layer map gets a rose background
-blurred into a cloud that fades out at its edges (`layerMapCloud`), blinking a little out of step (`LayerMapHighlight`); all of it fades back over 0.6 s when the answer is in. After the
-answer, the labels of the layers it drew on stay lit (`layersUsedByAnswer`): the layers of the specialists the planner
-chose (causes: Knowledge and Root cause & impact; architecture: Architecture; people: Expertise & collaboration;
-sources reads the imported records, none of the four), plus the layer of any cited Topic, Event, RootCause,
-Component, Repository, Module, File, Expertise or Community (the explorer can reach any node). Counting citations
-alone was too narrow: a root-cause answer often cites the source records behind the root cause. `Motion off` pauses
-the animations; with reduced motion the glow and backgrounds are still and the signals hidden.
+| Key | Current |
+| --- | --- |
+| `models` | summarize `gpt-6-luna`, planner `gpt-6-sol`, specialists `gpt-6-luna`, explorer `gpt-6-sol`, answer `gpt-6-sol` |
+| `reasoning_effort` | summarize `none`, planner `low`, specialists `low`, explorer `low`, answer `low` (sent only to reasoning models: names starting `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`) |
+| `history_turns` | 3 |
+| `conversation_summary` | enabled, 1500 characters |
+| `budget_usd_per_question` | 0.05 (above it, follow-ups and the explorer are skipped; the answer always runs) |
+| `specialists` | all four on |
+| `specialist_followup` | enabled, 1 round, 2 calls per round, 4 extra nodes |
+| `explorer` | enabled, 3 queries, 25 rows, 4000 characters, 6 extra nodes |
+| `search` | `vector_k` 10, `fulltext_k` 10, `lookup_k` 3, `entry_points` 8 |
+| `evidence` | 8 nodes per specialist, 1200 characters per text |
+| `query_timeout_seconds` | 10 |
+| `prices_usd_per_million_tokens` | `gpt-4o` 2.5 / 1.25 / 10; `gpt-4o-mini` 0.15 / 0.075 / 0.6; `gpt-5.6-terra` 2.0 / 0.2 / 12.0; `gpt-6-luna` 0.1 / 0.01 / 0.5; `gpt-6-sol` 2.0 / 0.2 / 10.0; `text-embedding-3-large` 0.13 (input / cached input / output). Checked 2026-09-27 against OpenAI's pricing page, Standard tier. `gpt-6-sol` and `gpt-6-luna` have promotional prices (Sol until 2026-11-21): update them when the promotion ends, or cost is counted too low |
 
-Typing sound: a speaker button left of `New` (`chat-sound-button`, both in `chat-input-corner`) turns a quiet blip per
-word on or off while an answer is typed out. It is on in a new tab and stays as set across `New` and a reload. `TypewriterText`
-plays one blip (`playBlip`) when the characters revealed in a frame include the start of a word (`revealsWordStart`),
-about eight per second, and only while the chat tab is shown (`sound={isSoundOn && isVisible}`). The blip is a 45 ms
-triangle tone with a slightly random pitch from the Web Audio API (no sound file); one `AudioContext` for the page,
-created and resumed by a click (`unlockBlips`): sending a message (Send or Enter) while the sound is on, or turning
-the sound on, since browsers start audio only after a click. On, the button is deep blue with sound waves; off, grey with a small cross. When an answer is complete (no
-longer streaming into that message) and typed out to the end, two quick rising sine pips follow (`playDoneChime`,
-1175 and 1568 Hz, 90 ms apart); the end is marked once per message even when silent, so an answer that finished while
-the chat was hidden does not chime later.
+The query embedding always uses the embedding layer's model and dimensions (not a setting).
 
-## 9. Test Questions and Model Choice
+## 7. Neo4j sessions
 
-`backend/ai_agent/test_questions.json`, run by `evaluation.py`. 14 questions: the seven layer questions of section 12
-of `EMBEDDING_LAYER_HANDOFF.md` (in Swedish), one ranking question, the project goals (documents behind a requirement,
-who said something before a decision, sources describing the same event, missing or contradictory information), who
-took part in a meeting, and small talk. Each question has an expected route, groups of expected evidence nodes (label
-plus exact name or part of the name), expected facts and expected words in the answer. Scored in code: a question
-passes when the route, every evidence group, every fact group and every word group are right. Whether an expected node
-was also cited is shown but does not decide the pass. Every question runs without history.
+One driver per question, closed when the question ends (also when the stream is interrupted). Every session is a read
+session in a `with` block; each parallel specialist has its own session; every query runs in a read transaction with
+the timeout. Checked 2026-09-25 on the server: at most 2 connections during a question, 0 after.
 
-**What the test set can and cannot show** (noted 2026-09-28). The questions were written on 2026-09-25 while the agent
-was built, and some expected answers were adjusted after runs (q10, q12), so the set is partly fitted to how the agent
-already worked. All 14 pass, so the set can show that a change makes something worse (a passing question fails), but
-never that it makes something better. It is 14 questions, each run once, so a single result can be chance. It is a
-guard against breaking things, not a measure of answer quality. Changes whose gain is in choosing the right evidence
-(the selection by similarity to the question, section 3) cannot be judged by it. To measure that, write new questions
-the agent does not already pass, especially ones where the right node has to be kept among many candidates; they are
-best written from the grown data once it is loaded.
+## 8. API and frontend
 
-The expected answers were written from the graph (read-only queries) and must be updated when an LLM layer is rebuilt
-and renames events, root causes or components. The last run is saved to `evaluation_last.json` and a summary per run to
+`POST /api/ai/chat` `{"message", "thread_id"}`, streamed as Server-Sent Events (`Cache-Control: no-cache`,
+`X-Accel-Buffering: no`): `status`, `token`, `tool_error`, `sources`, `done` (`answer`, `citations`,
+`dropped_citations`, `token_usage`, `usage`, `cost_usd`, `plan`, `entry_points`, `sufficiency`, `trace`). A missing
+key answers 503 before the stream starts.
+
+`GET /api/ai/agent`: the compiled graph's nodes and edges, the state fields, the settings, the available models and
+efforts (from `describe.py`, whose `NODE_INFO` must be kept in step with `nodes.py`).
+
+`GET /api/ai/agent/evaluation`: test questions, last run, run history. `POST` runs every test question (calls
+OpenAI), streamed: `progress` per question, then `done`. Results in `evaluation_last.json` and
 `evaluation_history.json` (both ignored by git).
 
-Model comparison on 2026-09-25 (one run each; model answers vary a little between runs):
+**Chat with AI** (`ChatPanel`): stays mounted when another tab is shown; the thread id, messages, unsent text and the
+sound and reference choices are kept in the tab's `sessionStorage`, so a page reload keeps the conversation (the
+backend keeps its history unless it was restarted). `New` starts a new thread. Answers are rendered as a small, safe
+subset of Markdown and typed out at about `TYPING_CHARS_PER_SECOND` = 50, faster when far behind
+(`TYPING_CATCH_UP_PER_SECOND` = 0.66), scrolling at most every `TYPING_SCROLL_EVERY_MS` = 120 ms. Citation chips find
+and ring the node in the graph panel. The `[ ]` button shows or hides the bracket references in the text; the speaker
+button turns a quiet typing blip on or off. While the AI works, the right panel's knowledge graphic glows and signals
+run along its lines; afterwards the layers the answer drew on stay lit.
 
-| Planner | Specialists, explorer | Answer | Passed | Cost for 14 | Notes |
-| --- | --- | --- | ---: | ---: | --- |
-| gpt-4o | gpt-4o | gpt-4o | 13/14 | $0.131 | The miss was a test too narrow (q12's answer was right from other sources; test widened) |
-| gpt-4o-mini | gpt-4o-mini | gpt-4o | 12-13/14 | $0.081-0.094 | The cheap planner routed "Vilka grupper finns i teamet?" as small talk and missed that knowledge risk is a ranking question |
-| gpt-4o-mini | gpt-4o-mini | gpt-4o-mini | 11/14 | $0.009 | The answer attributed Priya's statement to Erik, besides the planner misses |
-| **gpt-4o** | **gpt-4o-mini** | **gpt-4o** | **14/14** | **$0.112** | Chosen. Run after the fixes below |
+**Configure AI agent** (`ConfigureAgentPanel`): the flow drawn from the compiled graph (the last question's path in
+amber with time and cost per node), node details, the state table (`Show state`), entry points of the last question,
+the last run, the conversation's cost per question, the settings form, and the test questions (`Run test questions`
+with a cost estimate; `Show questions and results`; run history).
 
-Fixes that came out of the runs: the planner prompt now says what small talk is and that knowledge risk and bus
-factor questions are ranking; the answer prompt says how to attribute `Previous line (name)` and `Reply to:` lines
-(the answer had attributed Priya Raman's words, quoted in Erik Nilsson's segment, to Erik); q10's expected evidence was
-tightened to the statements actually made by Priya Raman. Most of the cost is the answer call (it reads all the
-evidence), so `evidence.max_text_chars` and `max_nodes_per_specialist` are the main levers left.
+## 9. Test questions (`backend/ai_agent/test_questions.json`)
 
-## 10. Verification (2026-09-25)
+14 questions scored in code by `evaluation.py`: each has an expected route, groups of expected evidence nodes (label
+plus exact name or part of the name), optional expected facts and expected words in the answer; a question passes
+when all groups match. Every question runs without history.
 
-| Check | Result |
-| --- | --- |
-| Compiled graph | 10 nodes plus start/end; every edge present, including the conditional ones |
-| Follow-up tools | All 12 tools run against the live graph and return nodes or facts |
-| `Varför blockerades AUTH-17?` | `sources` and `causes` in parallel; follow-ups `get_timeline(AUTH-17)`, `get_conversation(slack-007)`, `get_root_causes(...)`; correct answer with 3 citations; $0.016 |
-| `Vilka komponenter påverkades av mobilregressionen och varför?` | `architecture` and `causes`; follow-ups `get_component` x2, `get_root_causes`; both components and both root causes cited; $0.016 |
-| `Vilka var med på sprint review-mötet?` | First answered from the wrong evidence (fixed: `people` now adds meeting participants and mail recipients); now Anna Berg, Anna Lindqvist, Erik Nilsson, cited `[meet-002]`; $0.010 |
-| Explorer, called directly: "Who took part in the sprint review meeting?" | One query, 3 rows, the three persons as evidence; $0.007 |
-| Neo4j connections | Section 7 |
-| `GET /api/ai/agent` through the Vite proxy | 12 nodes, 17 edges, 15 state fields |
-| Settings validation | Six invalid updates rejected (unknown model, out of range, not a boolean, prices, not a whole number, unknown specialist) with the file unchanged; valid model changes saved through the proxy |
-| Test set through `POST /api/ai/agent/evaluation` | Section 9 |
-| `tsc --noEmit`, `py_compile` | Pass |
+| Id | Question | Checks |
+| --- | --- | --- |
+| q01 | Varför blockerades AUTH-17? | an `Event` containing "blocked"; "säkerhet"/"security" |
+| q02 | Vilken kod ändrades för mobilfixen? | `CodeChange` containing `mobile_refresh.py` |
+| q03 | Vilka komponenter använder Session lifetime policy? | that `Component`; both refresh endpoint names |
+| q04 | Vad var grundorsaken till mobilregressionen? | a `RootCause` containing "mobile" |
+| q05 | Vem kan mest om Mobile session refresh endpoint? | `Person` Erik Nilsson or the component; "Erik Nilsson" |
+| q06 | Var finns det en kunskapsrisk om någon slutar? | "Mobile session refresh endpoint" |
+| q07 | Vilka grupper finns i teamet? | a `Community`; "Anna Berg", "Priya Raman" |
+| q08 | Vem har högst betweenness i teamet? | a fact with "betweenness"; "Anna Berg" |
+| q09 | Vilka dokument beskriver kravet REQ-AUTH-SESSION och hur ändrades det? | `doc-001 v1` and `doc-001 v2`; "inaktiv"/"inactivity" |
+| q10 | Vem sa att en fast 60-minutersgräns inte räckte innan kravet skrevs om? | one of `seg-003`, `slack-005`, `review-001`, `comment-002`; "Priya Raman" |
+| q11 | Vilka källor beskriver att AUTH-17 blockerades? | one of `AUTH-17 v3`, `comment-002`, `slack-006`, `seg-003` |
+| q12 | Täcker fixen i backend-api#42 även mobilen? | one of review-005, the web-only event, a mobile root cause, slack-010/011, comment-005; "web" |
+| q13 | Vilka var med på sprint review-mötet? | `meet-002`; the three participants |
+| q14 | Hej! | route `smalltalk` |
 
-Long conversations (2026-09-27): one six-turn conversation through `POST /api/ai/chat` with the current models,
-$0.068 in total. Every reference was resolved: "Vem granskade fixen för den?" was searched as "Vem granskade fixen för
-AUTH-17?" (found `review-001`); "Vad sa hon ...?" as a question about Priya Raman and `backend-api#42`; "Vem kan mest om
-den komponenten?" as one about Mobile session refresh endpoint. The summary started on turn 5 (turn 1 left the
-window), and turn 6, "Hänger det här ihop med det vi pratade om allra först?", was resolved from the summary alone to
-the AUTH-17 blocking of turn 1 and answered with citations. Offline (fake model, no cost): 15 turns with
-`history_turns` changed from 3 to 5 midway and one failing summary call; no message was dropped before it was in the
-summary, and the failed turn was summarized on the next question. The 14 test questions run without history and were
-not rerun; they contain no multi-turn conversation yet.
+**What the test set can and cannot show.** Written while the agent was built and partly fitted to it (q10, q12 were
+adjusted after runs). All 14 pass, so it can show that a change breaks something, never that it improves something.
+One run per question can be chance. With new data: rewrite the questions from the new graph (read-only queries), add
+questions the agent does not already pass (a timeline from first to last version, a why question, "who has the most
+...", questions where the right node must be picked among many candidates), and run each more than once.
 
-Known weak points: the follow-up model sometimes passes a Swedish word from the question as a tool argument (returns
-nothing, costs little); answers in Swedish are somewhat stiff with `gpt-4o`. The tab has not been checked for layout
-at every window width. The test set has one run per model setup, so a single pass or miss can be chance.
+Model history: on 2026-09-25 `gpt-4o` (planner, answer) with `gpt-4o-mini` (specialists, explorer) passed 14/14 for
+$0.112; cheaper planners misrouted, a cheap answer model misattributed a quoted statement. Since 2026-09-27 the
+`gpt-6` models are used (14/14 on 2026-09-28).
 
-## 11. Plan
+## 10. Open issues (not decided)
 
-1. ~~Skeleton with a cheap model~~.
-2. ~~Draw nodes, edges and state in `Configure AI agent`~~.
-3. ~~Specialist follow-ups and the explorer~~.
-4. ~~Test questions with expected answers, with answer quality and cost per question~~.
-5. ~~Edit settings from the tab, choose models per step, remove `langgraph_agent/`~~.
+**Questions outside the project run every specialist.** "Vad är Sveriges huvudstad?" is not small talk (small talk is
+narrowly greetings, thanks and questions about the assistant), so it is a graph question; the planner names no
+specialist; the safety rule then runs all four. Proposals, none decided: an `off_topic` question type routed straight
+to the answer; limiting the safety rule to project question types (and then keeping the explorer from running on the
+empty evidence); or both.
 
-Ideas for later: more test questions (and running each several times to see the spread); a smaller evidence text for
-the answer call to cut cost; a newer model once it has a price in `settings.json`.
+**`check` sees whether there is evidence, not whether it answers the question.** When the specialists return evidence
+about the right subject that lacks what was asked, the explorer never starts. Proposals, none decided: more code rules
+(for `who`, persons or participation items; for `timeline`, more than one point in time); a cheap model judging the
+evidence (one extra call per question, to be measured); or nothing until test questions on grown data show the need.
 
-### Open issue: questions outside the project run every specialist
+## 11. Known weak points
 
-**Not decided. It has not been decided whether this will be fixed; the options below are proposals only.**
+The follow-up model sometimes passes a Swedish word as a tool argument (returns nothing, costs little). The tab has
+not been checked at every window width. See `docs/SCALING_HANDOFF.md` for what must change before much larger data
+(query limits, ranking caps, roster size).
 
-Observed 2026-09-26: the question "Vad är Sveriges huvudstad?" (general knowledge, nothing to do with the project) ran
-all four specialists. Probable cause, from the code (the run itself was not inspected):
-
-1. The planner prompt allows small talk only for greetings, thanks and questions about the assistant (tightened after
-   the test run where "Vilka grupper finns i teamet?" was routed as small talk). There is no route for questions
-   outside the project, so the question is treated as a graph question.
-2. The planner then names no specialist, since none fits. The safety rule in `planner` (`nodes.py`) runs every enabled
-   specialist when a graph question has none ("ask every enabled one rather than miss the answer"). The rule is meant
-   for an uncertain planner on a project question, but here it sends an irrelevant question to all four.
-
-The rest of the flow works as designed: hybrid search always finds some loosely similar nodes, the specialists fetch
-around them (with a follow-up each), and the answer says the evidence does not cover the question. The cost is
-unnecessary, roughly two to three times a small-talk question (not measured).
-
-Proposals (not decided):
-
-- **A separate route for off-topic questions.** A question type such as `off_topic` in `PlanOut`; `route_after_planner`
-  sends it straight to `answer`, like small talk, and the answer prompt says the assistant only answers questions about
-  the project. Cheapest, but the planner must tell off-topic questions apart from project questions reliably; the test
-  set would need an off-topic question, and q07 ("Vilka grupper finns i teamet?") shows the risk of the planner
-  wrongly skipping the graph.
-- **Limit the safety rule.** Run every specialist only when the planner gave a project question type (`why`, `who`,
-  `timeline`, `impact`, `lookup`, `ranking`); for `other` with no specialist, run none and let `check` and the answer
-  say that nothing was found. Smaller change, keeps the graph route, still pays for the planner, entry search and
-  answer. Note: with no evidence, `check` answers "not enough" and the explorer would run, so `route_after_check`
-  would also have to skip the explorer in this case, or the cost only moves there.
-- **Both**, with the second as a guard when the planner misses the first.
-
-### Open issue: `check` sees whether there is evidence, not whether it answers the question
-
-**Not decided. It has not been decided whether this will be fixed; the options below are proposals only.**
-
-`check` (`nodes.py`) says "not enough" only when there are no entry points, no evidence at all, a `why` question
-without causal evidence, or a `ranking` question without metrics. Otherwise it says "enough", counting the evidence
-items, and the explorer does not run. So when the specialists return evidence that is about the right subject but
-lacks what the question asks for, the explorer, which could have found it, never starts, and the answer says the
-evidence does not show it.
-
-Seen twice (2026-09-27): "Vilka var med på sprint review-mötet?" before meeting participants were added to `sources`
-(the transcript segments were evidence, the participant list was not; the answer named the speakers and said it could
-not tell whether Priya took part), and an answer that said the evidence did not show who approved `backend-api#42`,
-although `review-004` and `review-005` record it (the approvals were not among the 8 nodes kept). The second cause is
-reduced by the selection by similarity to the question (section 3), but `check` would still not notice it.
-
-Proposals (not decided):
-
-- **More rules in code.** Like the `why` and `ranking` rules: for `who`, persons or participation items in the
-  evidence; for `timeline`, evidence from more than one point in time. Cheap and predictable, but coarse: it cannot
-  tell whether they are the right persons or times.
-- **A cheap model judges the evidence.** One call (for example `gpt-6-luna`, effort `none`) sees the question and the
-  compact view of the evidence (as the follow-up does) and answers whether the answer is in it; no starts the explorer.
-  Addresses the cause, but adds a model call and some time to every graph question, and a wrong no runs the explorer
-  when it is not needed. Must be measured on the test set: passed questions, cost and how often the explorer runs.
-- **Nothing for now.** Add test questions that this weakness makes fail first, on the grown data; if they fail despite
-  the selection by similarity, the second proposal is the one that addresses the cause.
-
-## 12. Code Map
+## 12. Code map
 
 | File | Holds |
 | --- | --- |
-| `backend/ai_agent/graph.py` | `build_graph` (nodes, edges, declared conditional targets), `stream_chat`, history per thread, `MissingApiKeyError`, `require_openai_client` |
-| `backend/ai_agent/nodes.py` | `traced`, `prepare`, `planner` (`PlanOut`), `entry`, `dispatch_specialists` (fan-out), the four specialist nodes, `check`, `explorer`, `answer` (evidence text, citation checking) |
-| `backend/ai_agent/retrieval.py` | Reference detection, lookups, vector and fulltext search, reciprocal rank fusion, group folding |
-| `backend/ai_agent/specialists.py` | The four specialists' code fetches, participation items, rankings, `run_specialist` (own session per specialist) |
-| `backend/ai_agent/followup.py` | Follow-up tools per specialist, `run_followup`, `run_explorer` |
-| `backend/ai_agent/describe.py` | `NODE_INFO`, `EDGE_LABELS`, `STATE_DESCRIPTIONS`, `describe_agent` for `GET /api/ai/agent` |
-| `backend/ai_agent/evaluation.py`, `test_questions.json` | Test questions, scoring in code, `run_evaluation`, saved last run and history |
-| `backend/ai_agent/db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text`, `similarities` (each node's similarity to the question) |
-| `backend/ai_agent/state.py` | `AgentState` |
-| `backend/ai_agent/prompts.py` | `PLANNER_PROMPT`, `ANSWER_PROMPT`, `followup_prompt`, `EXPLORER_PROMPT` |
-| `backend/ai_agent/settings.py`, `settings.json` | Settings and defaults, `available_models`, `save_settings` with validation (`EDITABLE_NUMBERS`, `EDITABLE_FLAGS`) |
-| `backend/ai_agent/usage.py` | Usage entries, cost, totals |
-| `frontend/src/main.tsx` | Agent types, `layoutAgentGraph`, `routeAgentEdges`, `traversedAgentEdges`, `ConfigureAgentPanel`, `AgentTestQuestions`, `AgentSettingsForm`; `ChatPanel` `onRunComplete`; `App` `lastAgentRun`; `readSseEvents` is generic |
-| `frontend/src/styles.css` | `agent-panel` (many-table group), `agent-flow-*`, `agent-node-details`, `agent-state-row-used`, `agent-settings-*`, `agent-test-*` |
+| `graph.py` | `build_graph`, `stream_chat`, conversation memory, `MissingApiKeyError`, `require_openai_client` |
+| `nodes.py` | `traced`, `prepare`, `summarize`, `planner` (`PlanOut`), `entry`, `dispatch_specialists`, the four specialist nodes, `check`, `explorer`, `answer` (evidence text, citations) |
+| `retrieval.py` | reference detection, lookups, vector and fulltext search, reciprocal rank fusion, group folding |
+| `specialists.py` | the four specialists' queries, participation items, rankings, `expertise_basis`, `person_roster`, `run_specialist` |
+| `followup.py` | follow-up tools, `run_followup`, `run_explorer` |
+| `describe.py` | `NODE_INFO`, `EDGE_LABELS`, `STATE_DESCRIPTIONS`, `describe_agent` |
+| `evaluation.py`, `test_questions.json` | scoring, `run_evaluation`, saved runs |
+| `db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text`, `similarities` |
+| `prompts.py` | `PLANNER_PROMPT`, `SUMMARY_PROMPT`, `ANSWER_PROMPT`, follow-up and explorer prompts |
+| `settings.py`, `settings.json` | settings, defaults, validation |
+| `state.py`, `usage.py` | `AgentState`; usage and cost |
+| `backend/cypher_guard.py` | read-only enforcement for model-written Cypher |
 
-## 13. Important Boundaries
+Prompts and module constants are read when the backend starts: after editing agent code, restart the backend
+(`settings.json` is the exception).
+
+## 13. Boundaries
 
 - Reads Neo4j only (read sessions, read transactions); never writes to Neo4j or PostgreSQL.
-- Model-written Cypher goes through `cypher_guard` and a read transaction: two independent guards.
+- Model-written Cypher passes `cypher_guard` and runs in a read transaction: two independent guards.
 - Source texts are data, never instructions (stated in every prompt).
 - When a fetch fails, the answer states no facts (decided in code).

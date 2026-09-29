@@ -1,45 +1,76 @@
-# Reference Extraction Layer Handoff
+# Layer 1: Reference Extraction
 
-This document describes the deterministic reference extraction layer: the middle UI panel that creates new `MENTIONS_*` relationships in Neo4j.
+The first graph-building step. It finds issue keys, pull request references and document identifiers written in
+source text and links each mention to the node it names, with `MENTIONS_ISSUE`, `MENTIONS_PULL_REQUEST` and
+`MENTIONS_DOCUMENT`. Deterministic: regular expressions and graph lookups, no model.
 
-The layer is implemented in `backend/reference_extraction.py`, exposed by `backend/app.py`, and displayed in the React `ReferenceExtractionPanel` inside `frontend/src/main.tsx`.
+**Verified on 2026-09-29** against `backend/reference_extraction.py`, `backend/app.py`, `frontend/src/main.tsx` and the
+live graph.
 
-## Purpose
+Code: `backend/reference_extraction.py`. API: `backend/app.py`. UI: `ReferenceExtractionPanel` in
+`frontend/src/main.tsx`, tab `Reference extraction` (first of seven in `Build graph layers`).
 
-The imported graph preserves each source tree: mail, Slack, Teams, issues, docs, and PRs. Without extraction, the sources mostly connect through shared `Person` nodes. The reference extraction layer adds content links when source text explicitly names an existing graph entity.
+## 1. Why it exists
 
-Example:
+After the import, the six source trees share nothing but `Person` nodes: the only path from a mail to a pull request
+runs through a person. The content links are written in the text: `KV-7` in a Slack message, `kvitta-mobile#6` in
+an issue, `ADR-OFFLINE-QUEUE` in a review. This layer turns those strings into relationships. Every later layer builds
+its evidence on them (`docs/PIPELINE_AND_LINKS_HANDOFF.md`, section 3).
 
-- A Slack message body contains `AUTH-17`.
-- The graph already has `(:Issue {issue_key: "AUTH-17"})`.
-- The extraction pass creates:
+It interprets nothing. If a text contains an identifier and the node exists, the edge is drawn; if not, the match is
+discarded. That discard is the safety net: the issue-key pattern also matches `UTF-8`, and the failed lookup drops
+it.
 
-```cypher
-(:SlackMessage)-[:MENTIONS_ISSUE]->(:Issue)
-```
+## 2. What is scanned
 
-This layer is deterministic. It uses regex patterns and graph lookups only. It does not call an LLM, does not interpret meaning, and does not create nodes except the shared `PipelineState` singleton.
+Graph nodes only (never PostgreSQL). For each node, the listed text properties, and the parent entity the node must
+not link back to:
 
-## Current Local State
+| Label | Properties | Parent (self-reference check) |
+| --- | --- | --- |
+| `MailMessage` | `subject`, `body` | none |
+| `SlackMessage` | `body` | none |
+| `TeamsTranscriptSegment` | `body` | none |
+| `TeamsMeeting` | `title` | none |
+| `Issue` | `title`, `description` (latest version) | itself |
+| `IssueVersion` | `title`, `description`, `acceptance_criteria` | its `Issue` (via `HAS_ISSUE_VERSION`) |
+| `IssueComment` | `body` | its `Issue` (via `HAS_ISSUE_COMMENT`) |
+| `Document` | `title`, `body` (latest version) | itself |
+| `DocumentVersion` | `title`, `body`, `change_summary` | its `Document` (via `HAS_DOCUMENT_VERSION`) |
+| `PullRequest` | `title`, `description` (latest version) | itself |
+| `PullRequestReview` | `body` | its `PullRequest` (via `HAS_PR_REVIEW`) |
+| `CodeChange` | `before_summary`, `after_summary` | its `PullRequest` (via `HAS_CODE_CHANGE`) |
 
-From `/api/references`:
+Not scanned: `CodeChange.diff`, names, URLs, and the raw JSON properties (`versions_raw`, `comments_raw`,
+`reviews_raw`, `code_changes_raw`, `recipients_raw`, `participants_raw`), whose content is already covered by
+first-class nodes. Earlier PR versions' titles and descriptions exist only in SQL and are never scanned.
 
-| Field | Current value |
-| --- | --- |
-| `total` | 55 extracted relationships |
-| `MENTIONS_ISSUE` | 22 |
-| `MENTIONS_PULL_REQUEST` | 21 |
-| `MENTIONS_DOCUMENT` | 12 |
-| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
-| `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
-| `needs_rerun` | `false` |
-| `stale_reasons` | `[]` |
+## 3. Patterns and lookups
 
-This snapshot is from immediately after a full pipeline rebuild (see the follow-up staleness work order), so `needs_rerun` is currently `false`. When source data is imported after the last extraction run, `needs_rerun` becomes `true` and `stale_reasons` explains why (see the Pipeline State section below).
+Lookups are built from the graph at every run; nothing is hard-coded.
 
-## Neo4j Relationship Model
+| Kind | Pattern | Resolves to | Lookup key |
+| --- | --- | --- | --- |
+| Issue | `\b[A-Z][A-Z0-9]*-\d+\b` | `Issue` | `issue_key` (any `source_instance`) |
+| Pull request | `\b([a-z0-9][a-z0-9._-]*)#(\d+)\b` | `PullRequest` | `(repository, pr_number)` (any `source_instance`) |
+| Document | the identifier itself, `\b<identifier>\b` | `Document` | leading token of `Document.title` |
 
-The layer creates exactly three relationship types:
+**Document identifier.** `document_identifier(title)` takes the text before the first `:`, trims it, and keeps it only
+if it matches `^[A-Z][A-Z0-9-]{3,}$`. `REQ-VAT: VAT on expenses` gives `REQ-VAT`; a title without such a prefix
+(`Receipt reader`) gives nothing and that document cannot be referenced.
+
+**Order and consumption.** For each text, document identifiers are matched first and their spans consumed; issue and
+PR matches that overlap a consumed span are skipped, so `REQ-VAT` is not also tried as an issue key. Matching is
+case-sensitive and whole-word.
+
+**Self-reference rule.** A match whose target is the node's own parent (or the node itself for `Issue`, `Document`,
+`PullRequest`) is skipped: a version of `KV-8` saying `KV-8` adds nothing that `HAS_ISSUE_VERSION` does not already
+say. A comment on `KV-8` saying `KV-2` is kept.
+
+**One edge per (node, type, target).** If a node names the same target several times, or in several properties, one
+relationship is written with the first match's `matched_text` and `source_property`.
+
+## 4. Graph model
 
 ```cypher
 (:SourceNode)-[:MENTIONS_ISSUE]->(:Issue)
@@ -47,248 +78,86 @@ The layer creates exactly three relationship types:
 (:SourceNode)-[:MENTIONS_DOCUMENT]->(:Document)
 ```
 
-Targets are always parent entity nodes:
+Targets are always the parent entities (`Issue`, `PullRequest`, `Document`), never versions, reviews or code changes.
 
-- issue references point to `Issue`, not `IssueVersion`
-- PR references point to `PullRequest`, not `PullRequestReview` or `CodeChange`
-- document references point to `Document`, not `DocumentVersion`
-
-Every extracted relationship has these properties:
-
-| Property | Value |
+| Relationship property | Value |
 | --- | --- |
 | `derived` | `true` |
-| `extracted_by` | `reference-extraction-v1` |
-| `matched_text` | Exact text matched in the source property, such as `AUTH-17`. |
-| `source_property` | Property where the match was found, such as `body` or `description`. |
-| `extracted_at` | ISO timestamp of the extraction run. |
+| `extracted_by` | `reference-extraction-v1` (this layer's marker; it does not use `generated_by`) |
+| `matched_text` | the exact text matched, e.g. `KV-7` |
+| `source_property` | where it was found, e.g. `body`, `description` |
+| `extracted_at` | run timestamp (UTC ISO) |
 
-`derived: true` matters because these edges are conclusions from text, not direct SQL source facts.
+No nodes are created, apart from setting `PipelineState.last_extraction_at`.
 
-## What Gets Scanned
+## 5. Run behaviour
 
-The scanner reads Neo4j nodes and their properties. It does not read PostgreSQL directly.
+`run_extraction(session)`:
 
-| Label | Properties scanned | Parent entity used for self-reference checks |
-| --- | --- | --- |
-| `MailMessage` | `subject`, `body` | none |
-| `SlackMessage` | `body` | none |
-| `TeamsTranscriptSegment` | `body` | none |
-| `TeamsMeeting` | `title` | none |
-| `Issue` | `title`, `description` | self |
-| `IssueVersion` | `title`, `description`, `acceptance_criteria` | parent `Issue` via `HAS_ISSUE_VERSION` |
-| `IssueComment` | `body` | parent `Issue` via `HAS_ISSUE_COMMENT` |
-| `Document` | `title`, `body` | self |
-| `DocumentVersion` | `title`, `body`, `change_summary` | parent `Document` via `HAS_DOCUMENT_VERSION` |
-| `PullRequest` | `title`, `description` | self |
-| `PullRequestReview` | `body` | parent `PullRequest` via `HAS_PR_REVIEW` |
-| `CodeChange` | `before_summary`, `after_summary` | parent `PullRequest` via `HAS_CODE_CHANGE` |
+1. Timestamp the run.
+2. Build the three lookups from the graph (read).
+3. Load every scannable node with its text properties and parent (read).
+4. Collect the edges that should exist.
+5. Delete every relationship with `extracted_by = "reference-extraction-v1"`.
+6. Write the new relationships with `MERGE`, one type at a time.
+7. Set `PipelineState.last_extraction_at`.
 
-Raw JSON properties are intentionally not scanned:
+Idempotent: the same graph always gives the same edges. Deletion is by the `extracted_by` marker, never by type.
 
-- `versions_raw`
-- `comments_raw`
-- `reviews_raw`
-- `code_changes_raw`
+## 6. Current state (2026-09-29)
 
-Their content is already represented by first-class retrieval-unit nodes. Scanning both would double-count references.
+Kvitta data. 293 relationships, `needs_rerun: false`. The count matched an independent recomputation from the node
+texts.
 
-## Lookup Tables
+| Type | Count | From | Targets |
+| --- | ---: | --- | --- |
+| `MENTIONS_ISSUE` | 175 | SlackMessage 41, DocumentVersion 36, TeamsTranscriptSegment 28, Document 17, PullRequest 14, IssueVersion 12, MailMessage 8, Issue 7, TeamsMeeting 5, IssueComment 4, PullRequestReview 3 | all 12 issues; most `KV-8` 29, `KV-7` 24, `KV-2` 23 |
+| `MENTIONS_PULL_REQUEST` | 62 | IssueVersion 17, Issue 15, SlackMessage 15, PullRequest 4, IssueComment 3, TeamsTranscriptSegment 3, Document 2, DocumentVersion 2, PullRequestReview 1 | all 14 PRs; most `kvitta-api#60` and `kvitta-mobile#6` 9 each |
+| `MENTIONS_DOCUMENT` | 56 | IssueVersion 16, TeamsTranscriptSegment 9, SlackMessage 8, PullRequest 6, IssueComment 4, PullRequestReview 4, CodeChange 2, DocumentVersion 2, Issue 2, MailMessage 2, Document 1 | all 6 documents; `doc-001` and `doc-003` 14 each |
 
-Lookups are built from the graph at runtime. Nothing is hardcoded.
+Cross-references between issues: `KV-3 -> KV-5`, `KV-8 -> KV-12`, `KV-12 -> KV-8`, and the release epic `KV-9` names
+`KV-7`, `KV-8`, `KV-10` and `KV-12`. Between PRs: `kvitta-api#58 -> kvitta-api#55` (proper fix names the hotfix),
+`kvitta-mobile#6 -> kvitta-api#21`, and `kvitta-api#31` and `kvitta-web#9` name each other.
 
-| Reference kind | Match pattern | Lookup target |
-| --- | --- | --- |
-| Issue key | `\b[A-Z][A-Z0-9]*-\d+\b` | `Issue.issue_key` |
-| Pull request | `\b([a-z0-9][a-z0-9._-]*)#(\d+)\b` | `PullRequest.repository`, `PullRequest.pr_number` |
-| Document identifier | whole-word match on a valid leading document token | leading token of `Document.title` before `:` |
+Sources that name nothing (and so reach no later layer except through search or a meeting): 6 mails (`mail-001`,
+`-004`, `-006`, `-007`, `-010`, `-014`: the customer's first mails, the time-report reminder, the alert and the thank
+you), 13 Slack rows (small talk, thread replies and version 1 of `slack-026`), 20 transcript segments, 10 issue
+comments, 26 review entries and 37 of 39 code changes.
 
-Document identifier rule:
+## 7. What the data needs for this layer
 
-- `REQ-AUTH-SESSION: Administrator session lifetime` yields `REQ-AUTH-SESSION`.
-- The identifier must match `^[A-Z][A-Z0-9-]{3,}$`.
+- Identifiers in the exact formats of section 3, written where people would write them: PR titles starting with the
+  issue key, chat lines naming the PR and issue, issue descriptions naming the PR that delivered them, reviews naming
+  the requirement, meeting segments naming the issue under discussion, documents naming their tracking issue and
+  implementing PR, mails to customers naming the issue.
+- Document titles with an identifier prefix for every document that should be referenceable.
+- Cross-references between issues (a follow-up bug naming the original story) and between PRs (a fix naming the PR
+  it completes).
+- Some deliberate non-matches are harmless (`UTF-8`, `ISO-8601`): they resolve to nothing and are dropped.
 
-Document identifiers are resolved first. Their spans are then consumed so `REQ-AUTH-SESSION` cannot also be treated as an issue key. One matched string should create at most one edge.
+## 8. API
 
-Unresolved matches are discarded. For example, the issue-key pattern can match strings like `UTF-8`; if no `Issue.issue_key` exists for that text, no relationship is created.
+`GET /api/references`: `last_import_at`, `last_extraction_at`, `needs_rerun`, `stale_reasons`, `edges` (every
+extracted edge: `source_label`, `source_display_name`, `relationship`, `matched_text`, `source_property`,
+`target_display_name`, `extracted_at`), `total`, `counts` per type.
 
-## Self-Reference Rule
+`POST /api/references/extract`: runs the pass and returns the same plus `extracted_at`, `deleted`, `scanned_nodes`,
+`lookups` (`issues`, `pull_requests`, `documents`). Errors: 500 with `{"error": ...}`.
 
-The layer skips references from a node to its own parent entity.
+## 9. UI
 
-Examples:
+Tab `Reference extraction`. Button `Extract references` / `Extracting...`; status row with the last extraction and
+last import times; the stale warning with its reasons. Description (`reference-description`): `Finds issue keys, PR
+numbers and document IDs in source text and links each mention to the existing node.` Counts under
+`Relationships created:` (Issue, Pull request, Document, Total). Table `Extracted references (relationships:
+MENTIONS_ISSUE, MENTIONS_PULL_REQUEST, MENTIONS_DOCUMENT)` with columns Source type (Label), Source (node name), Field
+(property in source), Matched (text in source), Target (node name), Relationship (type). Empty state: `No references
+yet. Press the button to run the pass.`
 
-- An `IssueComment` under `AUTH-17` that says `AUTH-17` does not get `MENTIONS_ISSUE`, because `(:Issue)-[:HAS_ISSUE_COMMENT]->(:IssueComment)` already says which issue it belongs to.
-- An `IssueComment` under `AUTH-19` that says `AUTH-17` does get `MENTIONS_ISSUE`, because that is a cross-reference.
-- A `DocumentVersion` of `doc-001` that says `REQ-AUTH-SESSION` does not point back to its own parent `Document`.
+Graph filter `References`: `MENTIONS_ISSUE`, `MENTIONS_PULL_REQUEST`, `MENTIONS_DOCUMENT`.
 
-This prevents obvious duplicate/self edges while preserving cross-source and cross-entity references.
+## 10. Boundaries
 
-## Rebuild Behavior
-
-The extraction pass is rebuildable and idempotent for its own layer.
-
-Run flow in `run_extraction(session)`:
-
-1. Set `extracted_at` to current UTC ISO timestamp.
-2. Build issue, PR, and document lookup tables from Neo4j.
-3. Load every scannable node and its text properties.
-4. Collect resolvable references.
-5. Delete existing relationships where `extracted_by = "reference-extraction-v1"`.
-6. Write the new `MENTIONS_*` relationships with `MERGE`.
-7. Update `PipelineState.last_extraction_at`.
-8. Return counts, lookup sizes, scanned node count, and the result-table edges.
-
-Deletion is by property, not by relationship type. This avoids deleting any future manually/import-created relationship that happens to use a similar type but was not created by this extractor.
-
-## Pipeline State
-
-The layer uses:
-
-```cypher
-(:PipelineState {id: "singleton"})
-```
-
-Relevant fields:
-
-| Property | Written by | Purpose |
-| --- | --- | --- |
-| `last_import_at` | SQL import paths in `viewer/app.py` | Indicates source graph data changed. |
-| `last_extraction_at` | `reference_extraction.run_extraction` | Indicates reference layer was rebuilt. |
-
-Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's only upstream stage, per `UPSTREAM_BY_STAGE`, is `import`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively from stages further upstream.
-
-## Backend API
-
-### `GET /api/references`
-
-Returns current state and all extracted edges.
-
-Payload shape:
-
-```json
-{
-  "last_import_at": "2026-09-20T13:18:12.864348+00:00",
-  "last_extraction_at": "2026-09-23T18:08:36.712761+00:00",
-  "needs_rerun": false,
-  "stale_reasons": [],
-  "edges": [],
-  "total": 55,
-  "counts": {
-    "MENTIONS_ISSUE": 22,
-    "MENTIONS_PULL_REQUEST": 21,
-    "MENTIONS_DOCUMENT": 12
-  }
-}
-```
-
-Each edge row contains:
-
-| Field | Meaning |
-| --- | --- |
-| `source_label` | Label of the source node, for example `SlackMessage`. |
-| `source_display_name` | Display/name property of the source node. |
-| `relationship` | One of the three `MENTIONS_*` types. |
-| `matched_text` | Identifier text found in the source property. |
-| `source_property` | Property that contained the match. |
-| `target_display_name` | Display/name of the target entity. |
-| `extracted_at` | Timestamp from the run that created the edge. |
-
-### `POST /api/references/extract`
-
-Runs the extraction pass and returns the same state plus run metadata:
-
-| Field | Meaning |
-| --- | --- |
-| `extracted_at` | Timestamp of this run. |
-| `deleted` | Number of old extractor-owned relationships removed. |
-| `total` | Number of new edges collected/written. |
-| `counts` | Per relationship type counts. |
-| `scanned_nodes` | Number of graph nodes scanned. |
-| `lookups` | Number of target entities available by kind. |
-| `edges` | Result rows for display. |
-
-Errors return `{"error": "..."}` with status `500`.
-
-## Frontend UI
-
-The UI lives in `frontend/src/main.tsx`.
-
-Component hierarchy:
-
-- `BuildGraphLayersPanel`
-  - tab `Reference extraction`
-  - renders `ReferenceExtractionPanel`
-
-The middle program area has three inner tabs:
-
-1. `Reference extraction`
-2. `Knowledge layer`
-3. `Embeddings`
-
-The reference tab provides:
-
-| UI element | Source field / behavior |
-| --- | --- |
-| `Extract references` button | Calls `POST /api/references/extract`. |
-| `Extracting...` button state | Shown while the POST is running. |
-| Last extraction timestamp | `state.last_extraction_at`, formatted by `formatTimestamp`. |
-| Last import timestamp | `state.last_import_at`, formatted by `formatTimestamp`. |
-| Stale warning | Shown when `state.needs_rerun` is true, with each `state.stale_reasons` entry listed on its own line underneath. |
-| Description | `Finds issue keys, PR numbers and document IDs in source text and links each mention to the existing node.` (`reference-description`), below the button and status row. |
-| Success message | `Done. X edges created.` after a successful run. |
-| Counts row | Preceded by the heading `Relationships created:` (`reference-description reference-counts-heading`). Shows `Issue`, `Pull request`, `Document`, and `Total`, counted from the same edge list as the results table, so every relationship this layer creates is included. |
-| Results table | Heading `Extracted references (relationships: MENTIONS_ISSUE, MENTIONS_PULL_REQUEST, MENTIONS_DOCUMENT)`. Shows all `state.edges`. |
-
-Relationship labels in the count row:
-
-```ts
-const relationshipLabels = {
-  MENTIONS_ISSUE: "Issue",
-  MENTIONS_PULL_REQUEST: "Pull request",
-  MENTIONS_DOCUMENT: "Document",
-};
-```
-
-Results table columns:
-
-| Column | Edge field |
-| --- | --- |
-| Source type (Label) | `source_label` |
-| Source (node name) | `source_display_name` |
-| Field (property in source) | `source_property` |
-| Matched (text in source) | `matched_text` |
-| Target (node name) | `target_display_name` |
-| Relationship (type) | `relationship` |
-
-If no edges exist, the panel shows:
-
-```text
-No references yet. Press the button to run the pass.
-```
-
-## Graph Visualization Filter
-
-The graph API and frontend use the filter name `References` for this layer.
-
-`backend/app.py` maps it to:
-
-```python
-"References": [
-    "MENTIONS_ISSUE",
-    "MENTIONS_PULL_REQUEST",
-    "MENTIONS_DOCUMENT",
-]
-```
-
-Selecting `References` in the graph source filters returns only nodes connected by these relationship types and only those relationships.
-
-## Important Boundaries
-
-- This layer reads and writes Neo4j only.
-- It does not modify PostgreSQL.
-- It does not create `Issue`, `Document`, `PullRequest`, or retrieval-unit nodes.
-- It does not call OpenAI or any model.
-- It does not infer semantics such as "implements", "causes", "blocks", or "depends on".
-- It only says: this source node explicitly mentions this existing target entity.
-- Causal and semantic interpretation belongs to the Knowledge layer.
+- Reads and writes Neo4j only; never PostgreSQL; no model.
+- Creates relationships only; deletes only its own (`extracted_by`).
+- Says only "this text names that entity". Meaning (implements, causes, blocks) is the Knowledge layer's job.

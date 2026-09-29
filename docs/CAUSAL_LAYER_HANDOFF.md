@@ -1,60 +1,86 @@
-# Causal Layer Handoff
+# Layer 4: Root Cause & Impact Layer
 
-This document describes the Causal layer: the fourth middle-panel graph-building step that extends the causal picture around the Knowledge layer's `Topic`/`Event` graph with root causes, code contributions, affected components, and cross-topic causal links.
+The fourth graph-building step (code, API and graph filter use the name `causal`; the UI says "Root cause & impact").
+Around each topic's events it adds why things happened (`RootCause`), which code changes contributed to which events
+(`CONTRIBUTED_TO`), which components each event affected (`AFFECTED_COMPONENT`), and causal links between events of
+different topics (`CROSS_TOPIC_CAUSED`). It never creates, changes or deletes the Knowledge layer's `CAUSED` links.
 
-The layer is implemented in `backend/causal_layer.py`, exposed by `backend/app.py`, and displayed in `CausalLayerPanel` inside `frontend/src/main.tsx`.
+**Verified on 2026-09-29** against `backend/causal_layer.py`, `backend/app.py`, `frontend/src/main.tsx` and the live
+graph.
 
-## Purpose
+Code: `backend/causal_layer.py`. UI: `CausalLayerPanel`, tab `Root cause & impact layer` (fourth of seven).
 
-The Knowledge layer already creates `(:Event)-[:CAUSED]->(:Event)` links within one topic. This layer never creates, changes, or deletes those relationships. It adds four things the Knowledge layer does not model:
-
-- **Root causes** — the underlying reason (a requirement gap, a design decision, an implementation gap, a missing test, a process problem) behind one or more events, as `RootCause` nodes.
-- **Code contributions** — which `CodeChange` contributed to which `Event` (`CONTRIBUTED_TO`).
-- **Affected components** — which `Component` an `Event` concerns or impacts (`AFFECTED_COMPONENT`).
-- **Cross-topic causal links** — a causal link between an event in this topic and an event in a different topic (`CROSS_TOPIC_CAUSED`), where the current dataset's single topic means this is currently always empty (see below).
-
-## Current Local State
-
-From `/api/causal`:
-
-| Field | Current value |
-| --- | --- |
-| Root causes | 3 |
-| Code contributions | 5 |
-| Affected components | 10 |
-| Cross-topic links | 0 |
-| Within-topic links (`CAUSED`, read-only) | 6 |
-| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
-| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
-| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
-| `needs_rerun` | `false` |
-| `stale_reasons` | `[]` |
-
-0 cross-topic links is correct: the local dataset has exactly one `Topic`, so there is no second topic to link into.
-
-Current root causes:
-
-| Name | Type | Components |
-| --- | --- | --- |
-| Fixed-expiry design did not meet the administrator session policy | design_decision | Session lifecycle policy |
-| Known mobile endpoint difference was not followed up | process | Mobile session refresh endpoint |
-| Web-only refresh implementation left the mobile fixed-expiry path unchanged | implementation_gap | Session lifecycle policy, Web session refresh endpoint, Mobile session refresh endpoint |
-
-(Root cause names, component names, and exact counts vary between rebuilds since both the Architecture and Causal layers are LLM-derived and do not propose identical output every run.)
-
-## Model and Configuration
+## 1. Configuration
 
 | Constant | Value |
 | --- | --- |
-| `OPENAI_MODEL` | `gpt-5.6-terra` |
-| `OPENAI_REASONING_EFFORT` | `medium` |
+| `OPENAI_MODEL` | `gpt-5.6-terra`, effort `medium`, structured output; one call per `Topic` |
 | `CAUSAL_VERSION` | `causal-layer-v1` |
 | `CANDIDATE_WINDOW_DAYS` | 30 |
-| `MAX_ROOT_CAUSES` / `MAX_CODE_CONTRIBUTIONS` / `MAX_AFFECTED_COMPONENTS` / `MAX_CROSS_TOPIC_LINKS` | 10 / 20 / 20 / 10 (per topic) |
+| `MAX_CANDIDATE_EVENTS` | 30 (events of other topics offered per topic) |
+| `MAX_ROOT_CAUSES` / `MAX_CODE_CONTRIBUTIONS` / `MAX_AFFECTED_COMPONENTS` / `MAX_CROSS_TOPIC_LINKS` | 10 / 20 / 20 / 10 per topic |
+| `TRUNCATE_LENGTH` | 4000 characters per text |
 
-One model call per `Topic`. If `OPENAI_API_KEY` is missing, `/api/causal/build` returns `503`.
+Prerequisites: `last_layer_build_at` and `last_architecture_build_at` (else 409 `Run Knowledge layer and Architecture
+layer first.`). Missing `OPENAI_API_KEY`: 503.
 
-## Graph Model
+## 2. Bundle per topic
+
+`assemble_causal_bundle`:
+
+| Part | Content | Identifier |
+| --- | --- | --- |
+| Topic | slug, name, type, summary | |
+| Events | every event of the topic, by `occurred_at` | `event:<topic_slug>/<event_slug>` |
+| Existing causal links | the topic's `CAUSED` links (read-only context, not to be re-proposed) | |
+| Evidence | every node an event of the topic cites (`EVIDENCED_BY`), with its text | the shared identifiers (`docs/PIPELINE_AND_LINKS_HANDOFF.md`, section 8) |
+| Code changes | every `CodeChange` of every `PullRequest` in the topic's `DERIVED_FROM` set | `<display_name> v<version_number>` |
+| Components | every `Component` in the repositories of those code changes, with their files | `component:<repository>/<slug>` |
+| Candidate events | up to 30 events of **other** topics whose `occurred_at` lies within 30 days of any event of this topic, closest first | `event:<topic_slug>/<event_slug>` |
+
+Valid evidence = the evidence identifiers plus the code change identifiers. Components and events are referenced by
+their ids but are not evidence.
+
+So a component is only in reach when the topic's issue is linked (through the reference layer) to a PR that changed
+files of that component's repository. Cross-topic candidates exist only when there is a second topic with events
+close in time.
+
+## 3. Output schema
+
+```text
+CausalExtractionOut
+  root_causes[]:         slug, name,
+                         cause_type (requirement_gap|design_decision|implementation_gap|missing_test|process|external|other),
+                         summary, explains_event_ids[], component_ids[], explanation, evidence[]
+  code_contributions[]:  code_change_id, event_id,
+                         contribution_type (introduced|resolved|partially_resolved|related), explanation, evidence[]
+  affected_components[]: event_id, component_id, explanation, evidence[]
+  cross_topic_links[]:   cause_event_id, effect_event_id, explanation, evidence[]
+```
+
+The instructions define a root cause as the underlying reason for one or more events (not the event itself) that
+explains a problem, a delay, a defect, an incident or a change of plan, never a routine step that went as planned. A
+cross-topic link is allowed only when one event directly caused the other (belonging to the same plan, release or
+decision is not enough), the cause must not happen after the effect, and a pair is proposed at most once, in one
+direction. The instructions also require evidence identifiers copied exactly and forbid general knowledge. The two
+sharper rules were added on 2026-09-29, after a build on the Kvitta data produced root causes for routine onboarding
+steps and a thin link from a requirement to a completed onboarding task.
+
+## 4. Validation (per topic, then across the run)
+
+- **Root causes:** keep only `explains_event_ids` that are events of this topic and `component_ids` in the bundle;
+  drop the root cause if no explained event or no evidence remains; at most 10.
+- **Code contributions:** drop unless the code change and the event (of this topic) are in the bundle and evidence
+  remains; dedupe on `(code change, event)`; at most 20.
+- **Affected components:** drop unless the event (this topic) and component are in the bundle and evidence remains;
+  dedupe on `(event, component)`; at most 20.
+- **Cross-topic links:** exactly one end must be an event of this topic and the other a candidate; drop if the cause
+  is later than the effect or no evidence remains; at most 10 per topic; then deduplicated across the whole run on the
+  **pair** of events, whichever direction (`dedupe_cross_topic_links`; the first proposal is kept). Before 2026-09-29
+  only an identical `(cause, effect)` was removed, so two topics could produce A caused B and B caused A for the same
+  pair.
+
+## 5. Graph model
 
 ```cypher
 (:Event)-[:HAS_ROOT_CAUSE {explanation, evidence}]->(:RootCause)
@@ -65,113 +91,103 @@ One model call per `Topic`. If `OPENAI_API_KEY` is missing, `/api/causal/build` 
 (:Event)-[:CROSS_TOPIC_CAUSED {explanation, evidence}]->(:Event)
 ```
 
-`RootCause` is unique by `slug`. If two topics propose the same slug, one node is kept (first name/summary/cause_type, via `MERGE ... ON CREATE SET`) and relationships from both topics accumulate onto it.
+`RootCause` key `slug` (constraint `root_cause_slug`): `name`, `display_name`, `cause_type`, `summary`, `model`. When
+two topics propose the same slug, one node is kept (the first one's properties, `MERGE ... ON CREATE SET`) and both
+topics' relationships attach to it. The `explanation` of a root cause is written on each `HAS_ROOT_CAUSE`. All nodes
+and relationships: `derived`, `generated_by = causal-layer-v1`, `generated_at`. `CROSS_TOPIC_CAUSED` is a separate
+type from `CAUSED`.
 
-`CROSS_TOPIC_CAUSED` is a distinct type from `CAUSED`; this layer never writes `CAUSED`.
+## 6. Build behaviour
 
-## Evidence Identifiers
+1. Check prerequisites and the key; ensure the constraint.
+2. For each topic: assemble, call, validate. **A failed call leaves the existing layer untouched.**
+3. After all calls: delete this layer's relationships and nodes (`generated_by = causal-layer-v1`), then write root
+   causes (with `HAS_ROOT_CAUSE`, `ROOT_CAUSE_IN_COMPONENT`, `ROOT_CAUSE_EVIDENCED_BY`), contributions, affected
+   components, then the deduplicated cross-topic links.
+4. Set `PipelineState.last_causal_build_at`.
 
-Source-node identifiers follow the Knowledge layer's rules, with one change: `CodeChange` is identified as `<display_name> v<version_number>` (not just `display_name`), because the same file can appear in several PR versions.
+## 7. Current state (2026-09-29)
 
-| Label | Identifier |
+Kvitta data, built after the two sharper prompt rules and the pair dedupe were added. 15 root causes (22
+`HAS_ROOT_CAUSE`, 24 `ROOT_CAUSE_IN_COMPONENT`, 50 `ROOT_CAUSE_EVIDENCED_BY`), 31 code contributions, 53 affected
+components, 6 cross-topic links, 27 within-topic `CAUSED` read from layer 2 (unchanged); 15 nodes and 186
+relationships; not stale. Every rule check passes: all evidence inside the topic, no cross-topic link with the cause
+after the effect or outside the 30-day window, and no pair of events linked in both directions.
+
+| Topic | Root cause | Type | In components |
+| --- | --- | --- | --- |
+| duplicate payout | Retry design accepted without duplicate-submission handling | design_decision | Offline expense sync endpoint, Offline expense queue, Retry delivery |
+| duplicate payout | Payout export lacked a duplicate-expense check | implementation_gap | Payout export |
+| offline capture | Duplicate handling was deliberately deferred despite timeout-retry risk | design_decision | Offline expense sync endpoint, Payout export, Retry delivery |
+| Fortnox | Fortnox OAuth flow change was not adopted by the client | external | Fortnox authentication, Fortnox |
+| Fortnox | Fortnox developer-changelog monitoring gap | process | Fortnox authentication, Fortnox |
+| Fortnox | Automatic token refresh was missing from the hotfix | implementation_gap | Fortnox authentication, Fortnox client |
+| receipt reader | VAT requirement initially covered only 25% | requirement_gap | Receipt reader, Receipt VAT rules |
+| receipt reader | Receipt reader implemented VAT as a 25% calculation | implementation_gap | Receipt reader, Receipt VAT rules |
+| receipt reader | Multi-rate VAT validation used the wrong comparison scope | implementation_gap | Receipt VAT rules |
+| image retention | Receipt image storage lacked retention and role-based access controls | implementation_gap | Receipt image storage and retention |
+| approval limits | Initial money representation and boundary-test coverage gap | implementation_gap | Manager approval limits, Approval routing rules |
+| onboarding | Approval button label did not describe its page-scoped behavior | implementation_gap | Approval List |
+| onboarding | Approval list omitted the receipt date needed by managers | implementation_gap | Approval List |
+| upload spinner | Late upload callback omitted spinner-state clearing | implementation_gap | Expense upload |
+| Visma | Visma export was not ready for the 1.0 release | implementation_gap | none |
+
+Key code contributions: `kvitta-mobile#6 src/offline/retry.ts v1` **introduced** "Duplicate payout of a train-ticket
+expense reported" and "Offline retry contributed to a duplicate payout incident"; `kvitta-api#60 app/payouts/export.py
+v1` **resolved** "Idempotent payout-export safeguard deployed"; `kvitta-api#55` and `kvitta-api#58` resolved the
+Fortnox events.
+
+Cross-topic links (cause -> effect):
+
+| Cause | Effect |
 | --- | --- |
-| `Issue` | `issue_key` |
-| `IssueVersion` | `display_name` |
-| `IssueComment` | `comment_id` |
-| `MailMessage` | `message_id` |
-| `SlackMessage` | `message_id + " v" + version_number` |
-| `TeamsMeeting` | `meeting_id` |
-| `TeamsTranscriptSegment` | `segment_id` |
-| `Document` | `document_id` |
-| `DocumentVersion` | `display_name` |
-| `PullRequest` | `display_name` |
-| `PullRequestReview` | `source_id` |
-| `CodeChange` | `display_name + " v" + version_number` |
+| Offline queue and server sync support delivered (offline, 02-20) | Duplicate payout of a train-ticket expense reported (duplicate, 03-09) |
+| Offline queue with retry was accepted despite identified duplicate risk (duplicate, 02-12) | Offline retry contributed to a duplicate payout incident (offline, 03-09) |
+| Permanent Fortnox token-refresh fix merged (Fortnox, 03-10) | Go approved for Kvitta 1.0 (release, 03-20) |
+| Idempotent payout-export safeguard deployed (duplicate, 03-18) | Go approved for Kvitta 1.0 (release, 03-20) |
+| Mobile duplicate-submission protection deferred to version 1.1 (duplicate, 03-20) | Go approved for Kvitta 1.0 (release, 03-20) |
+| Kvitta 1.0 scope and release blockers set (release, 03-10) | Visma export moved from 1.0 to 1.1 (Visma, 03-10) |
 
-Derived-node references (not evidence, must be copied exactly from the bundle): `Event` as `event:<topic_slug>/<event_slug>`, `Component` as `component:<repository>/<component_slug>`.
+Wording varies between rebuilds.
 
-## Bundle Assembly (per topic)
+## 8. What the data needs for this layer
 
-Topic basics; all events of the topic sorted by `occurred_at`; existing `CAUSED` links between those events (read-only context); all source nodes reached via `EVIDENCED_BY` from those events; all `CodeChange` nodes whose parent PR is in the topic's `DERIVED_FROM` set; all `Component` nodes in the repositories of those code changes; up to 30 candidate events from other topics within 30 days of any event in this topic, closest in time first.
+- **Topics with PRs linked to their issues** (the issue names the PR, or the PR names the issue), so code changes and
+  components are in reach.
+- **Stories with an underlying reason**, stated or clearly implied in the text: a requirement that missed something, a
+  design decision later reversed, an implementation that covered only part of the system, a missing test, a warning
+  nobody acted on, an external dependency.
+- **Two or more topics whose events lie within 30 days of each other, where one plausibly caused the other** (an
+  outage caused by a config change in another project; a billing incident that delayed session work), with text that
+  says so, for `CROSS_TOPIC_CAUSED`. The Kvitta data has ten topics and produces six such links (section 7).
+- Code changes whose summaries say what they introduced or fixed.
 
-## Validation
+## 9. API
 
-Applied per topic, then a final cross-run pass:
+`GET /api/causal`: `last_layer_build_at`, `last_architecture_build_at`, `last_causal_build_at`, `needs_rerun`,
+`stale_reasons`, `counts` (`root_causes`, `code_contributions`, `affected_components`, `cross_topic_links`,
+`within_topic_links`), `root_causes`, `root_cause_links` (one row per `HAS_ROOT_CAUSE`), `code_contributions`,
+`affected_components`, `cross_topic_links`, `within_topic_links` (the Knowledge layer's `CAUSED`, read-only),
+`relationships`.
 
-- Root causes: keep only `explains_event_ids` that are events of this topic and `component_ids` that are in the bundle; drop if no remaining `explains_event_ids` or evidence; keep at most 10.
-- Code contributions: drop unless `code_change_id`/`event_id` are in the bundle; dedupe on `(code_change_id, event_id)`; keep at most 20.
-- Affected components: drop unless `event_id`/`component_id` are in the bundle; dedupe on `(event_id, component_id)`; keep at most 20.
-- Cross-topic links: require exactly one end in this topic and the other in the candidate list; drop if the cause's `occurred_at` is later than the effect's; keep at most 10 per topic, then **dedupe on `(cause_event_id, effect_event_id)` across the whole run** (first kept).
+`POST /api/causal/build`: the same plus `built_at`, `deleted_relationships`, `deleted_nodes`, `calls`, `model`,
+`discarded_evidence`, `token_usage`. Errors 409, 503, 500.
 
-## Constraint
+## 10. UI
 
-```cypher
-CREATE CONSTRAINT root_cause_slug IF NOT EXISTS FOR (n:RootCause) REQUIRE n.slug IS UNIQUE
-```
+Tab `Root cause & impact layer`. Button `Build root cause & impact layer` / `Building root cause & impact layer...`.
+Description: `Finds the root causes behind events, the code changes that contributed to them, and the components they
+affected.` Counts under `Nodes and relationships:`; the within-topic count separately under `Read from Knowledge
+layer:`. Tables: `Root causes (node)`, `Relationships (all relationship types)`, `Root cause links (relationship:
+HAS_ROOT_CAUSE)`, `Code contributions (relationship: CONTRIBUTED_TO)`, `Affected components (relationship:
+AFFECTED_COMPONENT)`, `Cross-topic links (relationship: CROSS_TOPIC_CAUSED)`, `Within-topic links (relationship:
+CAUSED, from Knowledge layer)`.
 
-## Build/Rebuild Behavior
+Graph filter `Causal` (button `Causes`): `CAUSED`, `CROSS_TOPIC_CAUSED`, `HAS_ROOT_CAUSE`, `ROOT_CAUSE_IN_COMPONENT`,
+`ROOT_CAUSE_EVIDENCED_BY`, `CONTRIBUTED_TO`, `AFFECTED_COMPONENT`.
 
-1. Require `last_layer_build_at` (Knowledge) and `last_architecture_build_at` to both exist (else `409 {"error": "Run Knowledge layer and Architecture layer first."}`).
-2. Require `OPENAI_API_KEY`.
-3. For each topic, assemble a bundle and call the model once. A failed call leaves the existing layer untouched.
-4. Only after every call succeeds: delete the previous layer by `generated_by = "causal-layer-v1"`, then write root causes, code contributions, affected components, and the globally deduped cross-topic links.
-5. Update `PipelineState.last_causal_build_at`.
+## 11. Boundaries
 
-## Pipeline State
-
-| Property | Written by |
-| --- | --- |
-| `last_layer_build_at` | Knowledge layer |
-| `last_architecture_build_at` | Architecture layer |
-| `last_causal_build_at` | Causal layer (this layer's own timestamp) |
-
-Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `knowledge` and `architecture`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively.
-
-## Backend API
-
-`GET /api/causal` returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `root_causes`, `code_contributions`, `affected_components`, `cross_topic_links`, `within_topic_links` tables (the last read directly from the Knowledge layer's `CAUSED` relationships, read-only), plus `root_cause_links` (one row per `HAS_ROOT_CAUSE` relationship: `event_name`, `topic_name`, `root_cause_name`, `explanation`, `evidence`) and `relationships`: one row per relationship type this layer created (`generated_by = "causal-layer-v1"`) with `relationship_type`, `from_labels`, `to_labels`, `count`, sorted by type. The endpoint labels are read from the graph, not hard-coded; a type with no relationships (currently `CROSS_TOPIC_CAUSED`) does not appear.
-
-`POST /api/causal/build` returns the same payload plus `built_at`, `deleted_relationships`, `deleted_nodes`, `calls`, `model`, `discarded_evidence`, `token_usage`.
-
-Errors: `409` if Knowledge or Architecture has not run; `503` if `OPENAI_API_KEY` is missing; `500` otherwise.
-
-## Frontend UI
-
-Tab `Root cause & impact layer` inside `BuildGraphLayersPanel`, rendered by `CausalLayerPanel`, fourth of seven inner tabs. Button text `Build root cause & impact layer` / `Building root cause & impact layer...`. "Root cause & impact layer" is the display name only; code, API routes (`/api/causal`), `CAUSAL_VERSION`, `last_causal_build_at`, and the graph filter key `Causal` keep the `causal` name. Below the button and status row, a description line (`reference-description`) reads `Finds the root causes behind events, the code changes that contributed to them, and the components they affected.` The counts row is preceded by the heading `Nodes and relationships:` (`reference-description reference-counts-heading`) and lists only what this layer creates: root causes, code contributions, affected components, cross-topic links. The within-topic link count is shown separately below it under the heading `Read from Knowledge layer:`, since `CAUSED` is created by the Knowledge layer.
-
-Tables, in order, each with a lighter `knowledge-section-kind` suffix in its heading and on each column. Long text columns use `reference-cell-wrap` (fixed 280px, wrapping).
-
-| Table | Heading suffix | Columns |
-| --- | --- | --- |
-| `Root causes` | `(node)` | Name (property), Type (property), Summary (property), Explains events (via HAS_ROOT_CAUSE), Components (via ROOT_CAUSE_IN_COMPONENT), Evidence (via ROOT_CAUSE_EVIDENCED_BY) |
-| `Relationships` | `(all relationship types)` | Relationship, From → To, Count |
-| `Root cause links` | `(relationship: HAS_ROOT_CAUSE)` | Event (start node), Topic (via EVENT_OF_TOPIC), Root cause (end node), Explanation (property), Evidence (property) |
-| `Code contributions` | `(relationship: CONTRIBUTED_TO)` | Code change (start node), File (start node property), Event (end node), Topic (via EVENT_OF_TOPIC), Contribution (property), Explanation (property), Evidence (property) |
-| `Affected components` | `(relationship: AFFECTED_COMPONENT)` | Event (start node), Topic (via EVENT_OF_TOPIC), Component (end node), Explanation (property), Evidence (property) |
-| `Cross-topic links` | `(relationship: CROSS_TOPIC_CAUSED)` | Cause (start node), Cause topic (via EVENT_OF_TOPIC), Effect (end node), Effect topic (via EVENT_OF_TOPIC), Explanation (property), Evidence (property) |
-| `Within-topic links` | `(relationship: CAUSED, from Knowledge layer)` | Topic (via EVENT_OF_TOPIC), Cause (start node), Effect (end node), Explanation (property); two-line caption `Created by the Knowledge layer. Rebuilding this layer does not change these links.` / `Sent to the model as context when finding the root causes above.` |
-
-## Graph Visualization Filter
-
-The filter button is labelled `Causes` in the graph panel; the key sent to `/api/graph` is still `Causal`.
-
-```python
-"Causal": [
-    "CAUSED",
-    "CROSS_TOPIC_CAUSED",
-    "HAS_ROOT_CAUSE",
-    "ROOT_CAUSE_IN_COMPONENT",
-    "ROOT_CAUSE_EVIDENCED_BY",
-    "CONTRIBUTED_TO",
-    "AFFECTED_COMPONENT",
-]
-```
-
-`CAUSED` is intentionally included here as well as in `Knowledge`, so the full causal picture is visible under either filter. Node color added: `RootCause` (`#f43f5e`).
-
-## Important Boundaries
-
-- Reads and writes Neo4j only; never touches PostgreSQL.
-- Never creates, modifies, or deletes `CAUSED` relationships.
-- Deletes only by `generated_by = "causal-layer-v1"`.
-- Depends on both the Knowledge layer (events, `CAUSED`, `EVIDENCED_BY`) and the Architecture layer (`Component`, `DEPENDS_ON` repositories) for its evidence bundles.
+- Reads and writes Neo4j only; never PostgreSQL.
+- Never writes `CAUSED`; deletes only by `generated_by = causal-layer-v1`.
+- Depends on layer 2 (events, `CAUSED`, `EVIDENCED_BY`, `DERIVED_FROM`) and layer 3 (components).

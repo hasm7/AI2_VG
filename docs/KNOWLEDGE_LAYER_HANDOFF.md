@@ -1,529 +1,247 @@
-# Knowledge Layer Handoff
+# Layer 2: Knowledge Layer (Topics and Events)
 
-This document describes the Knowledge layer: the second middle-panel graph-building step that creates `Topic` and `Event` nodes and relationships that tie evidence across the whole graph into a causal story.
+The second graph-building step. For each issue it assembles every connected piece of evidence into one bundle, asks a
+model what the issue is about (a `Topic`), what happened (`Event`s), who took part and which events caused which, and
+writes only what survives deterministic validation. The model proposes; the code decides what is written.
 
-The layer is implemented in `backend/topic_event_extraction.py`, exposed by `backend/app.py`, and displayed in `KnowledgeLayerPanel` inside `frontend/src/main.tsx`.
+**Verified on 2026-09-29** against `backend/topic_event_extraction.py`, `backend/app.py`, `frontend/src/main.tsx` and
+the live graph.
 
-## Purpose
+Code: `backend/topic_event_extraction.py`. API: `backend/app.py`. UI: `KnowledgeLayerPanel`, tab `Knowledge layer`
+(second of seven).
 
-The reference extraction layer creates deterministic `MENTIONS_*` edges only when text explicitly names an entity such as `AUTH-17`, `backend-api#42`, or `REQ-AUTH-SESSION`.
+## 1. Why it exists
 
-The Knowledge layer sits above that. It assembles issue-centered evidence bundles from the graph, calls an LLM to propose topics, events, actors, evidence, and causal links, then runs the result through deterministic validation before writing anything to Neo4j.
+The reference layer only sees identifiers. The most important sentences often name none: in the current data Nina's
+question in the offline design meeting (`seg-009`, "what happens when a request times out after it has already
+arrived") names no issue, and neither does her warning in `review-008`. This layer reads whole conversations around an
+issue (the meeting joins because `seg-010` names `KV-2`; the review joins because `kvitta-mobile#6` names `KV-2`) and
+records the story as events with evidence, so questions like "why was the same expense paid twice" and "did anyone
+warn about it" have an answer in the graph.
 
-It exists because important facts can be expressed without naming an identifier. For example, a Teams transcript segment can explain why work was blocked without literally saying `AUTH-17`.
-
-## Current Local State
-
-From `/api/knowledge`:
-
-| Field | Current value |
-| --- | --- |
-| Topics | 1 |
-| Events | 10 |
-| Causal links | 6 |
-| `last_extraction_at` | `2026-09-23T18:08:36.712761+00:00` |
-| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
-| `needs_layer_rerun` | `false` |
-| `stale_reasons` | `[]` |
-
-Current topic:
-
-| Slug | Name | Type | Event count |
-| --- | --- | --- | ---: |
-| `administrator-session-lifetime-policy` | Administrator session lifetime policy | defect | 10 |
-
-Current causal-link count:
-
-- 6 `CAUSED` relationships between `Event` nodes.
-
-(Event/topic wording and the exact event count vary slightly between rebuilds, since the model does not propose exactly the same events every run; this snapshot is from the full pipeline rebuild performed for the staleness follow-up work order.)
-
-## Model and Configuration
-
-The model call is configured in `backend/topic_event_extraction.py`.
+## 2. Configuration
 
 | Constant | Value |
 | --- | --- |
-| `OPENAI_MODEL` | `gpt-5.6-terra` |
+| `OPENAI_MODEL` | `gpt-5.6-terra` (OpenAI Responses API, structured output) |
 | `OPENAI_REASONING_EFFORT` | `medium` |
-| `EXTRACTION_VERSION` | `topic-event-extraction-v1` |
-| `REFERENCE_EXTRACTOR_NAME` | `reference-extraction-v1` |
-| `MAX_EVENTS_PER_TOPIC` | 15 |
-| `MAX_CAUSAL_LINKS_PER_TOPIC` | 15 |
+| `EXTRACTION_VERSION` | `topic-event-extraction-v1` (the `generated_by` stamp) |
+| `REFERENCE_EXTRACTOR_NAME` | `reference-extraction-v1` (only edges with this `extracted_by` are followed) |
+| `MAX_EVENTS_PER_TOPIC` | 15 (per issue call; more are counted as overflow and dropped) |
+| `MAX_CAUSAL_LINKS_PER_TOPIC` | 15 (same) |
 
-The OpenAI Responses API is used with structured output parsing. The code expects a Pydantic `TopicEventExtractionOut` object, not free text parsed as JSON.
+`OPENAI_API_KEY` is required. Without it the build fails; the route answers **500** with the message (it does not map
+the error to 503 as the other LLM layers do).
 
-If `OPENAI_API_KEY` is missing, the backend returns a clear `503` error for `/api/knowledge/build`.
+## 3. Topic candidates
 
-## Neo4j Graph Model
+One candidate per `Issue` with an `issue_key`, processed in `issue_key` **text** order (`KV-1`, `KV-10`, `KV-11`,
+`KV-12`, `KV-2`, ... `KV-9`). One model call per issue. Several issues can share one topic (section 6).
 
-The layer creates two node labels:
+## 4. Evidence bundle (per issue)
 
-```cypher
-(:Topic)
-(:Event)
-```
+`assemble_bundle(tx, issue_key)`:
 
-It creates these relationship types:
+1. The `Issue`, all its `IssueVersion` nodes and all its `IssueComment` nodes ("own" nodes).
+2. Every node linked to an own node by `MENTIONS_ISSUE`, `MENTIONS_PULL_REQUEST` or `MENTIONS_DOCUMENT`
+   (`extracted_by = reference-extraction-v1`), **in either direction**: nodes that name the issue, and PRs, documents
+   and other issues that the issue, its versions or comments name. One hop only.
+3. For each reached node:
+   - `PullRequest`: add all its `PullRequestReview` and `CodeChange` nodes.
+   - `Document`: add all its `DocumentVersion` nodes.
+   - `TeamsTranscriptSegment`: add its `TeamsMeeting` and **every** segment of that meeting, in `sequence_number`
+     order (a meeting is one conversation; half of it invites the model to invent the other half).
+4. Sort all items by `occurred_at` (text order), undated items last, then by identifier.
 
-```cypher
-(:Issue)-[:ABOUT_TOPIC]->(:Topic)
-(:Topic)-[:DERIVED_FROM]->(:SourceNode)
-(:Event)-[:EVENT_OF_TOPIC]->(:Topic)
-(:Event)-[:EVIDENCED_BY]->(:SourceNode)
-(:Person)-[:ACTED_IN_EVENT]->(:Event)
-(:Event)-[:CAUSED]->(:Event)
-```
+**What reaches a bundle, and what does not.** A source reaches the issue's bundle if it names the issue key, or is
+named by the issue, its versions or comments, or is a review, code change, document version or meeting segment of
+something that did. A Slack message that names only `kvitta-api#58` (not the issue) is **not** in the bundle, even if
+the issue names that PR: the expansion is one hop from the issue's own nodes. Mails reach a bundle only by naming the
+issue key. Other issues reach it as a bare `Issue` node (without their versions or comments).
 
-Every node and relationship created by this layer is stamped with:
+Each bundle item carries:
 
-| Property | Value |
-| --- | --- |
-| `derived` | `true` |
-| `generated_by` | `topic-event-extraction-v1` |
-| `generated_at` | Run timestamp |
+| Label | Identifier | `occurred_at` | `author` | Text given to the model |
+| --- | --- | --- | --- | --- |
+| `Issue` | `issue_key` | `created_at` | `creator_name` | title + description |
+| `IssueVersion` | `display_name` (`KV-7 v3`) | `version_at` | `changed_by_name` | title + description + acceptance criteria |
+| `IssueComment` | `comment_id` | `created_at` | `author_name` | body |
+| `MailMessage` | `message_id` | `sent_at` | `sender_name` | subject + body |
+| `SlackMessage` | `message_id v<version>` | `sent_at` | `author_name` | body |
+| `TeamsMeeting` | `meeting_id` | `started_at` | none | title |
+| `TeamsTranscriptSegment` | `segment_id` | the meeting's `started_at` | `speaker_name` | body |
+| `Document` | `document_id` | `created_at` | `author_name` | title + body |
+| `DocumentVersion` | `display_name` (`doc-001 v2`) | `version_at` | `author_name` | title + body + change summary |
+| `PullRequest` | `display_name` (`kvitta-api#58`) | `created_at` | `author_name` | title + description |
+| `PullRequestReview` | `source_id` | `created_at` | `author_name` | body |
+| `CodeChange` | `display_name` (`kvitta-api#58 app/integrations/fortnox/client.py`) | none | none | `file_path (change_type)` + before + after summary |
 
-`Topic` and `Event` nodes also store `model`.
+Texts are not truncated here. Identifiers that collide (two items with the same identifier) keep only the first item;
+`CodeChange` versions of the same file share one identifier, so only one of them is in the bundle.
 
-### `Topic` Node
+## 5. Model call and output schema
 
-Unique key:
-
-```cypher
-(:Topic {slug})
-```
-
-Properties:
-
-| Property | Meaning |
-| --- | --- |
-| `slug` | Stable topic slug from the model/resolution layer. |
-| `name` | Human-readable topic name. |
-| `topic_type` | One of `requirement`, `defect`, `incident`, `decision`, `other`. |
-| `summary` | Short topic summary. |
-| `display_name` | Same as `name`. |
-| `derived` | Always `true`. |
-| `generated_by` | `topic-event-extraction-v1`. |
-| `model` | Model used for generation. |
-| `generated_at` | Build timestamp. |
-
-### `Event` Node
-
-Unique key:
-
-```cypher
-(:Event {topic_slug, slug})
-```
-
-Properties:
-
-| Property | Meaning |
-| --- | --- |
-| `topic_slug` | Owning topic slug. |
-| `slug` | Event slug. |
-| `name` | Human-readable event name. |
-| `event_type` | One of `created`, `decided`, `blocked`, `changed`, `resolved`, `regressed`, `other`. |
-| `occurred_at` | Timestamp copied from evidence. Must parse as a timestamp. |
-| `summary` | Short event summary. |
-| `display_name` | Same as `name`. |
-| `derived` | Always `true`. |
-| `generated_by` | `topic-event-extraction-v1`. |
-| `model` | Model used for generation. |
-| `generated_at` | Build timestamp. |
-
-### Relationship Semantics
-
-| Relationship | Meaning |
-| --- | --- |
-| `ABOUT_TOPIC` | An issue belongs to a topic. Current graph has both `AUTH-17` and `AUTH-19` pointing to the same topic. |
-| `DERIVED_FROM` | Topic was built from this evidence-bundle node. This includes all bundle nodes, not only cited evidence. |
-| `EVENT_OF_TOPIC` | Event belongs to a topic. |
-| `EVIDENCED_BY` | Event is grounded in specific source nodes cited by the model and accepted by validation. |
-| `ACTED_IN_EVENT` | A resolved `Person` acted in the event. |
-| `CAUSED` | One event caused or led to another event. |
-
-`CAUSED` relationship properties:
-
-| Property | Meaning |
-| --- | --- |
-| `explanation` | Human-readable explanation returned by the model and accepted by validation. |
-| `evidence` | Evidence identifiers supporting the causal link. |
-| `derived`, `generated_by`, `generated_at` | Standard layer metadata. |
-
-## Constraints
-
-The layer ensures these constraints:
-
-```cypher
-CREATE CONSTRAINT topic_slug IF NOT EXISTS
-FOR (t:Topic) REQUIRE t.slug IS UNIQUE
-
-CREATE CONSTRAINT event_key IF NOT EXISTS
-FOR (e:Event) REQUIRE (e.topic_slug, e.slug) IS UNIQUE
-```
-
-These constraints are present in the current local Neo4j database.
-
-## Topic Candidates
-
-One topic candidate is one `Issue`.
-
-The code reads:
-
-```cypher
-MATCH (i:Issue) WHERE i.issue_key IS NOT NULL
-RETURN i.issue_key AS key
-ORDER BY key
-```
-
-Current candidates:
-
-- `AUTH-17`
-- `AUTH-19`
-
-Each candidate produces one model call. The current built layer reports two issues under one shared topic.
-
-## Evidence Bundle Assembly
-
-For each issue key, `assemble_bundle(tx, issue_key)` builds an evidence bundle.
-
-The bundle starts with:
-
-- the `Issue`
-- all `IssueVersion` nodes
-- all `IssueComment` nodes
-
-Then it expands through deterministic reference edges:
-
-```cypher
-MENTIONS_ISSUE
-MENTIONS_PULL_REQUEST
-MENTIONS_DOCUMENT
-```
-
-Only relationships where `extracted_by = "reference-extraction-v1"` count.
-
-The expansion works in both directions:
-
-- nodes the issue/version/comment mentions
-- nodes that mention the issue/version/comment
-
-Additional sibling expansion:
-
-| If bundle includes | Then add |
-| --- | --- |
-| `PullRequest` | Its `PullRequestReview` children and `CodeChange` children. |
-| `Document` | Its `DocumentVersion` children. |
-| `TeamsTranscriptSegment` | The parent `TeamsMeeting` and every transcript segment in that meeting, ordered by `sequence_number`. |
-
-The Teams expansion is deliberate: a meeting is one conversation, and giving the model one segment without surrounding turns can create false context.
-
-Bundle items are sorted chronologically by `occurred_at`, with undated items last.
-
-## Bundle Identifiers
-
-Every item gets a stable identifier. The model must cite these exact identifiers as evidence.
-
-Examples:
-
-| Label | Identifier rule |
-| --- | --- |
-| `Issue` | `issue_key`, e.g. `AUTH-17` |
-| `IssueVersion` | `display_name`, e.g. `AUTH-17 v3` |
-| `IssueComment` | `comment_id`, e.g. `comment-002` |
-| `MailMessage` | `message_id`, e.g. `mail-003` |
-| `SlackMessage` | `message_id + " v" + version_number`, e.g. `slack-006 v2` |
-| `TeamsMeeting` | `meeting_id`, e.g. `meet-001` |
-| `TeamsTranscriptSegment` | `segment_id`, e.g. `seg-003` |
-| `Document` | `document_id`, e.g. `doc-001` |
-| `DocumentVersion` | `display_name`, e.g. `doc-001 v2` |
-| `PullRequest` | `display_name`, e.g. `backend-api#42` |
-| `PullRequestReview` | `source_id`, e.g. `review-004` |
-| `CodeChange` | `display_name`, e.g. `backend-api#42 backend/auth/session.py` |
-
-The backend keeps:
-
-- `valid_identifiers`: accepted evidence IDs
-- `node_id_by_identifier`: map back to Neo4j element IDs for writing relationships
-
-## Model Output Schema
-
-The model must return:
+Input (JSON): the issue (`issue_key`, `title`, `status`, `created_at`), `existing_topics` (slug and name of topics
+already created in this run), and `bundle_items_in_chronological_order` (identifier, label, display name, author,
+occurred_at, text). The instructions require every event to be grounded in the bundle, `occurred_at` taken from a
+timestamp in the evidence, identifiers copied exactly, few well-evidenced events, a causal link only where the text
+indicates the connection, and reuse of an existing topic when the issue belongs to it.
 
 ```text
 TopicEventExtractionOut
-  topic: TopicOut
-  events: EventOut[]
-  causal_links: CausalLinkOut[]
+  topic:        slug, name, topic_type (requirement|defect|incident|decision|other), summary, existing_topic_slug?
+  events[]:     slug, name, event_type (created|decided|blocked|changed|resolved|regressed|other),
+                occurred_at, summary, evidence[], actor_names[]
+  causal_links[]: cause_event_slug, effect_event_slug, explanation, evidence[]
 ```
 
-`TopicOut`:
+## 6. Validation (`apply_resolution`, `cause_after_effect`) and topic resolution
 
-| Field | Notes |
-| --- | --- |
-| `slug` | Proposed topic slug. |
-| `name` | Topic name. |
-| `topic_type` | `requirement`, `defect`, `incident`, `decision`, or `other`. |
-| `summary` | Topic summary. |
-| `existing_topic_slug` | Optional exact slug for a topic already resolved earlier in this run. |
+Nothing is written without passing these checks:
 
-`EventOut`:
+1. Only the first 15 events and 15 causal links are considered.
+2. Evidence identifiers not in the bundle are discarded (counted as `discarded_evidence`).
+3. An event with no remaining evidence is dropped.
+4. An event whose `occurred_at` does not parse as an ISO timestamp is dropped.
+5. `actor_names` are resolved **by name only** through the person registry (`resolve_person_key(name=...)`); an
+   unresolved name is ignored. No person is created.
+6. A causal link is dropped if either event was dropped, if cause and effect are the same, if the cause's
+   `occurred_at` is later than the effect's (`cause_after_effect`; equal times are allowed, and a date without an
+   offset is compared by wall-clock time against one with an offset), or if no evidence remains. The time rule was
+   added on 2026-09-29, after a build on the Kvitta data produced a link from a hotfix back to the outage it fixed.
 
-| Field | Notes |
-| --- | --- |
-| `slug` | Event slug unique within the topic. |
-| `name` | Event name. |
-| `event_type` | `created`, `decided`, `blocked`, `changed`, `resolved`, `regressed`, or `other`. |
-| `occurred_at` | Must come from evidence and parse as timestamp. |
-| `summary` | Event summary. |
-| `evidence` | Bundle identifiers. |
-| `actor_names` | Names to resolve to `Person` nodes. |
+Topic resolution (`resolve_topic`): `existing_topic_slug` is honoured only when it exactly matches a topic created
+earlier in this run; otherwise a proposed `slug` that already exists in this run is reused; otherwise the topic is new.
+A reused topic keeps its first name, while `topic_type` and `summary` are overwritten by the later issue's proposal.
+Events are keyed by `(topic_slug, slug)`: if two issues of the same topic propose the same event slug, the second
+overwrites the first's properties and adds its evidence.
 
-`CausalLinkOut`:
-
-| Field | Notes |
-| --- | --- |
-| `cause_event_slug` | Cause event slug. |
-| `effect_event_slug` | Effect event slug. |
-| `explanation` | Why the cause led to the effect. |
-| `evidence` | Bundle identifiers supporting the causal claim. |
-
-## Deterministic Resolution Layer
-
-Nothing from the model is written directly.
-
-Validation rules in `apply_resolution`:
-
-1. Evidence identifiers not present in the bundle are discarded.
-2. Events with no surviving evidence are dropped.
-3. Events whose `occurred_at` cannot parse as a timestamp are dropped.
-4. `actor_names` are resolved through `person_identity.build_registry(...).resolve_person_key(name=...)`.
-5. Missing actor matches are ignored; no new `Person` nodes are created.
-6. Causal links are dropped if either event was dropped.
-7. Self-causation is dropped.
-8. Causal links with no surviving evidence are dropped.
-9. Only the first 15 events and 15 causal links per topic candidate are considered.
-
-`existing_topic_slug` is honored only when it exactly matches a topic already resolved earlier in the same run. Otherwise the proposed slug is treated as a new topic unless it already exists in the current run.
-
-## Rebuild Behavior
-
-The layer is rebuildable.
-
-Run flow:
-
-1. Require `OPENAI_API_KEY`.
-2. Build the shared person identity registry from PostgreSQL.
-3. Ensure `Topic` and `Event` constraints.
-4. Delete relationships where `generated_by = "topic-event-extraction-v1"`.
-5. Delete nodes where `generated_by = "topic-event-extraction-v1"`.
-6. Load issue keys.
-7. For each issue, assemble a bundle.
-8. Call the model once for that bundle.
-9. Validate the model output.
-10. Write `Topic`, `Event`, and relationship records.
-11. Update `PipelineState.last_layer_build_at`.
-12. Return the current knowledge state plus run metadata.
-
-Deletion is by `generated_by`, not by label or relationship type. This protects imported source graph data and deterministic `MENTIONS_*` reference edges.
-
-## Pipeline State
-
-The layer uses:
+## 7. Graph model
 
 ```cypher
-(:PipelineState {id: "singleton"})
+(:Issue)-[:ABOUT_TOPIC]->(:Topic)
+(:Topic)-[:DERIVED_FROM]->(:SourceNode)         // every item of the issue's bundle
+(:Event)-[:EVENT_OF_TOPIC]->(:Topic)
+(:Event)-[:EVIDENCED_BY]->(:SourceNode)         // cited and validated evidence
+(:Person)-[:ACTED_IN_EVENT]->(:Event)
+(:Event)-[:CAUSED {explanation, evidence}]->(:Event)   // same topic
 ```
 
-Relevant fields:
+`Topic` (key `slug`): `name`, `display_name`, `topic_type`, `summary`, `model`, `derived`, `generated_by`,
+`generated_at`. `Event` (key `(topic_slug, slug)`): `name`, `display_name`, `event_type`, `occurred_at`, `summary`,
+`model`, `derived`, `generated_by`, `generated_at`. Every relationship: `derived`, `generated_by`, `generated_at`;
+`CAUSED.evidence` is the list of identifiers. Constraints `topic_slug` and `event_key`.
 
-| Property | Written by | Purpose |
-| --- | --- | --- |
-| `last_extraction_at` | Reference extraction layer | Indicates deterministic references changed. |
-| `last_layer_build_at` | Knowledge layer | Indicates `Topic`/`Event` layer was rebuilt. |
+`DERIVED_FROM` covers the whole bundle, not only cited evidence. It is what later layers use as "the sources of this
+topic": the Root cause & impact layer finds a topic's PRs through it, and the Expertise layer counts a person's
+activity on a topic through it.
 
-Staleness (`needs_layer_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's only upstream stage, per `UPSTREAM_BY_STAGE`, is `references`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively from `import`.
+## 8. Build behaviour
 
-The current local state has `needs_layer_rerun: false`.
+1. Require `OPENAI_API_KEY`; build the person registry from PostgreSQL (read-only).
+2. Ensure the constraints.
+3. **Delete first**: every relationship and then every node with `generated_by = topic-event-extraction-v1`.
+   `DETACH DELETE` also removes relationships of later layers attached to topics and events
+   (`docs/PIPELINE_AND_LINKS_HANDOFF.md`, section 5).
+4. For each issue: assemble the bundle, call the model, validate, write topic, `ABOUT_TOPIC`, `DERIVED_FROM`,
+   events, `EVIDENCED_BY`, `ACTED_IN_EVENT`, `CAUSED`.
+5. Set `PipelineState.last_layer_build_at`.
 
-## Backend API
+A failed call mid-run leaves a partial layer (the old one is already deleted). Run it again. No prerequisite is
+checked in code, but without reference extraction the bundles contain only the issue's own nodes.
 
-### `GET /api/knowledge`
+## 9. Current state (2026-09-29)
 
-Returns current topics, events, causal links, and pipeline timestamps.
+Kvitta data, built after the `cause_after_effect` rule was added. 10 topics, 51 events, 27 `CAUSED`, 388
+`DERIVED_FROM`, 159 `EVIDENCED_BY`, 96 `ACTED_IN_EVENT`, 12 `ABOUT_TOPIC`; not stale. Every rule check passes (no
+cross-topic or reversed `CAUSED`, all evidence inside the topic's bundle, no mailbox as actor), and every bundle
+matches an independent recomputation.
 
-Payload shape:
+| Topic (slug) | Type | Issues | Events | Bundle |
+| --- | --- | --- | ---: | ---: |
+| `receipt-reader-extraction` "Receipt reader extraction of amount, VAT, date, and merchant" | requirement | `KV-1`, `KV-4` | 12 | 72 |
+| `mobile-app-duplicate-expense-submission` "Mobile app duplicate expense submission prevention" | defect | `KV-8`, `KV-12` | 8 | 68 |
+| `fortnox-export-authentication-outage` "Fortnox export authentication outage and token-flow remediation" | incident | `KV-7` | 4 | 56 |
+| `offline-expense-capture` "Offline expense capture with local queue and automatic retry" | requirement | `KV-2` | 5 | 50 |
+| `approval-limits-per-manager` "Approval limits per manager" | requirement | `KV-5` | 5 | 42 |
+| `kvitta-1-0-release` "Kvitta 1.0 release" | decision | `KV-9` | 3 | 28 |
+| `emma-onboarding-first-tasks` "Emma Chen onboarding first tasks" | other | `KV-3` | 4 | 26 |
+| `receipt-image-retention-and-finance-only-access` "Receipt image retention and finance-only access" | requirement | `KV-6` | 5 | 23 |
+| `visma-export` "Visma export of approved expenses" | requirement | `KV-10` | 2 | 16 |
+| `upload-spinner-slow-network` "Upload spinner remains active after slow-network receipt upload" | defect | `KV-11` | 3 | 7 |
 
-```json
-{
-  "topics": [],
-  "events": [],
-  "causal_links": [],
-  "relationships": [],
-  "last_extraction_at": "2026-09-23T18:08:36.712761+00:00",
-  "last_layer_build_at": "2026-09-23T18:08:46.846709+00:00",
-  "needs_layer_rerun": false,
-  "stale_reasons": []
-}
-```
+Two topics joined two issues each: `KV-4` joined the receipt reader topic, and `KV-12` joined the duplicate topic.
 
-Topic rows:
+Key events of the central stories:
 
-| Field | Meaning |
-| --- | --- |
-| `slug` | Topic slug. |
-| `name` | Topic name. |
-| `topic_type` | Topic type. |
-| `summary` | Topic summary. |
-| `event_count` | Count of events linked by `EVENT_OF_TOPIC`. |
-| `issues` | Issue keys linked to the topic by `ABOUT_TOPIC`. |
+| When | Topic | Type | Event | Evidence |
+| --- | --- | --- | --- | --- |
+| 2026-02-12 13:00 | offline | decided | Local queue with automatic retry decided | `seg-010`, `doc-003` |
+| 2026-02-12 16:30 | duplicate | decided | Offline queue with retry was accepted despite identified duplicate risk | `doc-003`, `doc-003 v1` |
+| 2026-02-20 12:00 | offline | resolved | Offline queue and server sync support delivered | `KV-2 v4`, `slack-019`, `kvitta-api#21`, `kvitta-mobile#6` |
+| 2026-03-03 08:05 | Fortnox | regressed | Fortnox exports began failing with 401 Unauthorized | `KV-7 v1`, `slack-026` |
+| 2026-03-04 21:45 | Fortnox | resolved | Hotfix restored Fortnox exports and drained queued expenses | `KV-7 v3`, `slack-030`, `kvitta-api#55` |
+| 2026-03-09 10:00 | duplicate | created | Duplicate payout of a train-ticket expense reported | `KV-8 v1`, `slack-032` |
+| 2026-03-09 10:40 | duplicate | decided | Timeout retry and missing payout deduplication identified as cause | `seg-034`, `KV-8 v2`, `comment-011`, `slack-033` |
+| 2026-03-09 10:45 | offline | regressed | Offline retry contributed to a duplicate payout incident | `KV-8 v2`, `comment-011`, `doc-003` |
+| 2026-03-10 10:00 | release | decided | Kvitta 1.0 scope and release blockers set | `seg-030`..`seg-032`, `KV-9 v2`, `slack-037` |
+| 2026-03-12 16:00 | duplicate | other | Payout-export protection found not to prevent duplicate app submissions | `review-030`, `review-031`, `kvitta-api#60 app/payouts/export.py` |
+| 2026-03-20 10:00 | release | decided | Go approved for Kvitta 1.0 | `seg-043`..`seg-045`, `comment-016`, `slack-045`, `doc-005 v3` |
 
-Event rows:
+`CAUSED` chains include: requirement -> decision -> delivered -> "Offline retry contributed to a duplicate payout
+incident" (offline topic); "accepted despite identified duplicate risk" -> "Duplicate payout reported", and "found not
+to prevent duplicate app submissions" -> "KV-12 opened" (duplicate topic); outage -> hotfix -> permanent fix
+(Fortnox); scope set -> go -> released (release). The customer Anders Nyberg acts in three events (the VAT report, his VAT
+confirmation and the duplicate payout report). Wording and counts
+vary a little between rebuilds.
 
-| Field | Meaning |
-| --- | --- |
-| `topic_slug` | Owning topic. |
-| `slug` | Event slug. |
-| `name` | Event name. |
-| `event_type` | Event type. |
-| `occurred_at` | Event timestamp. |
-| `summary` | Event summary. |
-| `evidence` | Display names of evidence nodes linked by `EVIDENCED_BY`. |
-| `actors` | Person names linked by `ACTED_IN_EVENT`. |
+## 10. What the data needs for this layer
 
-Causal-link rows:
+- **Issues are the unit.** Every storyline needs at least one issue; a PR or discussion without an issue has no topic.
+- **Several distinct topics.** Issues about different subjects give different topics; related issues (a follow-up
+  bug) join an existing topic. Two or more topics with events within 30 days of each other are needed for
+  cross-topic causal links in layer 4.
+- **Reach.** Name the issue key in the Slack messages, mails, meeting segments, reviews and documents that belong to
+  its story; have the issue (versions, comments) name its PRs and documents. Put the key in at least one segment of
+  each relevant meeting so the whole meeting joins.
+- **Timestamps in the evidence** for every step of the story, since `occurred_at` must come from the evidence.
+- **Explicit causes in the text** ("blocked until", "because the security review rejected", "this regressed after"),
+  since causal links require textual support.
+- **Full, distinct person names** in text and author fields, since actors are resolved by name.
+- A realistic history: status changes on issue versions, rewritten requirements with `change_summary`, rejected and
+  reworked PRs, and contradictions or gaps (a warning nobody followed up) give events of every type.
 
-| Field | Meaning |
-| --- | --- |
-| `topic_slug` | Owning topic. |
-| `cause_slug`, `cause_name` | Cause event. |
-| `effect_slug`, `effect_name` | Effect event. |
-| `explanation` | Causal explanation. |
-| `evidence` | Evidence identifiers stored on the `CAUSED` relationship. |
+## 11. API
 
-Relationship rows (`relationships`), one per relationship type this layer created (`generated_by = "topic-event-extraction-v1"`), sorted by type:
+`GET /api/knowledge`: `topics` (`slug`, `name`, `topic_type`, `summary`, `event_count`, `issues`), `events`
+(`topic_slug`, `slug`, `name`, `event_type`, `occurred_at`, `summary`, `evidence` = distinct display names of
+`EVIDENCED_BY` targets, `actors`), `causal_links` (`topic_slug`, `cause_slug`, `cause_name`, `effect_slug`,
+`effect_name`, `explanation`, `evidence`), `relationships` (per type: `relationship_type`, `from_labels`,
+`to_labels`, `count`), `last_extraction_at`, `last_layer_build_at`, `needs_layer_rerun`, `stale_reasons`.
 
-| Field | Meaning |
-| --- | --- |
-| `relationship_type` | Relationship type, e.g. `EVIDENCED_BY`. |
-| `from_labels` | Distinct first labels of the start nodes, read from the graph. |
-| `to_labels` | Distinct first labels of the end nodes, read from the graph. |
-| `count` | Number of relationships of this type. |
+`POST /api/knowledge/build`: runs the build and returns the same plus `built_at`, `deleted_relationships`,
+`deleted_nodes`, `calls`, `model`, `discarded_evidence`, `overflow_events`, `overflow_links`, `token_usage`.
 
-Known display limitation: event `evidence` is collected as `DISTINCT` display names, so two versions of the same source with the same display name (e.g. two `SlackMessage` versions) would be listed once. The `EVIDENCED_BY` relationships in the graph are unaffected, and no other layer reads this list. Checked on 2026-09-24: 30 `EVIDENCED_BY` relationships in the graph and 30 evidence entries shown, so it does not occur in the current data.
+Display limitation: `evidence` in `events` is a distinct list of display names, so the two versions of one Slack
+message (same display name) would show once. The relationships themselves are unaffected.
 
-### `POST /api/knowledge/build`
+## 12. UI
 
-Runs the build and returns the current state plus run metadata:
+Tab `Knowledge layer`. Button `Build knowledge layer` / `Building knowledge layer...`; status row (last reference
+extraction, last knowledge build); stale warning. Description: `Uses a model to find what each issue is about, what
+happened, who was involved and which events caused which, grounded in the source material.` Counts under
+`Nodes and relationships:` (Topics, Events, Causal links). Run metrics (Model, Calls, Tokens, Discarded evidence) only
+right after a build. Tables in order: `Topics (node)` (Topic, Type, Summary, Events, Issues), `Events (node)` (Topic,
+Event, Type, Occurred at, Summary, Actors, Evidence), `Relationships (all relationship types)`, `Causal links
+(relationship: CAUSED)` (Topic, Cause, Effect, Explanation, Evidence). Empty state: `No knowledge layer yet. Press the
+button to build it.`
 
-| Field | Meaning |
-| --- | --- |
-| `built_at` | Timestamp of this build. |
-| `deleted_relationships` | Previous generated relationships removed. |
-| `deleted_nodes` | Previous generated nodes removed. |
-| `calls` | Number of model calls. |
-| `model` | Model name. |
-| `discarded_evidence` | Evidence identifiers rejected because they were not in the bundle. |
-| `overflow_events` | Events beyond `MAX_EVENTS_PER_TOPIC`. |
-| `overflow_links` | Links beyond `MAX_CAUSAL_LINKS_PER_TOPIC`. |
-| `token_usage` | Input/output token counts when returned by the API. |
+Graph filter `Knowledge`: `ABOUT_TOPIC`, `DERIVED_FROM`, `EVENT_OF_TOPIC`, `EVIDENCED_BY`, `CAUSED`,
+`ACTED_IN_EVENT`.
 
-Errors:
+## 13. Boundaries
 
-- Missing `OPENAI_API_KEY` returns `503`.
-- Other failures return `500` with `{"error": "..."}`.
-
-## Frontend UI
-
-The UI lives in `frontend/src/main.tsx`.
-
-Component hierarchy:
-
-- `BuildGraphLayersPanel`
-  - tab `Knowledge layer`
-  - renders `KnowledgeLayerPanel`
-
-The middle program area has three inner tabs:
-
-1. `Reference extraction`
-2. `Knowledge layer`
-3. `Embeddings`
-
-The Knowledge tab provides:
-
-| UI element | Source field / behavior |
-| --- | --- |
-| `Build knowledge layer` button | Calls `POST /api/knowledge/build`. |
-| `Building knowledge layer...` state | Shown while build is running. |
-| Last reference extraction timestamp | `state.last_extraction_at`, formatted by `formatTimestamp`. |
-| Last knowledge build timestamp | `state.last_layer_build_at`, formatted by `formatTimestamp`. |
-| Stale warning | Shown when `state.needs_layer_rerun` is true, with each `state.stale_reasons` entry listed on its own line underneath. |
-| Description | `Uses a model to find what each issue is about, what happened, who was involved and which events caused which, grounded in the source material.` (`reference-description`), below the button and status row. |
-| Success message | `Done. X topics, Y events, Z causal links.` |
-| Counts row | Heading `Nodes and relationships:` (`reference-description reference-counts-heading`), then Topics, Events, Causal links (lengths of `topics`, `events`, `causal_links`). |
-| Run metrics row | Model, Calls, Tokens, Discarded evidence. Shown only right after a successful build, since `GET /api/knowledge` does not return these fields. |
-| Topics table | Heading `Topics (node)` with caption `(Type is one of: requirement, defect, incident, decision, other)`. Columns: Topic, Type, Summary (all property), Events (via EVENT_OF_TOPIC, count), Issues (via ABOUT_TOPIC). One row per topic, so all topics are visible at once. |
-| Events table | Heading `Events (node)`. One table for all topics. Columns: Topic (via EVENT_OF_TOPIC), Event, Type, Occurred at, Summary (all property), Actors (via ACTED_IN_EVENT), Evidence (via EVIDENCED_BY). |
-| Causal links table | Heading `Causal links (relationship: CAUSED)`, caption `(cause:Event)-[:CAUSED]->(effect:Event)`. One table for all topics. Columns: Topic (via EVENT_OF_TOPIC), Cause (start node), Effect (end node), Explanation (property), Evidence (property). Hidden when there are no causal links. |
-| Relationships table | Between Events and Causal links, matching the other tabs (nodes, then the relationship overview, then relationship tables). Heading `Relationships (all relationship types)`; Relationship, From → To, Count, from `state.relationships`. |
-
-Table order: Topics, Events, Relationships, Causal links. Events, Relationships and Causal links headings use `knowledge-section-title` for extra space above; Causal links, the last table, has `layer-last-table` space below.
-
-The tables are flat (one table per node or relationship type, with a Topic column) rather than grouped per topic, matching the other layer tabs and scaling to many topics.
-
-The panel uses `knowledge-layer-panel` (flex column) so the topic list always fills the remaining height regardless of how many rows sit above it.
-
-If no layer exists, the panel shows:
-
-```text
-No knowledge layer yet. Press the button to build it.
-```
-
-## Graph Visualization Filter
-
-The graph API and frontend use the filter name `Knowledge` for this layer.
-
-`backend/app.py` maps it to:
-
-```python
-"Knowledge": [
-    "ABOUT_TOPIC",
-    "DERIVED_FROM",
-    "EVENT_OF_TOPIC",
-    "EVIDENCED_BY",
-    "CAUSED",
-    "ACTED_IN_EVENT",
-]
-```
-
-Selecting `Knowledge` in the graph source filters returns nodes connected by these relationship types and only those relationships.
-
-## Current Storyline in the Local Graph
-
-The current built topic is `administrator-session-lifetime-policy`.
-
-Its events describe:
-
-- `AUTH-17` being opened for premature administrator expiry.
-- The administrator session policy being established.
-- The first fixed 60-minute requirement.
-- Security rejecting the fixed-window approach.
-- `AUTH-17` becoming blocked.
-- Work resuming after the billing incident.
-- Implementation being limited to the web endpoint.
-- `AUTH-17` being delivered.
-- A mobile session-policy regression being reported.
-- Mobile administrators still being signed out after sixty minutes.
-- `backend-api#47` proposing the mobile refresh fix.
-
-The five `CAUSED` links connect the requirement change, blocked state, delivered web-only implementation, and later mobile regression.
-
-## Important Boundaries
-
-- This layer reads and writes Neo4j.
-- It reads PostgreSQL only to build the person identity registry for actor resolution.
-- It does not modify PostgreSQL.
-- It does not delete imported source nodes or deterministic reference edges.
-- It depends on the reference extraction layer for its evidence-bundle expansion.
-- It creates interpretation: `Topic`, `Event`, `CAUSED`, and actor/evidence relationships are derived claims, not copied source records.
-- Every derived claim must remain grounded through `DERIVED_FROM`, `EVIDENCED_BY`, and `CAUSED.evidence`.
+- Reads and writes Neo4j; reads PostgreSQL only to build the person registry.
+- Deletes only its own nodes and relationships (`generated_by`), never source data or `MENTIONS_*`.
+- Everything it writes is interpretation and stays grounded through `DERIVED_FROM`, `EVIDENCED_BY` and
+  `CAUSED.evidence`.

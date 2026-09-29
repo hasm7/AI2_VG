@@ -1,50 +1,27 @@
-# Collaboration Layer Handoff
+# Layer 5: Expertise & Collaboration Layer
 
-This document describes the Collaboration layer: the fifth middle-panel graph-building step that computes who has expertise in what, and who actually works with whom, from activity already present in the graph.
+The fifth graph-building step (code, API and graph filter use the name `collaboration`). Fully deterministic, no
+model. From activity already in the graph it computes **expertise** (how much each person has done on each topic and
+component, with the activity it rests on) and **collaboration** (which pairs of people share work items, and how
+many).
 
-The layer is implemented in `backend/collaboration_layer.py`, exposed by `backend/app.py`, and displayed in `CollaborationLayerPanel` inside `frontend/src/main.tsx`.
+**Verified on 2026-09-29** against `backend/collaboration_layer.py`, `backend/app.py`, `frontend/src/main.tsx` and the
+live graph.
 
-## Purpose
+Code: `backend/collaboration_layer.py`. UI: `CollaborationLayerPanel`, tab `Expertise & collaboration layer` (fifth of
+seven).
 
-Unlike the Knowledge, Architecture, and Causal layers, this layer is **fully deterministic** — it calls no model. It answers two questions from activity counts alone:
+## 1. Eligible persons
 
-- **Expertise**: for each person and each subject (a `Topic` or a `Component`), how much weighted activity does that person have on that subject, grounded in the specific activity nodes counted (`EXPERTISE_EVIDENCED_BY`).
-- **Collaboration**: which pairs of people share work items (issues, PRs, meetings, mail threads, events), and how often.
+Every `Person` except `actor_type = "mailbox"` and `identity_ambiguous = true`. Excluded persons get no expertise and
+no `WORKS_WITH`, and are returned by the API with their reason (`mailbox`, `ambiguous identity`). The same rule is used
+by layers 6 and 7 and by the agent.
 
-## Current Local State
+## 2. Activities and weights
 
-From `/api/collaboration`:
+An activity is a node an eligible person is linked to by one of these relationships:
 
-| Field | Current value |
-| --- | --- |
-| Expertise entries | 14 |
-| Persons with expertise | 4 |
-| Collaboration pairs | 7 |
-| Excluded persons | 2 |
-| `last_import_at` | `2026-09-20T13:18:12.864348+00:00` |
-| `last_layer_build_at` | `2026-09-23T18:08:46.846709+00:00` |
-| `last_architecture_build_at` | `2026-09-23T18:09:26.465345+00:00` |
-| `last_causal_build_at` | `2026-09-23T18:09:39.162792+00:00` |
-| `last_collaboration_build_at` | `2026-09-23T18:10:20.780808+00:00` |
-| `needs_rerun` | `false` |
-| `stale_reasons` | `[]` |
-
-Excluded persons (matches the local dataset exactly as expected):
-
-| Person | Reason |
-| --- | --- |
-| Support | mailbox |
-| Anna (unresolved name-only observation) | ambiguous identity |
-
-Top expertise by topic (`Administrator session lifetime policy`): Anna Berg (score 25, share 0.275, rank 1), Anna Lindqvist (25, 0.275, rank 2), Erik Nilsson (24, 0.264, rank 3), Priya Raman (17, 0.187, rank 4).
-
-Strongest collaboration pair: Anna Lindqvist <-> Erik Nilsson, weight 8 (shared across `AUTH-19`, two PRs, two meetings, one mail thread, two events).
-
-(Exact scores, ranks, and topic naming vary slightly between rebuilds because the Knowledge layer is LLM-derived; this snapshot is from the full pipeline rebuild performed for the staleness follow-up work order.)
-
-## Weights
-
-| Relationship from `Person` | Target label | Weight |
+| Relationship from `Person` | Target | Weight |
 | --- | --- | ---: |
 | `AUTHORED_PR` | `PullRequest` | 3 |
 | `WROTE_PR_REVIEW` | `PullRequestReview` | 2 |
@@ -52,114 +29,139 @@ Strongest collaboration pair: Anna Lindqvist <-> Erik Nilsson, weight 8 (shared 
 | `ACTED_IN_EVENT` | `Event` | 2 |
 | `CHANGED_ISSUE_VERSION` | `IssueVersion` | 1 |
 | `WROTE_ISSUE_COMMENT` | `IssueComment` | 1 |
-| `SENT_SLACK_MESSAGE` | `SlackMessage` | 1 |
+| `SENT_SLACK_MESSAGE` | `SlackMessage` | 1 (every version counts) |
 | `SENT_MAIL` | `MailMessage` | 1 |
 | `SPOKE_TEAMS_TRANSCRIPT_SEGMENT` | `TeamsTranscriptSegment` | 1 |
 
-`MIN_EXPERTISE_SCORE = 2`: expertise below this score is not written at all.
+Not activities: receiving mail, taking part in a meeting without speaking, owning or creating an issue, reviewing
+(`REVIEWED_PR`; the review entries themselves count), `AUTHORED_DOCUMENT` (the versions count).
 
-## Eligible Persons
+Activity time: the first of `occurred_at`, `version_at`, `sent_at`, `created_at`, `started_at` present on the node; a
+segment uses its meeting's `started_at`.
 
-All `Person` nodes except `actor_type = "mailbox"` or `identity_ambiguous = true`. Excluded persons are returned by the API with their reason.
-
-## Subjects
+## 3. Subjects
 
 A subject is a `Topic` or a `Component`. An activity node belongs to:
 
-- a `Topic` T if `(T)-[:DERIVED_FROM]->(activity)` exists, or the activity is an `Event` with `(activity)-[:EVENT_OF_TOPIC]->(T)`.
-- a `Component` C if it is a `PullRequest` (or `PullRequestReview` of one) whose `CodeChange` `MODIFIES_FILE` a `File` that C is `IMPLEMENTED_IN`; or `(C)-[:COMPONENT_EVIDENCED_BY]->(activity)`; or it is an `Event` with `(activity)-[:AFFECTED_COMPONENT]->(C)`.
+- **Topic T** if `(T)-[:DERIVED_FROM]->(node)` (the node was in T's evidence bundle), or the node is an `Event` of T.
+- **Component C** if the node is a `PullRequest` whose code changes modify a file C is implemented in, or a
+  `PullRequestReview` of such a PR, or `(C)-[:COMPONENT_EVIDENCED_BY]->(node)`, or an `Event` with
+  `AFFECTED_COMPONENT` to C.
 
-An activity node counted once per subject even if it matches multiple rules for that subject.
+A node counts once per person and subject even if several rules match.
 
-## Graph Model
+## 4. Expertise
+
+For each (person, subject): `score` = sum of the weights of the distinct activity nodes; entries with score below
+`MIN_EXPERTISE_SCORE = 2` are not written. Per subject, over the written entries: `share = score / total`, rounded to
+3 decimals; `rank` 1 = highest score, ties broken by `person_key`. Also `activity_count`, `first_activity_at`,
+`last_activity_at` (text-sorted timestamps).
 
 ```cypher
 (:Person)-[:HAS_EXPERTISE]->(:Expertise)
-(:Expertise)-[:EXPERTISE_IN]->(:Topic)
-(:Expertise)-[:EXPERTISE_IN]->(:Component)
-(:Expertise)-[:EXPERTISE_EVIDENCED_BY]->(:ActivityNode)
-(:Person)-[:WORKS_WITH {weight, shared_work_items, work_item_types}]->(:Person)
+(:Expertise)-[:EXPERTISE_IN]->(:Topic | :Component)
+(:Expertise)-[:EXPERTISE_EVIDENCED_BY]->(:ActivityNode)   // every activity counted
 ```
 
-`Expertise` key: `(person_key, subject_label, subject_key)`. `subject_key` is `Topic.slug`, or `<source_instance>/<repository>/<component_slug>` for a component. Properties: `score`, `share` (rounded to 3 decimals), `rank` (1 = highest score, ties broken by `person_key` ascending), `activity_count`, `first_activity_at`, `last_activity_at`, `display_name` = `<person name> – <subject name>`.
+`Expertise` key `(person_key, subject_label, subject_key)` (constraint `expertise_key`); `subject_key` is the topic
+slug or `<source_instance>/<repository>/<component slug>`; `display_name` `<person name> – <subject name>`.
 
-`WORKS_WITH` is written once per pair, from the person with the lexicographically smaller `person_key` to the other; the relationship is undirected in meaning. `weight` = number of distinct shared work items (at most 50 listed in `shared_work_items`).
+## 5. Collaboration (`WORKS_WITH`)
 
-Work items and who is connected to them:
+Work items and who is on them (eligible persons only):
 
-| Work item | Persons connected |
+| Work item | People |
 | --- | --- |
-| `Issue` | `CREATED_ISSUE`, `OWNS_ISSUE`, `COMMENTED_ON_ISSUE` to the issue, and `CHANGED_ISSUE_VERSION` to any of its `IssueVersion` nodes |
+| `Issue` | `CREATED_ISSUE`, `OWNS_ISSUE`, `COMMENTED_ON_ISSUE`, and `CHANGED_ISSUE_VERSION` on any of its versions |
 | `PullRequest` | `AUTHORED_PR`, `REVIEWED_PR` |
-| `TeamsMeeting` | `PARTICIPATED_IN_MEETING` |
-| `MailMessage` | `SENT_MAIL` (sender) and `MAIL_RECIPIENT` (recipients) |
+| `TeamsMeeting` | `PARTICIPATED_IN_MEETING` (participants and speakers) |
+| `MailMessage` | sender and every recipient; **each mail is its own work item**, not the thread |
 | `Event` | `ACTED_IN_EVENT` |
 
-## Constraint
+Every pair on the same work item gets +1. One `WORKS_WITH` per pair, written from the smaller `person_key` to the
+larger (the meaning is undirected), with `weight` (number of shared work items), `shared_work_items` (display names,
+at most 50) and `work_item_types` (sorted labels).
 
-```cypher
-CREATE CONSTRAINT expertise_key IF NOT EXISTS FOR (n:Expertise) REQUIRE (n.person_key, n.subject_label, n.subject_key) IS UNIQUE
-```
+## 6. Build behaviour
 
-## Build/Rebuild Behavior
+Prerequisites: `last_layer_build_at`, `last_architecture_build_at`, `last_causal_build_at` (else 409 `Run Knowledge,
+Architecture and Root cause & impact layers first.`). No model, never 503. Compute everything, delete this layer's
+nodes and relationships (`generated_by = collaboration-layer-v1`), write `Expertise`, `HAS_EXPERTISE`,
+`EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH`, set `last_collaboration_build_at`. All derived items carry
+`derived`, `generated_by`, `generated_at`.
 
-1. Require `last_layer_build_at`, `last_architecture_build_at`, and `last_causal_build_at` to all exist (else `409 {"error": "Run Knowledge, Architecture and Root cause & impact layers first."}`).
-2. No model call; nothing can fail partway that would require the delete-after-success ordering the LLM layers use. The layer still deletes only its own previous data (`generated_by = "collaboration-layer-v1"`) before writing.
-3. Compute activities, subjects, expertise, and collaboration pairs; write `Expertise`, `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`, `WORKS_WITH`.
-4. Update `PipelineState.last_collaboration_build_at`.
+## 7. Current state (2026-09-29)
 
-## Pipeline State
+Kvitta data. 109 expertise entries (580 `EXPERTISE_EVIDENCED_BY`), 8 persons with expertise, 24 pairs, 2 excluded
+(Kvitta Support and Kvitta Alerts, both mailboxes); 109 nodes and 822 relationships; not stale. Every score, share,
+rank, activity count, date, evidence list and pair weight matched an independent recomputation.
 
-| Property | Written by |
+| Person | Entries | Total score | Rank 1 in |
+| --- | ---: | ---: | --- |
+| Ahmed Karimi | 21 | 222 | 6 (Fortnox topic and the three Fortnox components, Payout export, Offline expense sync endpoint) |
+| Maria Lindgren | 16 | 172 | 2 (Kvitta 1.0 release, Visma export) |
+| David Okafor | 19 | 163 | 1 (Receipt image retention topic) |
+| Nina Petrova | 18 | 123 | 2 (duplicate payout topic, upload spinner topic) |
+| Sofia Berg | 11 | 121 | 5 (receipt reader topic, Receipt reader, Receipt VAT rules, Receipt image storage, Expense upload API) |
+| Emma Chen | 10 | 107 | 7 (approval limits topic and components, her onboarding topic) |
+| Lucas Holm | 9 | 84 | 5 (offline topic, Offline expense queue, Expense upload, Retry delivery, Expense sync endpoint) |
+| Anders Nyberg (customer) | 5 | 13 | 0 |
+
+Selected subjects (score, share):
+
+| Subject | Experts |
 | --- | --- |
-| `last_import_at` | SQL import |
-| `last_layer_build_at` | Knowledge layer |
-| `last_architecture_build_at` | Architecture layer |
-| `last_causal_build_at` | Causal layer |
-| `last_collaboration_build_at` | Collaboration layer (this layer's own timestamp) |
+| Component Fortnox | Ahmed 8 (1.0) |
+| Component Fortnox authentication | Ahmed 14 (0.636), David 6 (0.273), Sofia 2 (0.091) |
+| Component Receipt VAT rules | Sofia 11 (0.524), David 8 (0.381), Nina 2 (0.095) |
+| Component Receipt image storage and retention | Sofia 13 (0.52), David 10 (0.4), Maria 2 (0.08) |
+| Component Receipt reader | Sofia 18 (0.45), David 12 (0.3), Maria 4, Nina 4, Anders 2 |
+| Topic Receipt reader extraction | Sofia 42 (0.356), Maria 37 (0.314), David 19, Nina 7, Anders 5, Ahmed 3, Emma 3, Lucas 2 |
+| Topic Mobile app duplicate expense submission prevention | Nina 27 (0.273), Ahmed 23, Maria 22, David 16, Lucas 9, Anders 2 |
 
-Staleness (`needs_rerun` and `stale_reasons`) is computed centrally by `backend/pipeline_staleness.py`, not by this module. This layer's upstream stages, per `UPSTREAM_BY_STAGE`, are `import`, `knowledge`, `architecture`, and `causal`. See `GRAPH_DATA_HANDOFF.md`'s "Pipeline Staleness" section for the full rule set, including how staleness propagates transitively.
+`WORKS_WITH` (weight): Ahmed–David 23, David–Sofia 23, Ahmed–Nina 20, Ahmed–Emma 18, David–Maria 18, David–Nina 18,
+Ahmed–Maria 15, Lucas–Nina 15, Ahmed–Lucas 14, Anders–Maria 13, David–Lucas 13, Maria–Nina 13, Maria–Sofia 13, and 11
+smaller pairs down to Anders–Sofia 1. All 21 pairs of the seven team members are linked, mostly through shared
+meetings and the team-wide mail `mail-004`. The customer Anders is linked to Maria (13), David (2) and Sofia (1). His
+expertise comes from the three events he acts in (the VAT report, his VAT confirmation, the duplicate payout report)
+and from `mail-005`, the only one of his mails inside a topic bundle. Values change when
+the LLM layers are rebuilt.
 
-## Backend API
+## 8. What the data needs for this layer
 
-`GET /api/collaboration` returns pipeline timestamps, `needs_rerun`, `stale_reasons`, `counts`, and the `expertise`, `works_with`, `excluded_persons` tables. `expertise` is sorted by subject name then rank; `works_with` by weight descending.
+- **More people with different roles** (developers, a reviewer, a product owner, QA, operations, customers), each
+  active in several sources with one resolvable identity (`docs/SQL_DATA_HANDOFF.md`, section 7).
+- **Uneven expertise**: one person who does almost all work on one component (bus factor 1 in layer 6), shared work on
+  another, a newcomer with little activity.
+- **Groups that work mostly together**, with a few people bridging groups (for communities and betweenness in layer
+  6): for example a backend group and a mobile group sharing one reviewer.
+- **Outsiders** (customer contacts) who only mail, and a shared mailbox, to show how they are treated.
+- Activities inside topic bundles (they name the issue), so they count toward topic expertise.
 
-`POST /api/collaboration/build` returns the same payload plus `built_at`, `deleted_relationships`, `deleted_nodes`.
+## 9. API
 
-Errors: `409` if an upstream layer has not run; `500` otherwise. This layer never returns `503`, since it calls no model.
+`GET /api/collaboration`: pipeline timestamps (`last_import_at`, `last_layer_build_at`,
+`last_architecture_build_at`, `last_causal_build_at`, `last_collaboration_build_at`), `needs_rerun`, `stale_reasons`,
+`counts` (`expertise`, `persons_with_expertise`, `works_with_pairs`, `excluded_persons`), `expertise` (per row:
+`person_name`, `subject_label`, `subject_name`, `score`, `share`, `rank`, `activity_count`, `first_activity_at`,
+`last_activity_at`, `evidence`; Slack evidence gets a ` v<n>` suffix), `works_with`, `excluded_persons`,
+`relationships`.
 
-## Frontend UI
+`POST /api/collaboration/build`: the same plus `built_at`, `deleted_relationships`, `deleted_nodes`. Errors 409, 500.
 
-Tab `Expertise & collaboration layer` inside `BuildGraphLayersPanel`, rendered by `CollaborationLayerPanel`, fifth of seven inner tabs. Button text `Build expertise & collaboration layer` / `Building expertise & collaboration layer...`. "Expertise & collaboration layer" is the display name only; code, API routes (`/api/collaboration`), `last_collaboration_build_at`, and the graph filter key `Collaboration` keep the `collaboration` name. Below the button and status row, a description line (`reference-description`) reads `Scores each person's expertise per topic and component from their activity, and finds which people share work items.` The counts are split in two rows: `Nodes and relationships:` (expertise entries, collaboration pairs) and `People (existing Person nodes):` (persons with expertise, excluded persons), since the last two describe existing `Person` nodes rather than anything this layer creates. The `Expertise (node)` table has an `Evidence (via EXPERTISE_EVIDENCED_BY)` column listing the activity nodes behind each score (`evidence` on each `expertise` row, one entry per node; `SlackMessage` entries get a ` v<version_number>` suffix so versions of the same message stay distinct, matching `activity_count`). A `Relationships (all relationship types)` table sits between `Expertise (node)` and `Collaboration`, listing every relationship type this layer created (`generated_by = "collaboration-layer-v1"`) with From → To labels read from the graph and a count; `GET /api/collaboration` returns it as `relationships` (`relationship_type`, `from_labels`, `to_labels`, `count`). 
+## 10. UI
 
-Tables, in order, each with a lighter `knowledge-section-kind` suffix in its heading and on each column. Long text columns use `reference-cell-wrap` (fixed 280px, wrapping).
+Tab `Expertise & collaboration layer`. Button `Build expertise & collaboration layer` / `Building expertise &
+collaboration layer...`. Description: `Scores each person's expertise per topic and component from their activity,
+and finds which people share work items.` Counts under `Nodes and relationships:` and `People (existing Person
+nodes):`. Tables: `Expertise (node)` (with an Evidence column), `Relationships (all relationship types)`,
+`Collaboration (relationship: WORKS_WITH)`, `Excluded persons (existing Person nodes)`.
 
-| Table | Heading suffix | Columns |
-| --- | --- | --- |
-| `Expertise` | `(node)` | Person (via HAS_EXPERTISE), Subject type (property), Subject (via EXPERTISE_IN), Score, Share, Rank, Activities, First activity, Last activity (all property), Evidence (via EXPERTISE_EVIDENCED_BY); height capped at `60vh` (`reference-table-wrapper-capped`) so its horizontal scrollbar stays in view |
-| `Relationships` | `(all relationship types)` | Relationship, From → To, Count |
-| `Collaboration` | `(relationship: WORKS_WITH)` | Person A (start node), Person B (end node), Weight (property), Work item types (property), Shared work items (property) |
-| `Excluded persons` | `(existing Person nodes)` | Person (property), Person key (property), Reason (computed from properties); caption `Not given expertise or collaboration: mailboxes are not people, and ambiguous identities could be matched to the wrong person.` |
+Graph filter `Collaboration` (button `Expertise`): `HAS_EXPERTISE`, `EXPERTISE_IN`, `EXPERTISE_EVIDENCED_BY`,
+`WORKS_WITH`.
 
-## Graph Visualization Filter
+## 11. Boundaries
 
-The filter button is labelled `Expertise` in the graph panel; the key sent to `/api/graph` is still `Collaboration`.
-
-```python
-"Collaboration": [
-    "HAS_EXPERTISE",
-    "EXPERTISE_IN",
-    "EXPERTISE_EVIDENCED_BY",
-    "WORKS_WITH",
-]
-```
-
-Node color added: `Expertise` (`#22d3ee`).
-
-## Important Boundaries
-
-- Reads and writes Neo4j only; never touches PostgreSQL.
-- Calls no model; deterministic and cheap to rebuild.
-- Deletes only by `generated_by = "collaboration-layer-v1"`.
-- Depends on the Knowledge layer (`Topic`/`Event`), the Architecture layer (`Component`), and the Causal layer (`AFFECTED_COMPONENT`) for subject membership.
-- Never creates `Person` nodes; only reads and links existing ones.
+- Reads and writes Neo4j only; no model; never creates `Person` nodes.
+- Deletes only by `generated_by = collaboration-layer-v1`.
+- Depends on layers 2, 3 and 4 for subject membership.

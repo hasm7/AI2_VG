@@ -1,107 +1,92 @@
 # AI2_VG
 
-This project models simulated data sources from a software engineering team.
+This project models simulated source material from a software engineering team and builds a graph-based memory
+system on top of it.
 
-The purpose is to preserve source material in PostgreSQL before later importing it into a graph database. The SQL layer stores original data, stable IDs, timestamps, versions, and source references. The graph database is intended to find connections between people, needs, discussions, decisions, issues, documentation, and implementation.
+The material describes the same project, people, events, needs, decisions, issues, documents and implementation work
+across time. Each source contributes a different part of the context. PostgreSQL preserves the source material with
+stable IDs, timestamps, versions and source references. Neo4j holds the same material as a graph, enriched by seven
+layers, and an AI agent answers questions over it.
 
-## Data Sources
+## Goals
 
-The project uses six source types:
+Find context and relationships across sources, for example:
 
-- Mail
-- Slack/project chat
-- Teams/meeting transcripts
-- Issues/tickets
-- Requirements and technical documentation
-- Pull requests, code reviews, and code changes
+- who discussed a decision before it was made
+- which documents describe the background to a requirement
+- which source entries refer to the same event
+- which people, issues, meetings and code changes belong together
+- where information is missing, changed or contradictory
 
-## SQL Tables
+The flow is:
 
-The database schema contains nine tables:
+```text
+Simulated sources -> SQL source material -> Import and graph layers -> Graph memory system -> AI agent
+```
 
-- `mail_messages`
-- `slack_messages`
-- `teams_meetings`
-- `teams_transcript_segments`
-- `issue_versions`
-- `issue_comments`
-- `document_versions`
-- `pr_versions`
-- `pr_reviews`
+## Data Sources and SQL Tables
 
-## JSONB Fields
+Six logical sources, stored in ten tables:
 
-Some fields are stored as `JSONB` because they naturally contain lists or structured values:
+| Source | Tables |
+| --- | --- |
+| Mail | `mail_messages` |
+| Slack / project chat | `slack_messages` |
+| Teams / meeting transcripts | `teams_meetings`, `teams_transcript_segments` |
+| Issues / tickets | `issues`, `issue_versions`, `issue_comments` |
+| Requirements and technical documentation | `document_versions` |
+| Pull requests, code reviews and code changes | `pr_versions`, `pr_reviews` |
 
-- mail recipients
-- meeting participants
-- code changes in pull requests
+Mail recipients, meeting participants and PR code changes are `JSONB` arrays. The schema is defined in
+`scripts/setup_postgres_schema.py` and documented in full in `docs/SQL_DATA_HANDOFF.md`.
 
-This keeps the source material structured without splitting it into unnecessary extra SQL tables.
+## Graph Layers
+
+Built in this order from the `Build graph layers` tab: Reference extraction, Knowledge layer, Architecture layer,
+Root cause & impact layer, Expertise & collaboration layer, Graph algorithms, Embeddings. See
+`docs/PIPELINE_AND_LINKS_HANDOFF.md`.
+
+## Documentation
+
+| Document | Content |
+| --- | --- |
+| `docs/SQL_DATA_HANDOFF.md` | Sources, tables, columns, constraints, identity and reference rules, import |
+| `docs/DATA_GENERATION_GUIDE.md` | What new example data must contain; validation queries |
+| `docs/GRAPH_DATA_HANDOFF.md` | Neo4j labels, relationships, constraints, indexes, graph API |
+| `docs/PIPELINE_AND_LINKS_HANDOFF.md` | Build order, staleness, how everything links |
+| `docs/*_LAYER_HANDOFF.md`, `docs/GRAPH_ALGORITHMS_HANDOFF.md` | One document per layer |
+| `docs/AI_AGENT_HANDOFF.md` | The chat agent |
+| `docs/SCALING_HANDOFF.md` | What to change before much larger data |
+| `docs/SESSION_HANDOFF.md` | Current state and how to work in this repository |
 
 ## Project Structure
 
 ```text
-docs/
-  BESLUTAD_PROJEKTINRIKTNING.md
-draft/
-  plan_initial.PNG
-  plan_initial2.PNG
-scripts/
-  install_deps.ps1
-  run_app.ps1
-  run_backend.ps1
-  run_viewer.ps1
-  setup_postgres_schema.py
-backend/
-  app.py
-frontend/
-  src/
-viewer/
-  app.py
-AGENTS.md
-README.md
-requirements.txt
+backend/            Flask API (port 8000), graph layers, AI agent (backend/ai_agent/)
+frontend/           React + Vite app (port 5173)
+viewer/             SQL viewer and SQL-to-Neo4j import (port 5000)
+scripts/            setup, run and helper scripts
+docs/               documentation
+draft/              early planning sketches
+AGENTS.md           rules for coding agents
+requirements.txt    Python dependencies
 ```
 
-## Database
+## Running
 
-The project uses PostgreSQL.
+Always use the project virtual environment through the scripts (`AGENTS.md`). Local settings go in `.env`, which must
+not be committed.
 
-The schema is defined in:
+1. Start Neo4j: `.\scripts\run_neo4j.ps1` (stop it with `.\scripts\stop_neo4j.ps1`).
+2. Start the backend and the frontend together:
 
-```text
-scripts/setup_postgres_schema.py
-```
+   ```powershell
+   powershell.exe -ExecutionPolicy Bypass -File .\scripts\run_app.ps1
+   ```
 
-Local database settings should be placed in `.env`. That file must not be committed to the repository.
+   or separately: `.\scripts\run_backend.ps1`, then in `frontend`: `npm.cmd run dev -- --host 127.0.0.1`.
+3. Open `http://127.0.0.1:5173`.
 
-## Running the Graph App
-
-The React frontend depends on the backend API, and the backend API depends on Neo4j.
-Starting only the React server opens the page, but the graph will show Neo4j as disconnected unless the backend is already running.
-
-Start the full graph app with:
-
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\scripts\run_app.ps1
-```
-
-This starts the backend on `http://127.0.0.1:8000`, waits until it responds, and then starts the React frontend on `http://127.0.0.1:5173`.
-
-Use the frontend-only command only when the backend is already running:
-
-```powershell
-cd frontend
-npm.cmd run dev -- --host 127.0.0.1
-```
-
-## Frontend
-
-The frontend lives in `frontend/`. To set it up:
-
-```text
-npm install
-npm.cmd run dev -- --host 127.0.0.1  # frontend only
-npm.cmd run build                    # production build
-```
+The frontend needs the backend, and the backend needs Neo4j; without them the page opens but shows Neo4j as
+disconnected. Install Python dependencies with `.\scripts\install_deps.ps1`; frontend dependencies with `npm install`
+in `frontend`. `npm.cmd run build` builds the frontend for a server deployment.
