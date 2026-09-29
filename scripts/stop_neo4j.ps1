@@ -27,15 +27,18 @@ $serverRunning = {
 }
 
 Write-Host "Stopping Neo4j ..."
-# Without /F: a request to close, which lets the server run its shutdown.
-taskkill /PID $wrapperId /T 2>$null | Out-Null
+# Without /F: a request to close, which lets the server run its shutdown. Windows often refuses it for a hidden
+# console process ("can only be terminated forcefully"); that error must not end the script, which then stops the
+# server by force below.
+$ErrorActionPreference = "Continue"
+taskkill /PID $wrapperId /T 2>&1 | Out-Null
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline -and (& $serverRunning)) {
     Start-Sleep -Milliseconds 500
 }
 if (& $serverRunning) {
     Write-Host "Neo4j did not stop within 30 seconds; ending it."
-    taskkill /PID $wrapperId /T /F 2>$null | Out-Null
+    taskkill /PID $wrapperId /T /F 2>&1 | Out-Null
     foreach ($process in (& $serverRunning)) {
         Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
