@@ -34,8 +34,12 @@ model choice, open issue), then `docs/EMBEDDING_LAYER_HANDOFF.md` (sections 1, 4
 ## Running the app
 
 - Start: `scripts\run_app.ps1` (backend + Vite), or `scripts\run_backend.ps1` and `npm run dev -- --host 127.0.0.1` in
-  `frontend`. Backend on port 8000, Vite on 5173 (proxies `/api`), SQL viewer on 5000. Neo4j runs in Neo4j Desktop 2
-  (Bolt 7687); the user starts it.
+  `frontend`. Backend on port 8000, Vite on 5173 (proxies `/api`), SQL viewer on 5000. Neo4j (Bolt 7687, HTTP 7474)
+  runs without the Neo4j Desktop app since 2026-09-29: `scripts\run_neo4j.ps1` starts the database Desktop installed,
+  from its own folder (same data, ports and password), hidden in the background, as Desktop does (Desktop's Java 21,
+  `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes`, `bin\neo4j.ps1 console`); `scripts\stop_neo4j.ps1` stops it (a close request
+  first, forced after 30 s). It refuses to start while the database or anything on port 7687 already runs, so never
+  two servers on one data folder. To use Desktop again, stop this one first. Log: `logs\neo4j.log` in the DBMS folder.
 - **The Flask auto-reloader is off.** After editing backend code, restart the backend: find the process on port 8000
   (`Get-NetTCPConnection -State Listen -LocalPort 8000`), stop the tree (`taskkill /PID <id> /T /F`, the parent of the
   listening process is the venv launcher), start `scripts\run_backend.ps1` again. Two `python.exe` per backend is
