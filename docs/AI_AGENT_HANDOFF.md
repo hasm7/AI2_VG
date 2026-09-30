@@ -157,7 +157,7 @@ prices only in the file).
 | `explorer` | enabled, 3 queries, 25 rows, 4000 characters, 6 extra nodes |
 | `search` | `vector_k` 10, `fulltext_k` 10, `lookup_k` 3, `entry_points` 8 |
 | `evidence` | 8 nodes per specialist, 1200 characters per text |
-| `query_timeout_seconds` | 10 |
+| `query_timeout_seconds` | 30 |
 | `prices_usd_per_million_tokens` | `gpt-4o` 2.5 / 1.25 / 10; `gpt-4o-mini` 0.15 / 0.075 / 0.6; `gpt-5.6-terra` 2.0 / 0.2 / 12.0; `gpt-6-luna` 0.1 / 0.01 / 0.5; `gpt-6-sol` 2.0 / 0.2 / 10.0; `text-embedding-3-large` 0.13 (input / cached input / output). Checked 2026-09-27 against OpenAI's pricing page, Standard tier. `gpt-6-sol` and `gpt-6-luna` have promotional prices (Sol until 2026-11-21): update them when the promotion ends, or cost is counted too low |
 
 The query embedding always uses the embedding layer's model and dimensions (not a setting).
@@ -167,6 +167,11 @@ The query embedding always uses the embedding layer's model and dimensions (not 
 One driver per question, closed when the question ends (also when the stream is interrupted). Every session is a read
 session in a `with` block; each parallel specialist has its own session; every query runs in a read transaction with
 the timeout. Checked 2026-09-25 on the server: at most 2 connections during a question, 0 after.
+
+**Warm-up at start.** The first run of a query after Neo4j starts plans the query and reads its data from disk (up to
+several seconds per query). When the backend starts, `warmup.py` runs the entry searches and all four specialists once
+in a background thread, read only and without a model call, on a real node's embedding (waiting up to 5 minutes for
+Neo4j). The backend prints `Agent warm-up done in N s.`; after that the first question is as quick as the rest.
 
 ## 8. API and frontend
 
@@ -237,6 +242,7 @@ A full run with the current settings takes about 6 minutes and costs about $0.40
 | `db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text`, `chunk_texts`, `similarities` |
 | `prompts.py` | `PLANNER_PROMPT`, `SUMMARY_PROMPT`, `ANSWER_PROMPT`, follow-up and explorer prompts |
 | `settings.py`, `settings.json` | settings, defaults, validation |
+| `warmup.py` | `warm_up`, `start_warmup` (called from `backend/app.py` at start) |
 | `state.py`, `usage.py` | `AgentState`; usage and cost |
 | `backend/cypher_guard.py` | read-only enforcement for model-written Cypher |
 

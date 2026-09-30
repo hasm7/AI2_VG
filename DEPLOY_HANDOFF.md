@@ -57,6 +57,9 @@ look (graph, chat history, settings, test results); only the user can do anythin
   (settings and test runs): keep them in a volume or a writable bind mount so they survive a container restart.
 - Same origin behind Nginx: the frontend calls `/api/...` relative, so no CORS setting is needed.
 - `app.run(...)` at the bottom of `backend/app.py` is only for local development; Gunicorn imports `app` directly.
+- On import, `backend/app.py` starts the agent warm-up (`backend/ai_agent/warmup.py`) in a background thread: it
+  waits for Neo4j and runs the agent's queries once, so the first chat question is quick. It also runs under Gunicorn;
+  look for `Agent warm-up done` in the backend log before a demo.
 
 ### The SQL viewer on the server
 

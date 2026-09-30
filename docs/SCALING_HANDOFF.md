@@ -25,7 +25,7 @@ the agent's specialists keep covering every embedded label.
 
 The Kvitta data has 542 nodes and 2 851 relationships after all layers. At this size:
 
-- queries run in milliseconds, far from the 10 s query timeout;
+- queries run in milliseconds, far from the 30 s query timeout (the backend warms Neo4j up at start, `backend/ai_agent/warmup.py`);
 - the agent answers all 27 test questions, about $0.015 per question;
 - the full graph loads in about 3 seconds and is laid out in about 12 seconds in the browser;
 - a full embedding build costs under one cent.

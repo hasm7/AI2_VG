@@ -888,6 +888,22 @@ def api_viewer_stop():
     return jsonify({"stopped": True})
 
 
+def start_agent_warmup() -> None:
+    """Warms Neo4j up for the chat agent in the background (read only, no model call), so the first question after a
+    start is answered as quickly as the rest. See `ai_agent/warmup.py`."""
+    # With the auto-reloader on, the reloader's parent process only watches files; the app runs in its child.
+    if os.getenv("BACKEND_RELOAD", "0") == "1" and os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+        return
+    try:
+        from ai_agent.warmup import start_warmup
+        start_warmup(*neo4j_connection_settings())
+    except Exception as error:  # noqa: BLE001 - the backend runs without the warm-up
+        print(f"Agent warm-up skipped: {error}", flush=True)
+
+
+start_agent_warmup()
+
+
 if __name__ == "__main__":
     # The auto-reloader is off by default: without the watchdog package it polls every Python file
     # once a second, which costs CPU the whole time the app runs and adds a second backend process.

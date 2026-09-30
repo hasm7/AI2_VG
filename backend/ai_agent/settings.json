@@ -48,7 +48,7 @@
     "max_nodes_per_specialist": 8,
     "max_text_chars": 1200
   },
-  "query_timeout_seconds": 10,
+  "query_timeout_seconds": 30,
   "prices_usd_per_million_tokens": {
     "gpt-4o": {
       "input": 2.5,
