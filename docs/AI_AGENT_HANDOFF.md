@@ -5,15 +5,14 @@ The graph question-answering agent behind `Chat with AI`, and its view in `Confi
 `POST /api/ai/agent/settings`, `GET|POST /api/ai/agent/evaluation`), used by `ChatPanel` and `ConfigureAgentPanel` in
 `frontend/src/main.tsx`.
 
-**Verified on 2026-09-29** against the code in `backend/ai_agent/` (graph, nodes, specialists, settings, test
-questions), `backend/ai_agent/evaluation_history.json` and the frontend constants. The agent reads the graph only; it
-depends on every layer (`docs/PIPELINE_AND_LINKS_HANDOFF.md`).
+**Verified on 2026-09-30** against the code in `backend/ai_agent/` (graph, nodes, specialists, follow-up, settings,
+test questions), `backend/ai_agent/evaluation_last.json` and the frontend constants, on the Kvitta data. The agent
+reads the graph only; it depends on every layer (`docs/PIPELINE_AND_LINKS_HANDOFF.md`).
 
-**Status.** Built and working. Current models (`settings.json`, since 2026-09-27): planner, explorer and answer
-`gpt-6-sol`; specialists and summary `gpt-6-luna`. The test set of 14 questions passed 14 of 14 in all six runs on
-2026-09-28 with these models, $0.108 to $0.137 per run (about $0.008 per question). **The test questions are written
-for today's data** (names of events, root causes, components, people); they must be rewritten when a new dataset is
-loaded (section 9).
+**Status.** Built and working. Models (`settings.json`): planner, explorer and answer `gpt-6-sol`; specialists and
+summary `gpt-6-luna`; the answer step at reasoning effort `medium`. The 27 test questions for the Kvitta data (the ten
+demo questions, layer checks, chunk questions, small talk and nine control questions) all pass; a full run costs
+about $0.40 (section 9).
 
 ## 1. Design principles
 
@@ -51,10 +50,10 @@ specialists.
 | `summarize` | model (1 call, only when turns left the window) | Folds those turns into the running summary (at most `conversation_summary.max_chars`); on failure keeps the old summary and retries the same turns next time |
 | `planner` | model (1 call, structured `PlanOut`) | `standalone_question` (the question rewritten to stand on its own), `question_types` (`smalltalk`, `lookup`, `why`, `ranking`, `who`, `timeline`, `impact`, `other`), `language`, `entities`, `keywords_en`, `specialists`, `reason`. Route `smalltalk` only when the types are exactly `["smalltalk"]`. **Safety rule:** a graph question with no usable specialist runs every enabled specialist |
 | `entry` | code + 1 embedding call | Searches with the standalone question: exact lookup (issue keys, PR refs, document identifiers; names via `entity_lookup`), vector search (`searchable_embedding`, Cypher `SEARCH`), fulltext (`searchable_text`, on the English keywords); merged by reciprocal rank fusion (`RRF_K = 60`), best hit per `embedding_group`, at most `search.entry_points`. Also stores the question vector |
-| `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions, comments, reviews and code changes of an entry issue, document or PR, the evidence of entry events, and nodes that mention an entry issue, PR or document |
-| `causes` | code + follow-up | Events, root causes, topics: entry events, events citing entry sources, root causes of entry events and events of entry root causes, events an entry code change contributed to, root causes in an entry component, events of an entry issue's topic, events affecting an entry component |
+| `sources` | code + model follow-up | Source records around the entry points: the entry nodes, versions, comments, reviews and code changes of an entry issue, document or PR, the evidence of entry events, and nodes that mention an entry issue, PR or document. Plus: the part of a pull request an entry source names (a reserved place, below), and the **topic sources** fact |
+| `causes` | code + follow-up | Events, root causes, topics: entry events, events citing entry sources, root causes of entry events and events of entry root causes, events an entry code change contributed to, root causes in an entry component, events of an entry issue's topic, events affecting an entry component. Plus the **causal chain** facts |
 | `architecture` | code + follow-up | Components: entry components; components affected by entry events, holding entry root causes, evidenced by entry sources, implemented in files an entry code change or PR modifies; dependency neighbours |
-| `people` | code + follow-up | Eligible persons and communities: entry persons, actors of entry events, people linked by activity to entry sources, experts on entry subjects, community members, meeting participants, mail recipients; participation lists of an entry meeting or mail as a citable item; for `ranking` questions the metric tables as facts and "what X's knowledge rests on" facts; for a general `who` question (no entity) the list of every person as a fact |
+| `people` | code + follow-up | Eligible persons and communities: entry persons, actors of entry events, people linked by activity to entry sources, experts on entry subjects, community members, meeting participants, mail recipients; participation lists of an entry meeting or mail as a citable item; always the **outside persons** and **groups** facts; for `ranking` questions the metric tables as facts and "what X's knowledge rests on" facts; for a general `who` question (no entity) the list of every person as a fact |
 | `check` | code | Not enough when: no entry points; no evidence; a `why` question where `causes` ran and found no nodes; a `ranking` question without any facts. Otherwise enough |
 | `explorer` | model + read-only Cypher | Runs at most once, only when `check` says not enough, the explorer is enabled and the budget allows |
 | `answer` | model (1 streamed call) | Answers from the evidence only, cites references in square brackets, mentions stale layers, answers in the planner's language. **Refuses in code** (no model call) when any fetch failed |
@@ -69,6 +68,26 @@ in Neo4j) come first; nodes without an embedding (`Issue`, `Document`, `TeamsMee
 time. Kept nodes are listed in time order with their `embedding_text` cut to `evidence.max_text_chars`; nodes without
 an embedded text get a short fallback text.
 
+**Chunks.** When search reached a document version through chunks of its long text (`EmbeddingChunk`,
+`docs/EMBEDDING_LAYER_HANDOFF.md`, section 5), the entry point keeps the ids of those chunks (`chunk_ids`), and the
+node's evidence text is the text of those chunks in order, so the model reads the part that matched rather than the
+beginning of the document.
+
+**Reserved place for a named pull request** (`referenced_parts`, `sources` only). When an entry source names a pull
+request ("in my review of kvitta-mobile#6"), the review or code change of that PR most similar to the question takes
+one of the `max_nodes_per_specialist` places, replacing the lowest-ranked node. A reply is replaced by the review it
+answers, where the statement was made. At most `MAX_REFERENCE_PLACES` = 1, only at a similarity of at least
+`MIN_REFERENCE_SIMILARITY` = 0.64 (measured on the Kvitta data).
+
+**Facts added by the specialists** (one line each, cited as `fact-N`):
+
+| Fact | Specialist | Content |
+| --- | --- | --- |
+| Topic sources (`topic_source_facts`) | `sources` | For each entry topic (or, with none, the topic most entry points belong to): every source it was built from, by kind (issues, pull requests, documents, mails, Slack messages, meetings), and the mails and Slack messages that name no issue but are close to the topic in meaning (cosine to the topic's embedding at least `UNLINKED_SIMILARITY` = 0.78) and time (within its events' period, one day either side), with author and the first 160 characters, at most 5 |
+| Causal chain (`causal_chain_facts`) | `causes` | For the events in the packet that no other listed event led to: every chain of `CAUSED` and `CROSS_TOPIC_CAUSED` links of up to three steps ending there, oldest step first with dates; the events most similar to the question first, at most `MAX_CHAIN_FACTS` = 2 |
+| Outside persons (`outside_person_facts`) | `people` | Every eligible person whose e-mail domain differs from the domain most persons share (the customer), with every mail they sent, replies folded into their thread by subject |
+| Groups (`community_facts`) | `people` | Every community from the graph-algorithms layer with its members |
+
 **Citations.** In the answer's evidence text every node starts with its reference in brackets (its name), and every
 distinct fact gets `fact-1`, `fact-2`, ... The answer's brackets are resolved against these: a node becomes a
 citation with its label, a fact a citation labelled `Fact`; anything else is reported as unresolved.
@@ -76,7 +95,7 @@ citation with its label, a fact a citation labelled `Fact`; anything else is rep
 ## 4. Specialist follow-up and explorer (`followup.py`)
 
 **Follow-up.** After the code fetch, one model call (`models.specialists`) sees the question and a compact view of the
-packet (label, name, 160-character snippet per node). It replies DONE or calls up to `max_calls_per_round` of its own
+packet (label, name, 160-character snippet and the node's `Mentions:` line per node). It replies DONE or calls up to `max_calls_per_round` of its own
 tools; `max_rounds` rounds (1: results are not sent back). At most `max_extra_nodes` new nodes are added, most similar
 to the question first. Skipped when the budget is spent. A failed follow-up is not an error.
 
@@ -129,7 +148,7 @@ prices only in the file).
 | Key | Current |
 | --- | --- |
 | `models` | summarize `gpt-6-luna`, planner `gpt-6-sol`, specialists `gpt-6-luna`, explorer `gpt-6-sol`, answer `gpt-6-sol` |
-| `reasoning_effort` | summarize `none`, planner `low`, specialists `low`, explorer `low`, answer `low` (sent only to reasoning models: names starting `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`) |
+| `reasoning_effort` | summarize `none`, planner `low`, specialists `low`, explorer `low`, answer `medium` (sent only to reasoning models: names starting `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`). The answer step at `medium` follows the evidence and the facts more consistently from run to run |
 | `history_turns` | 3 |
 | `conversation_summary` | enabled, 1500 characters |
 | `budget_usd_per_question` | 0.05 (above it, follow-ups and the explorer are skipped; the answer always runs) |
@@ -167,8 +186,9 @@ OpenAI), streamed: `progress` per question, then `done`. Results in `evaluation_
 sound and reference choices are kept in the tab's `sessionStorage`, so a page reload keeps the conversation (the
 backend keeps its history unless it was restarted). `New` starts a new thread. Answers are rendered as a small, safe
 subset of Markdown and typed out at about `TYPING_CHARS_PER_SECOND` = 50, faster when far behind
-(`TYPING_CATCH_UP_PER_SECOND` = 0.66), scrolling at most every `TYPING_SCROLL_EVERY_MS` = 120 ms. Citation chips find
-and ring the node in the graph panel. The `[ ]` button shows or hides the bracket references in the text; the speaker
+(`TYPING_CATCH_UP_PER_SECOND` = 0.66), scrolling at most every `TYPING_SCROLL_EVERY_MS` = 120 ms. Under each answer,
+the node citations are chips that find and ring the node in the graph panel; the fact citations are behind a
+`Show facts (N)` button (`Hide facts` closes them again), one per answer, closed by default. The `[ ]` button shows or hides the bracket references in the text; the speaker
 button turns a quiet typing blip on or off. While the AI works, the right panel's knowledge graphic glows and signals
 run along its lines; afterwards the layers the answer drew on stay lit.
 
@@ -179,68 +199,42 @@ with a cost estimate; `Show questions and results`; run history).
 
 ## 9. Test questions (`backend/ai_agent/test_questions.json`)
 
-14 questions scored in code by `evaluation.py`: each has an expected route, groups of expected evidence nodes (label
-plus exact name or part of the name), optional expected facts and expected words in the answer; a question passes
-when all groups match. Every question runs without history.
+27 questions for the Kvitta data, scored in code by `evaluation.py`: each has an expected route, groups of expected
+evidence nodes (label plus exact name or part of the name), optional expected facts and expected words in the
+answer; a question passes when all groups match. Every question runs without history. Expected nodes and words were
+taken from the graph and checked against the SQL data. All 27 pass (run of 2026-09-29).
 
-| Id | Question | Checks |
-| --- | --- | --- |
-| q01 | Varför blockerades AUTH-17? | an `Event` containing "blocked"; "säkerhet"/"security" |
-| q02 | Vilken kod ändrades för mobilfixen? | `CodeChange` containing `mobile_refresh.py` |
-| q03 | Vilka komponenter använder Session lifetime policy? | that `Component`; both refresh endpoint names |
-| q04 | Vad var grundorsaken till mobilregressionen? | a `RootCause` containing "mobile" |
-| q05 | Vem kan mest om Mobile session refresh endpoint? | `Person` Erik Nilsson or the component; "Erik Nilsson" |
-| q06 | Var finns det en kunskapsrisk om någon slutar? | "Mobile session refresh endpoint" |
-| q07 | Vilka grupper finns i teamet? | a `Community`; "Anna Berg", "Priya Raman" |
-| q08 | Vem har högst betweenness i teamet? | a fact with "betweenness"; "Anna Berg" |
-| q09 | Vilka dokument beskriver kravet REQ-AUTH-SESSION och hur ändrades det? | `doc-001 v1` and `doc-001 v2`; "inaktiv"/"inactivity" |
-| q10 | Vem sa att en fast 60-minutersgräns inte räckte innan kravet skrevs om? | one of `seg-003`, `slack-005`, `review-001`, `comment-002`; "Priya Raman" |
-| q11 | Vilka källor beskriver att AUTH-17 blockerades? | one of `AUTH-17 v3`, `comment-002`, `slack-006`, `seg-003` |
-| q12 | Täcker fixen i backend-api#42 även mobilen? | one of review-005, the web-only event, a mobile root cause, slack-010/011, comment-005; "web" |
-| q13 | Vilka var med på sprint review-mötet? | `meet-002`; the three participants |
-| q14 | Hej! | route `smalltalk` |
+| Ids | What they test |
+| --- | --- |
+| q01-q10 | The ten demo questions in `kvitta/demofrågor.md`: the duplicate payout's cause across two storylines, the early warning in a review, who argued what before the offline decision, the sources of the Fortnox outage (including the two mails that name no issue), how the VAT requirement changed, the knowledge risks, the link to the customer and who collaborates most, the PR description against the code, what the go decision required and what was removed, and the customer's problems |
+| q11-q15 | One layer each: the expert on the receipt reader, the groups, the highest betweenness, a component's dependencies, the participants of a meeting |
+| q16-q17 | Chunks: answers found only in part 3 of `DESIGN-RECEIPT-READER` (the weekly figures to monitor, the date read from a hotel invoice) |
+| q18 | Small talk (`Hej!`) |
+| q19-q27 | Control questions in other words or about other storylines (the sources of the duplicate payout, why the Visma export was moved, what Anders Nyberg complained about, whether anyone warned of the Fortnox outage, how the team is divided, the messages of the offline debate, who reviewed Emma's first PR, the code change behind the spinner fix, how taxi receipts are read). They were never used to tune the agent |
 
-**What the test set can and cannot show.** Written while the agent was built and partly fitted to it (q10, q12 were
-adjusted after runs). All 14 pass, so it can show that a change breaks something, never that it improves something.
-One run per question can be chance. With new data: rewrite the questions from the new graph (read-only queries), add
-questions the agent does not already pass (a timeline from first to last version, a why question, "who has the most
-...", questions where the right node must be picked among many candidates), and run each more than once.
+A full run with the current settings takes about 6 minutes and costs about $0.40.
 
-Model history: on 2026-09-25 `gpt-4o` (planner, answer) with `gpt-4o-mini` (specialists, explorer) passed 14/14 for
-$0.112; cheaper planners misrouted, a cheap answer model misattributed a quoted statement. Since 2026-09-27 the
-`gpt-6` models are used (14/14 on 2026-09-28).
+## 10. Extending the agent
 
-## 10. Open issues (not decided)
+- A new question type: add it to the planner's `question_types` and give `check` or a specialist a rule for it.
+- A new fact: write a read-only query and a function in `specialists.py` that returns one line per item, and add it
+  to the specialist's packet.
+- New data: rewrite the test questions from the new graph (read-only queries), keep a set of control questions that
+  are never used for tuning, and run each question more than once.
+- Much larger data: see `docs/SCALING_HANDOFF.md` (query limits, ranking caps, roster size).
 
-**Questions outside the project run every specialist.** "Vad är Sveriges huvudstad?" is not small talk (small talk is
-narrowly greetings, thanks and questions about the assistant), so it is a graph question; the planner names no
-specialist; the safety rule then runs all four. Proposals, none decided: an `off_topic` question type routed straight
-to the answer; limiting the safety rule to project question types (and then keeping the explorer from running on the
-empty evidence); or both.
-
-**`check` sees whether there is evidence, not whether it answers the question.** When the specialists return evidence
-about the right subject that lacks what was asked, the explorer never starts. Proposals, none decided: more code rules
-(for `who`, persons or participation items; for `timeline`, more than one point in time); a cheap model judging the
-evidence (one extra call per question, to be measured); or nothing until test questions on grown data show the need.
-
-## 11. Known weak points
-
-The follow-up model sometimes passes a Swedish word as a tool argument (returns nothing, costs little). The tab has
-not been checked at every window width. See `docs/SCALING_HANDOFF.md` for what must change before much larger data
-(query limits, ranking caps, roster size).
-
-## 12. Code map
+## 11. Code map
 
 | File | Holds |
 | --- | --- |
 | `graph.py` | `build_graph`, `stream_chat`, conversation memory, `MissingApiKeyError`, `require_openai_client` |
 | `nodes.py` | `traced`, `prepare`, `summarize`, `planner` (`PlanOut`), `entry`, `dispatch_specialists`, the four specialist nodes, `check`, `explorer`, `answer` (evidence text, citations) |
-| `retrieval.py` | reference detection, lookups, vector and fulltext search, reciprocal rank fusion, group folding |
-| `specialists.py` | the four specialists' queries, participation items, rankings, `expertise_basis`, `person_roster`, `run_specialist` |
+| `retrieval.py` | reference detection, lookups, vector and fulltext search (keeping the matched chunk ids), reciprocal rank fusion, group folding |
+| `specialists.py` | the four specialists' queries, participation items, rankings, `expertise_basis`, `person_roster`, `referenced_parts`, `topic_source_facts`, `causal_chain_facts`, `outside_person_facts`, `community_facts`, `run_specialist` (with the matched chunk texts) |
 | `followup.py` | follow-up tools, `run_followup`, `run_explorer` |
 | `describe.py` | `NODE_INFO`, `EDGE_LABELS`, `STATE_DESCRIPTIONS`, `describe_agent` |
 | `evaluation.py`, `test_questions.json` | scoring, `run_evaluation`, saved runs |
-| `db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text`, `similarities` |
+| `db.py` | `read` (read transaction with timeout), `fetch_nodes`, `node_text`, `chunk_texts`, `similarities` |
 | `prompts.py` | `PLANNER_PROMPT`, `SUMMARY_PROMPT`, `ANSWER_PROMPT`, follow-up and explorer prompts |
 | `settings.py`, `settings.json` | settings, defaults, validation |
 | `state.py`, `usage.py` | `AgentState`; usage and cost |
@@ -249,7 +243,7 @@ not been checked at every window width. See `docs/SCALING_HANDOFF.md` for what m
 Prompts and module constants are read when the backend starts: after editing agent code, restart the backend
 (`settings.json` is the exception).
 
-## 13. Boundaries
+## 12. Boundaries
 
 - Reads Neo4j only (read sessions, read transactions); never writes to Neo4j or PostgreSQL.
 - Model-written Cypher passes `cypher_guard` and runs in a read transaction: two independent guards.

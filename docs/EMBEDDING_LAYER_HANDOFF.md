@@ -5,7 +5,7 @@ enter the graph at the right place whichever layer holds the answer. Each embedd
 its own properties **and its context from every layer**, a vector of that text, and the extra label `Searchable`,
 which carries one vector index and one fulltext index across all layers.
 
-**Verified on 2026-09-29** against `backend/embedding_pass.py`, `backend/pipeline_staleness.py`, `backend/app.py`,
+**Verified on 2026-09-30** (Kvitta data) against `backend/embedding_pass.py`, `backend/pipeline_staleness.py`, `backend/app.py`,
 `frontend/src/main.tsx`, the live graph and `GET /api/embeddings`.
 
 Code: `backend/embedding_pass.py`. UI: `EmbeddingPanel`, tab `Embeddings` (seventh of seven).
@@ -47,20 +47,22 @@ Graph algorithms first.`). The API is called only by `POST /api/embeddings/build
 
 | Layer | Label | Count now |
 | --- | --- | ---: |
-| Import | `MailMessage` | 4 |
-| | `SlackMessage` (every version) | 12 |
-| | `TeamsTranscriptSegment` | 9 |
-| | `IssueVersion` (every version) | 7 |
-| | `IssueComment` | 5 |
-| | `DocumentVersion` (every version) | 3 |
-| | `PullRequest` | 2 |
-| | `PullRequestReview` | 6 |
-| | `CodeChange` | 7 |
-| Knowledge | `Topic`, `Event` | 1, 10 |
-| Architecture | `Component` | 3 |
-| Root cause & impact | `RootCause` | 3 |
-| Expertise & collaboration | `Person` (eligible only) | 5 of 7 |
+| Import | `MailMessage` | 14 |
+| | `SlackMessage` (every version) | 50 |
+| | `TeamsTranscriptSegment` | 45 |
+| | `IssueVersion` (every version) | 34 |
+| | `IssueComment` | 17 |
+| | `DocumentVersion` (every version) | 10 |
+| | `PullRequest` | 14 |
+| | `PullRequestReview` | 33 |
+| | `CodeChange` | 39 |
+| Knowledge | `Topic`, `Event` | 10, 51 |
+| Architecture | `Component` | 18 |
+| Root cause & impact | `RootCause` | 15 |
+| Expertise & collaboration | `Person` (eligible only) | 8 of 10 |
 | Graph algorithms | `Community` | 2 |
+
+360 embedded nodes in total, plus 4 `EmbeddingChunk` nodes (section 5).
 
 Not embedded: `Issue` and `Document` (their versions are; the parent would duplicate them), `TeamsMeeting` (its title
 is in every segment's text), `Repository`, `Module`, `File` (names in component and code change texts; found by
@@ -167,23 +169,28 @@ Collaborate on: {work item types inside the community}
 Shared work items: {names, max 20}
 ```
 
-### 4.7 Example (live, 2026-09-29, abridged)
+### 4.7 Example (live, Kvitta data, 2026-09-30)
 
 ```text
-Component: Mobile session refresh endpoint (endpoint) in repository backend-api
-...
-Files: backend/auth/mobile_refresh.py
-Depends on: Session lifetime policy (calls) - ...
-Affected by events: ...
-Root causes located here: Known mobile refresh-path risk was not followed up, ...
-Experts: Erik Nilsson (62.5 %, rank 1), Anna Lindqvist (37.5 %, rank 2)
-Bus factor 1: knowledge risk, one person holds most of the expertise; top expert Erik Nilsson.
+Component: Fortnox authentication (service) in repository kvitta-api
+Obtains Fortnox tokens through the new token flow and refreshes tokens before expiry.
+Files: app/integrations/fortnox/auth.py
+Depends on: Fortnox (calls) - Fortnox authentication requests tokens using the new Fortnox token flow.
+Used by: Fortnox client (calls) - On a 401 response, the Fortnox client invokes authentication token refresh before its single retry.
+Affected by events: Fortnox exports began failing with 401 Unauthorized, Hotfix restored Fortnox exports and drained queued expenses, Permanent Fortnox token-refresh fix merged
+Root causes located here: Automatic token refresh was missing from the hotfix, Fortnox OAuth flow change was not adopted by the client, Fortnox developer-changelog monitoring gap
+Experts: Ahmed Karimi (63.6 %, rank 1), David Okafor (27.3 %, rank 2), Sofia Berg (9.1 %, rank 3)
+Bus factor 1: knowledge risk, one person holds most of the expertise; top expert Ahmed Karimi.
 ```
+
+One text carries what four layers know about the component: its files (Architecture), the events and root causes
+around it (Knowledge, Root cause & impact), its experts (Expertise) and its bus factor (Graph algorithms).
 
 ### 4.8 Caps
 
-When a list is longer than its cap, the most important entries are kept and the text says `... and N more`. No list
-reaches its cap with today's data.
+When a list is longer than its cap, the most important entries are kept and the text says `... and N more`. With the
+Kvitta data the person expertise list is the one that uses its cap: Ahmed Karimi has 21 expertise entries, David
+Okafor 19, Nina Petrova 18 and Maria Lindgren 16, and each text lists the 10 with the highest share.
 
 | Cap | Value | List (kept first) |
 | --- | ---: | --- |
@@ -218,9 +225,19 @@ become `EmbeddingChunk:Searchable` nodes linked `(:EmbeddingChunk)-[:CHUNK_OF]->
 deleted when the source is gone or no longer eligible. Chunk nodes are found by `generated_by STARTS WITH
 "embedding-"`.
 
-No text today is longer than 1 110 characters, so no chunks exist. The chunk path was tested on 2026-09-24 by running
-the pass once with lowered thresholds in a throwaway process: 29 nodes split into 84 chunks, all consistent, found by
-fulltext, and all removed again by a normal run.
+With the Kvitta data the design document `DESIGN-RECEIPT-READER` (`doc-002`) is the long text: both of its versions
+(14 257 and 15 015 characters of body) are split into three parts, so there are 4 chunk nodes:
+
+| Chunk | Characters of text |
+| --- | ---: |
+| `doc-002 v1 (part 2 of 3)` | 6 107 |
+| `doc-002 v1 (part 3 of 3)` | 3 381 |
+| `doc-002 v2 (part 2 of 3)` | 6 108 |
+| `doc-002 v2 (part 3 of 3)` | 4 346 |
+
+Each has its own vector and is found by both indexes: a fulltext search for a phrase that exists only in part 3 of the
+document (`"TAXI STOCKHOLM"`, `baseline`) returns exactly the two part-3 chunks. When the agent's search hits a chunk,
+the evidence for the document version is the text of the chunk that matched (`docs/AI_AGENT_HANDOFF.md`).
 
 ## 6. What is written on each embedded node
 
@@ -320,22 +337,28 @@ and fulltext)`, `Excluded persons (existing Person nodes)`, and `Failures from t
 Graph panel: the `Chunks` button (filter key `Embeddings`, `CHUNK_OF` only) and the `Entry points` toggle, which rings
 every embedded node (`docs/GRAPH_DATA_HANDOFF.md`, section 10).
 
-## 12. Current state (2026-09-29)
+## 12. Current state (2026-09-30, Kvitta data)
 
-79 eligible nodes, 79 embedded, 0 outdated, 0 missing, 0 chunks; `counted_from: stored`; not stale;
-`last_embedding_at` `2026-09-24T21:55:49.345952+00:00`; excluded persons Support (mailbox), Anna (ambiguous). A full
-re-embed would send 79 texts, 45 887 characters, about 11 500 tokens: a fraction of a cent.
+360 eligible nodes, 360 embedded, 0 outdated, 0 missing, 4 chunks (364 vectors in total); not stale;
+`last_embedding_at` `2026-09-29T20:04:26.393727+00:00`, `last_embedding_failures` 0. Excluded persons: Kvitta Support
+and Kvitta Alerts (both mailboxes). The build sent 364 texts, 235 047 characters, about 59 000 tokens: under one cent
+with `text-embedding-3-large`.
 
-## 13. Search quality findings (measured 2026-09-24, on this data)
+## 13. Search on the Kvitta data
 
-Seven questions, one per layer, searched against `searchable_embedding` (top 5): vector search alone found an expected
-node for 5 of 7; with the fulltext index added (hybrid search) all 7. The two vector misses: "who knows most about the
-mobile refresh endpoint" returned the component (whose text names the expert) rather than the person; "where is there
-a knowledge risk" returned the topic, while fulltext `"knowledge risk"` found the component with bus factor 1.
+Measured on 2026-09-29 against `searchable_embedding` and `searchable_text`:
 
-Conclusions the agent follows: use hybrid search; read a hit's text, not only its label; answer ranking questions
-(lowest bus factor, highest betweenness) with direct queries on the metric properties; use the Cypher `SEARCH`
-clause, since `db.index.vector.queryNodes` is deprecated in the installed Neo4j.
+- **Meaning across sources.** The two mails that name no issue are found by meaning. The alert `mail-006` has the
+  Fortnox messages in `#incidents` as its nearest neighbours (`slack-026`, `-028`, `-029`, `-030`), and the customer's
+  first Fortnox mail `mail-007` has Maria's answers `mail-008` and `mail-009`, which name `KV-7`.
+- **Chunks.** Phrases that exist only in the last part of `DESIGN-RECEIPT-READER` are found in the chunk nodes
+  (section 5).
+- **Hybrid search in the agent.** The agent merges exact lookups, vector search and fulltext search (reciprocal rank
+  fusion). With it the agent answers all 27 test questions correctly (`docs/AI_AGENT_HANDOFF.md`, section 9).
+
+How the agent uses the indexes: hybrid search for the entry points; the text of a hit is read, not only its label;
+ranking questions (lowest bus factor, highest betweenness) are answered from the metric properties directly; the Cypher
+`SEARCH` clause is used for the vector index.
 
 ## 14. What the data needs for this layer
 
@@ -352,7 +375,7 @@ clause, since `db.index.vector.queryNodes` is deprecated in the installed Neo4j.
 | --- | --- |
 | `backend/embedding_pass.py` | constants and caps; `QUERIES` (one read query per label); one text builder per label; `GROUPS`; `LABELS` (label, layer, builder); `split_text`, `_batches`; indexes; the stored path (`config_fingerprint`, `read_run_markers`, `_stored_per_label`, `_stored_page`) and the assembled path (`_assemble`, `_per_label`); `load_embedding_state`, `embedding_nodes_page`, `embedding_preview`, `run_embedding_pass` |
 | `backend/pipeline_staleness.py` | `UPSTREAM_BY_STAGE["embeddings"]` |
-| `backend/app.py` | the four routes; filter `Embeddings` -> `CHUNK_OF`; `load_neo4j_graph` skips `Searchable` when choosing a node type |
+| `backend/app.py` | the four routes; filter `Embeddings` -> `CHUNK_OF`; `load_neo4j_graph` skips `Searchable` when choosing a node type and sends the vector's length instead of the vector (`NODE_PROPERTIES`) |
 | `frontend/src/main.tsx` | `EmbeddingPanel`; `Chunks` and `Entry points` in the graph panel |
 
 Adding a label: a query in `QUERIES`, a text builder, a `GROUPS` entry and a `LabelConfig` row in `LABELS`; the tab,

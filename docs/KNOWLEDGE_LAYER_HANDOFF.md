@@ -222,8 +222,8 @@ vary a little between rebuilds.
 `POST /api/knowledge/build`: runs the build and returns the same plus `built_at`, `deleted_relationships`,
 `deleted_nodes`, `calls`, `model`, `discarded_evidence`, `overflow_events`, `overflow_links`, `token_usage`.
 
-Display limitation: `evidence` in `events` is a distinct list of display names, so the two versions of one Slack
-message (same display name) would show once. The relationships themselves are unaffected.
+`evidence` in `events` is a distinct list of display names, so the two versions of one Slack message (same display
+name) show as one entry; the relationships keep both.
 
 ## 12. UI
 

@@ -22,21 +22,23 @@ Reading order: this guide, `docs/SQL_DATA_HANDOFF.md`, `docs/PIPELINE_AND_LINKS_
 - A short summary of the storylines, the people and their roles, and for each storyline the facts a good answer should
   contain. The agent's test questions will be rewritten from it.
 
-**Replace or extend?** The dataset can either replace today's (then the tables are emptied or recreated and the graph
-is emptied before import) or extend it (keep the `AUTH-17` story and add more, with IDs that do not collide). That is
+**Replace or extend?** The current dataset is the Kvitta scenario (`data/kvitta_seed.sql`, described in Swedish in
+`kvitta/`). A new dataset can either replace it (then the tables are emptied or recreated and the graph is emptied
+before import) or extend it (keep the Kvitta storylines and add more, with IDs that do not collide, section 5). That is
 the user's decision; ask before assuming. Loading and rebuilding are done by the user
 (`docs/PIPELINE_AND_LINKS_HANDOFF.md`, section 6).
 
 ## 2. Size
 
-Today: 64 rows, 108 graph nodes, 6 people. The goal is enough data to show every layer working, without reaching the
-limits in `docs/SCALING_HANDOFF.md` (the agent and the graph panel are built for a few hundred nodes; thousands need
-changes first).
+The Kvitta data: 263 rows, 294 graph nodes after the import and 542 after all seven layers, 8 people and 2 shared
+mailboxes, 12 issues, 14 pull requests in 3 repositories, 6 documents, 10 topics. That size shows every layer working
+and stays within what the agent and the graph panel are built for (a few hundred nodes; for thousands see
+`docs/SCALING_HANDOFF.md`). The ranges below give room around it.
 
 | Item | Suggested | Why |
 | --- | --- | --- |
 | People | 10 to 14 team members, 2 to 3 customer contacts, 1 to 2 shared mailboxes | communities, betweenness, bus factor need a real network |
-| Repositories | 3 (for example `backend-api`, `mobile-app`, `web-portal` or `shared-lib`) | several component graphs |
+| Repositories | 3 (Kvitta: `kvitta-api`, `kvitta-mobile`, `kvitta-web`) | several component graphs |
 | Issues | 8 to 12, each with 2 to 6 versions | topics are built per issue |
 | Topics (storylines) | 3 to 5, some related to each other | cross-topic causal links |
 | Pull requests | 10 to 15, several with 2 to 4 versions | code history, reviews, components |
@@ -85,9 +87,9 @@ updated.
 - [ ] Full names, used consistently (display names may vary in casing or a short form in some rows).
 - [ ] Customers with their own email domain (they appear only in mail).
 - [ ] At least one shared mailbox (`support@`, `alerts@`, `noreply@`, ...): kept, but excluded from people analysis.
-- [ ] Optionally one deliberate ambiguity: a speaker or name-only mention of a first name shared by two people (like
-      today's `Anna`), to show that the system refuses to guess.
-- [ ] Optionally one person with a source ID but no email anywhere (like today's Priya Raman).
+- [ ] Optionally one deliberate ambiguity: a speaker or name-only mention of a first name shared by two people, to
+      show that the system refuses to guess. (The Kvitta data has none: every first name is distinct.)
+- [ ] Optionally one person with a source ID but no email anywhere. (The Kvitta data has none.)
 
 ### Layer 1, references (`docs/REFERENCE_EXTRACTION_LAYER_HANDOFF.md`)
 
@@ -142,25 +144,29 @@ updated.
 - Keep the ID patterns and make them unique across the whole dataset (`docs/SQL_DATA_HANDOFF.md`, section 10):
   `mail-001`, `slack-001`, `meet-001`, `seg-001` (continue across meetings), `issue-001`, `comment-001`, `doc-001`,
   `review-001` (continue across PRs), `rg-001`. Zero-pad.
-- Keep one `source_instance` per system: `gmail-main`, `slack-main`, `teams-main`, `jira-main`, `docs-main`,
-  `github-main` (or others, used consistently).
-- If extending today's data, start numbering after the existing IDs (`mail-005`, `slack-012`, `seg-010`,
-  `issue-003`, `comment-006`, `doc-003`, `review-007`, PR numbers above 47 or other repositories) and do not reuse the
-  issue keys `AUTH-17`, `AUTH-19` or the identifier `REQ-AUTH-SESSION` for new things.
+- Keep one `source_instance` per system, used consistently. Kvitta uses `kvitta-mail`, `kvitta-slack`,
+  `kvitta-teams`, `kvitta-jira`, `kvitta-docs`, `kvitta-github`.
+- If extending the Kvitta data, start numbering after the existing IDs (`mail-015`, `slack-048`, `meet-011`,
+  `seg-046`, `issue-013` with key `KV-13`, `comment-018`, `doc-007`, `review-034`, `rg-033`; PR numbers above
+  `kvitta-api#61`, `kvitta-mobile#9` and `kvitta-web#9`), and do not reuse an existing issue key or document
+  identifier for new things.
 - Timestamps with offsets, in a plausible working rhythm (working hours, weekdays). Keep related items in order. The
   database returns times in `Europe/Berlin`; to avoid mixed offsets, keep the whole dataset between two daylight
   saving changes (for example January to mid-March 2026, all `+01:00`), or accept `+02:00` after the last Sunday of
   March.
 - Commits: short hex strings (`a1b2c3d4`), a new `head_commit` per PR version, reviews citing the reviewed version's
   `head_commit`.
-- URLs: consistent fake hosts (`https://jira.example.com/browse/PAY-12`, ...).
+- URLs: consistent fake hosts (Kvitta: `https://jira.kvitta.se/browse/KV-7`, `https://kvitta.slack.com/archives/...`,
+  `https://github.kvitta.se/kvitta-api/pull/58`, ...).
 
 ## 6. Checks to run after loading (read-only SQL)
 
 Each query should return **no rows**, except the two marked "inspect" and "review" and the rough check 13. All of them
-were run read-only against today's data on 2026-09-29: they return only `u-priya` (1, intentional: no email
-anywhere), `doc-002` (5b, a design document without an identifier) and eight rows in check 13 (small talk, customer
-mails, and meeting lines that rely on the rest of their meeting); everything else is empty.
+were run read-only against the Kvitta data on 2026-09-30: checks 1 to 4 and 6 to 12 return no rows; 5a lists the six
+documents, each with a resolvable author; 5b returns no rows (every document has an identifier); check 13 returns 41
+rows (14 Slack messages, 6 mails, 21 segments): thread replies and small talk, the alert and the customer's first mails
+written before an issue existed, and meeting lines that are reached through the rest of their meeting (the Knowledge
+layer takes in a whole meeting when one of its segments names the issue).
 
 ```sql
 -- 1. Source IDs used in issues, docs, PRs or transcripts that never appear together with an email

@@ -3,7 +3,7 @@
 This is the reference for the Neo4j graph: every node label, its key and properties, every relationship type, which
 code creates it, the constraints and indexes, the bookkeeping node, the graph API and the graph panel.
 
-**Verified on 2026-09-29** against the live database (Neo4j 2026.08.1 Enterprise, read-only session: labels,
+**Verified on 2026-09-30** against the live database (Neo4j 2026.08.1 Enterprise, read-only session: labels,
 relationship types with their start and end labels, every property key and value type per label, constraints,
 indexes) and against the code that writes the graph (`viewer/app.py` for the import, one module per layer in
 `backend/`).
@@ -28,10 +28,9 @@ Three kinds of content live in the graph:
 
 ## 2. Current snapshot
 
-The Kvitta data (`data/kvitta_seed.sql`), imported and built layer by layer on 2026-09-29, through Graph algorithms.
-**The Embeddings layer has not been run on this data yet**, so there are no `Searchable` labels, vectors or
-`EmbeddingChunk` nodes, and `last_embedding_at` is absent. Without `PipelineState`: 538 nodes and 2 847
-relationships; nothing is stale.
+The Kvitta data (`data/kvitta_seed.sql`), imported and built layer by layer on 2026-09-29, all seven layers. Without
+`PipelineState`: **542 nodes and 2 851 relationships**; nothing is stale. The SQL import alone gives 294 nodes and 617
+relationships, so the layers almost double the nodes and multiply the relationships by 4.6.
 
 | Label | Count | Created by |
 | --- | ---: | --- |
@@ -57,13 +56,13 @@ relationships; nothing is stale.
 | `RootCause` | 15 | Root cause & impact layer |
 | `Expertise` | 109 | Expertise & collaboration layer |
 | `Community` | 2 | Graph algorithms |
-| `EmbeddingChunk` | not built yet | Embeddings (only for texts over 12 000 characters; `doc-002` is the only one) |
+| `EmbeddingChunk` | 4 | Embeddings (the two versions of `doc-002`, the only texts over 12 000 characters) |
 | `PipelineState` | 1 | every stage (bookkeeping) |
-| `Searchable` (extra label) | not built yet | Embeddings; on every embedded node |
+| `Searchable` (extra label) | 364 | Embeddings; on the 360 embedded nodes and the 4 chunks |
 
 Per stage: import 294 nodes and 617 relationships; Reference extraction 293 relationships; Knowledge 61 nodes and 733
 relationships; Architecture 57 and 188; Root cause & impact 15 and 186; Expertise & collaboration 109 and 822; Graph
-algorithms 2 and 8.
+algorithms 2 and 8; Embeddings 4 and 4.
 
 LLM-derived counts (events, root causes, components, expertise and everything built on them) vary a little between
 rebuilds, because the model does not propose exactly the same output every time.
@@ -286,7 +285,7 @@ listed properties.
 | `EXPERTISE_EVIDENCED_BY` | `Expertise` | each counted activity node | 5 | | 580 |
 | `WORKS_WITH` | `Person` | `Person` (once per pair, from the smaller `person_key`) | 5 | `weight`, `shared_work_items` (max 50 names), `work_item_types` | 24 |
 | `MEMBER_OF_COMMUNITY` | `Person` | `Community` | 6 Graph algorithms | | 8 |
-| `CHUNK_OF` | `EmbeddingChunk` | its source node | 7 Embeddings | | not built yet |
+| `CHUNK_OF` | `EmbeddingChunk` | its source node | 7 Embeddings | | 4 |
 
 ## 8. `PipelineState`
 
@@ -302,9 +301,9 @@ and two embedding markers. Excluded from `/api/graph`.
 | `last_causal_build_at` | Root cause & impact layer | `2026-09-29T18:55:47.397134+00:00` |
 | `last_collaboration_build_at` | Expertise & collaboration layer | `2026-09-29T19:07:23.811324+00:00` |
 | `last_algorithms_run_at` | Graph algorithms | `2026-09-29T19:21:59.242785+00:00` |
-| `last_embedding_at` | Embeddings | absent (not run on the Kvitta data yet) |
-| `last_embedding_failures` | Embeddings | absent |
-| `embedding_config` | Embeddings | absent; fingerprint of the embedding configuration once run |
+| `last_embedding_at` | Embeddings | `2026-09-29T20:04:26.393727+00:00` |
+| `last_embedding_failures` | Embeddings | `0` |
+| `embedding_config` | Embeddings | fingerprint of the embedding configuration |
 
 Staleness is computed from these timestamps (`docs/PIPELINE_AND_LINKS_HANDOFF.md`, section 4).
 
@@ -381,22 +380,40 @@ Response: `{"source", "nodes": [{"id", "label", "type", "summary", "properties"}
 `sourceType` is the filter the relationship type belongs to. `CAUSED` is in both `Knowledge` and `Causal`, and
 `sourceType` reports the first (`Knowledge`).
 
+Node properties are read with `n { .*, embedding: size(n.embedding) }` (`NODE_PROPERTIES`): the panel gets every
+property except the embedding vector, and in its place the text `[1536 numbers, not loaded in the graph view]`. The
+full graph response is about 2.2 MB and takes about 3 seconds on the Kvitta data (Knowledge 1.0 MB, References 0.5
+MB). Search and the agent read the vectors directly from Neo4j.
+
 ### 10.2 The graph panel (left box)
 
 `GraphView` in `frontend/src/main.tsx` draws the response with Cytoscape. Filter buttons across the top; the bottom
 row holds `Chunks` and `Entry points` on the left and the SQL viewer button and Neo4j status on the right.
 
+- **Layout:** every filter except Knowledge is placed by Cytoscape's force-directed `cose` layout, run in steps
+  (`animate: true`, `refresh: 10`, `numIter: 400`, `randomize: true`), so the page stays responsive while the nodes
+  settle. While it runs the panel shows `Drawing graph (N nodes): X %...`; before that, while the data is fetched,
+  `Loading graph...`. On the full Kvitta graph (542 nodes) the layout takes about 12 seconds; the smaller filters are
+  quicker. A new filter stops a layout still running.
+- **Knowledge filter:** fixed positions, no force layout. Topics in a column on the left, events in columns on the
+  right, and their evidence in a grid between them; the grid is made about as wide as it is high and the side columns
+  as tall as the grid, so the whole view fits the panel (about 2 650 x 1 750 on the Kvitta data).
+- **Distance slider:** spreads the force layout (node repulsion and edge length). It applies when released, and then
+  the layout runs once.
+- **Zoom:** from 0.1 to 2.5.
+- **Colours:** one fixed colour per node type (`nodeColors`), including `Topic` (navy), `Event` (pink) and
+  `EmbeddingChunk` (grey); the legend shows the types in view.
 - **Entry points** (toggle): rings every embedded node (any node with `embedding_model`) in the shown filter, so the
   AI's search entry points are visible. Display only.
-- **Motion** (added 2026-09-29): the whole graph turns slowly as one picture (`GRAPH_MOTION_TURNS = true`,
-  `GRAPH_TURN_SECONDS = 120` per turn at speed 1). With the pointer over the graph it turns back upright and stands
-  still so clicks land correctly; it also stands still while paused, while labels are shown and at speed 0. `Auto fit`
-  zooms out to the whole visible graph (`GRAPH_AUTO_FIT_MS = 450`) before turning.
+- **Motion:** on from the start. The whole graph turns slowly as one picture (`GRAPH_MOTION_TURNS = true`,
+  `GRAPH_TURN_SECONDS = 120` per turn at speed 1) once the layout has placed the nodes. With the pointer over the
+  graph it turns back upright and stands still so clicks land correctly; it also stands still while paused, while
+  labels are shown and at speed 0. `Auto fit` zooms out to the whole visible graph (`GRAPH_AUTO_FIT_MS = 450`) before
+  turning. Turning is a CSS rotation of the canvas, so it costs almost nothing.
 - **Citations from the chat** ring and centre the cited node and hold the graph still until the pointer has been in
   the graph box and left it.
-- Every node and every relationship of the chosen filter is sent to the browser and drawn. That is fine at today's
-  size and will not be at thousands of nodes (`docs/SCALING_HANDOFF.md`). The panel is fragile: change it carefully and
-  in isolation.
+- Every node and every relationship of the chosen filter is sent to the browser and drawn. For much larger data see
+  `docs/SCALING_HANDOFF.md`. Change the panel carefully and in isolation.
 
 ## 11. What is not modelled as graph structure
 
