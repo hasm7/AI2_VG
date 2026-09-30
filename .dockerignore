@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+.venv
+**/__pycache__
+**/node_modules
+frontend/dist
+data
+deploy
+state
+docs
+kvitta
+draft
+**/*.log
+backend/ai_agent/evaluation_last.json
+backend/ai_agent/evaluation_history.json

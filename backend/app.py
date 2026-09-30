@@ -48,6 +48,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VIEWER_APP = PROJECT_ROOT / "viewer" / "app.py"
 VIEWER_LOG = PROJECT_ROOT / "backend" / "viewer_server.log"
 VIEWER_URL = "http://127.0.0.1:5000/"
+# The address the browser opens; on the server the viewer is reached through Nginx.
+VIEWER_PUBLIC_URL = os.getenv("VIEWER_PUBLIC_URL", VIEWER_URL)
 viewer_process: subprocess.Popen | None = None
 viewer_log_file = None
 
@@ -874,7 +876,7 @@ def api_viewer_start():
 
     try:
         start_viewer()
-        return jsonify({"url": VIEWER_URL})
+        return jsonify({"url": VIEWER_PUBLIC_URL})
     except Exception as error:
         return jsonify({"error": str(error)}), 500
 

@@ -2235,4 +2235,5 @@ def import_prs():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
+    # VIEWER_HOST=0.0.0.0 on the server, so Nginx in another container can reach it.
+    app.run(host=os.getenv("VIEWER_HOST", "127.0.0.1"), port=5000, debug=False, use_reloader=False)

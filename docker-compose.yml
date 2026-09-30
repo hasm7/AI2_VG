@@ -1,0 +1,75 @@
+# The app on the server: Neo4j, PostgreSQL, the backend and Nginx. Only Nginx is public (port 80).
+# Values come from the server's .env next to this file (see deploy/.env.example); how to run it is in deploy/README.md.
+
+services:
+  neo4j:
+    # Enterprise under the evaluation license. For Community, use neo4j:2026.08.1-community (it needs a dump converted
+    # with `neo4j-admin database migrate --to-format=aligned`).
+    image: neo4j:2026.08.1-enterprise
+    restart: unless-stopped
+    environment:
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: eval
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      # The agent's queries use Cypher 25 (the SEARCH clause), as in the local database.
+      NEO4J_db_query_default__language: CYPHER_25
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    volumes:
+      - neo4j-data:/data
+    ports:
+      # Only on the server itself, for the Neo4j Browser through an SSH tunnel.
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # bolt://, not neo4j://: routing would hand back Neo4j's advertised address (localhost), not the service name.
+      NEO4J_URI: bolt://neo4j:7687
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      # The SQL viewer listens on all interfaces inside the container; the browser opens it through Nginx.
+      VIEWER_HOST: 0.0.0.0
+      VIEWER_PUBLIC_URL: http://viewer.${SERVER_NAME}/
+    volumes:
+      # The agent's settings and test runs, kept on the server so they survive a rebuild.
+      - ./state/settings.json:/app/backend/ai_agent/settings.json
+      - ./state/evaluation_last.json:/app/backend/ai_agent/evaluation_last.json
+      - ./state/evaluation_history.json:/app/backend/ai_agent/evaluation_history.json
+    depends_on:
+      - neo4j
+      - postgres
+
+  nginx:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_NAME: ${SERVER_NAME}
+    volumes:
+      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./state/.htpasswd:/etc/nginx/.htpasswd:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  neo4j-data:
+  postgres-data:

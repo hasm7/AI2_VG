@@ -70,6 +70,9 @@ neo4j/logs/
 neo4j/import/
 neo4j/plugins/
 
+# Server state for Docker Compose (passwords, certificates, agent settings)
+state/
+
 # PostgreSQL local files
 postgres/data/
 pgdata/

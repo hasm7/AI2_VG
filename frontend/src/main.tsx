@@ -4572,7 +4572,16 @@ function BuildGraphLayersPanel() {
 // (which is kept per thread id). A reload keeps it (the tab's storage below), so the backend still knows the
 // conversation unless the backend itself was restarted.
 function newThreadId(): string {
-  return crypto.randomUUID();
+  // crypto.randomUUID exists only on HTTPS and localhost; the server is plain HTTP, so build a version 4 UUID from
+  // crypto.getRandomValues there.
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 // The chat survives a page reload in the same tab: the conversation, its thread id, the unsent text, the sound and
