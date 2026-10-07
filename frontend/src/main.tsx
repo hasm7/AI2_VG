@@ -1,6 +1,7 @@
 import React, { Fragment, forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import cytoscape, { type Core, type EventObject } from "cytoscape";
+import { MicrosoftGraphRagPanel } from "./MicrosoftGraphRagPanel";
 import "./styles.css";
 
 type GraphNode = {
@@ -6931,7 +6932,7 @@ function AgentTestQuestions() {
 }
 
 function App() {
-  const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes" | "agent">("message");
+  const [activeCenterTab, setActiveCenterTab] = useState<"message" | "notes" | "agent" | "graphrag">("message");
   // Kept in the tab's storage with the chat, so a reload does not empty them either.
   const [lastAgentRun, setLastAgentRun] = useState<AgentRun | null>(() =>
     readStored<AgentRun | null>(CHAT_STORAGE_KEYS.lastRun, null),
@@ -6991,6 +6992,15 @@ function App() {
           >
             Chat with AI
           </button>
+          <button
+            className={`center-tab center-tab-right${activeCenterTab === "graphrag" ? " center-tab-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={activeCenterTab === "graphrag"}
+            onClick={() => setActiveCenterTab("graphrag")}
+          >
+            Microsoft GraphRAG
+          </button>
         </div>
         <div className={`center-tab-panel${activeCenterTab === "message" ? " center-tab-panel-chat" : ""}`} role="tabpanel">
           <ChatPanel
@@ -7007,6 +7017,7 @@ function App() {
           />
           {activeCenterTab === "notes" && <BuildGraphLayersPanel />}
           {activeCenterTab === "agent" && <ConfigureAgentPanel lastRun={lastAgentRun} sessionCosts={sessionCosts} />}
+          {activeCenterTab === "graphrag" && <MicrosoftGraphRagPanel />}
         </div>
       </section>
       <RightGraphicsPanel isThinking={isAgentBusy} usedLayers={usedLayers} />

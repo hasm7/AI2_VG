@@ -26,6 +26,7 @@ node_modules/
 
 # Virtual environments
 .venv/
+.venv-graphrag/
 venv/
 env/
 ENV/

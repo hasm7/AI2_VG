@@ -58,6 +58,10 @@ Install dependencies only with:
 
 Before running Python commands, check that the command uses `.venv`.
 
+The one exception is Microsoft GraphRAG, a separate RAG system that runs in its own environment, `.venv-graphrag`
+(Python 3.13, since `graphrag` 3.2.0 does not support Python 3.14). Install it only with
+`.\scripts\install_graphrag_deps.ps1` (from `requirements-graphrag.txt`); it never touches `.venv`.
+
 ## Running the App
 
 Start the parts in this order (details in `README.md`):

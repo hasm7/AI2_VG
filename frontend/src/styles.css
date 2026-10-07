@@ -547,6 +547,11 @@ main {
     0 2px 8px rgba(29, 78, 216, 0.35);
 }
 
+/* Microsoft GraphRAG is a separate RAG system: its tab stands apart at the right end of the row. */
+.center-panel > .center-tabs .center-tab-right {
+  margin-left: auto;
+}
+
 .center-panel > .center-tab-panel {
   margin-top: 0;
   border-radius: 12px;
