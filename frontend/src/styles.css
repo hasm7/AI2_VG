@@ -582,6 +582,161 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* Microsoft GraphRAG graph: a large window over the whole app, opened from Entities & relationships. */
+.graphrag-graph-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.graphrag-graph-window {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  width: calc(100vw - 48px);
+  height: calc(100vh - 48px);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35);
+  overflow: hidden;
+}
+
+.graphrag-graph-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.graphrag-graph-count {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.graphrag-graph-controls {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.graphrag-graph-toggle {
+  border: 1px solid #94a3b8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.graphrag-graph-toggle-on {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #ffffff;
+}
+
+.graphrag-graph-close {
+  border: 0;
+  background: transparent;
+  color: #475569;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.graphrag-graph-body {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+}
+
+.graphrag-graph-legend {
+  overflow: auto;
+  padding: 10px 12px;
+  border-right: 1px solid #e2e8f0;
+  font-size: 12px;
+}
+
+.graphrag-graph-legend-title {
+  margin: 0 0 6px;
+  color: #475569;
+  font-weight: 600;
+}
+
+.graphrag-graph-legend ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.graphrag-graph-legend li button {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #1e293b;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.graphrag-graph-legend li button:hover,
+.graphrag-graph-legend li button.graphrag-graph-legend-on {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+}
+
+.graphrag-graph-legend em {
+  color: #64748b;
+}
+
+.graphrag-graph-swatch {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 2px;
+  border-radius: 50%;
+}
+
+.graphrag-graph-selected {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+  padding: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+}
+
+.graphrag-graph-hint {
+  margin: 12px 0 0;
+  color: #64748b;
+}
+
+/* The same beige background with a grid as the app's own graph view (.graph-canvas); the edges are a dark blue
+   that matches the grid (in the graph window's style in MicrosoftGraphRagPanel.tsx) and shows on the beige. */
+.graphrag-graph-canvas {
+  min-height: 0;
+  background-color: #f3f0e8;
+  background-image:
+    linear-gradient(rgba(37, 99, 235, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.08) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
 /* Query (Search): the method choice, the question box and the answer. */
 .graphrag-query-methods {
   display: grid;

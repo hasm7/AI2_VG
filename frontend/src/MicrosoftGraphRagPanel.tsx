@@ -1,4 +1,6 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import cytoscape, { type Core } from "cytoscape";
 
 // Microsoft GraphRAG: a second, separate RAG system next to the app's own graph layers. It is built by Microsoft's
 // `graphrag` library in its own Python environment (the GraphRAG service), and none of it touches the graph layers or
@@ -647,7 +649,229 @@ function matchesSearch(search: string, ...fields: string[]) {
   return !needle || fields.some((field) => field.toLowerCase().includes(needle));
 }
 
+type GraphRagDrawNode = { id: number; title: string; type: string; degree: number; community: number; x: number; y: number };
+type GraphRagDrawing = {
+  error?: string;
+  communities: Array<{ community: number; title: string; size: number }>;
+  nodes: GraphRagDrawNode[];
+  edges: Array<{ source: number; target: number; weight: number }>;
+};
+
+// The nodes shown before "All" is chosen: the most connected ones.
+const GRAPH_TOP_NODES = 150;
+// One colour per level 0 community (in the order of the clusters, largest first); grey for nodes in no community.
+const COMMUNITY_COLORS = [
+  "#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d",
+  "#ea580c", "#4f46e5", "#0d9488", "#be123c", "#a16207", "#9333ea", "#0284c7", "#15803d",
+];
+const NO_COMMUNITY_COLOR = "#94a3b8";
+
+// Microsoft GraphRAG's graph in a large window over the app. The places of the nodes come from the GraphRAG service,
+// computed once (nodes of one community lie together as a cluster), so the graph is drawn at once without a
+// force layout; the app's own graph view is not touched.
+function GraphRagGraphWindow({ onClose }: { onClose: () => void }) {
+  const [drawing, setDrawing] = useState<GraphRagDrawing | null>(null);
+  const [error, setError] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const [communityFilter, setCommunityFilter] = useState<number | null>(null);
+  const [selected, setSelected] = useState<GraphRagDrawNode | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const graphRef = useRef<Core | null>(null);
+
+  useEffect(() => {
+    fetch("/api/graphrag/graph")
+      .then(async (response) => {
+        const payload = (await response.json()) as GraphRagDrawing;
+        if (!response.ok || payload.error) {
+          throw new Error(payload.error || "Could not read the graph.");
+        }
+        setDrawing(payload);
+      })
+      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Could not read the graph."));
+  }, []);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  const colorOf = new Map<number, string>(
+    (drawing?.communities ?? []).map((community, index) => [
+      community.community,
+      community.community === -1 ? NO_COMMUNITY_COLOR : COMMUNITY_COLORS[index % COMMUNITY_COLORS.length],
+    ]),
+  );
+  const titleOf = new Map((drawing?.communities ?? []).map((community) => [community.community, community.title]));
+
+  // Which nodes are drawn: one community (all its nodes), or the whole graph (the most connected, or all).
+  const shownNodes = (() => {
+    const nodes = drawing?.nodes ?? [];
+    if (communityFilter !== null) {
+      return nodes.filter((node) => node.community === communityFilter);
+    }
+    return showAll ? nodes : [...nodes].sort((a, b) => b.degree - a.degree).slice(0, GRAPH_TOP_NODES);
+  })();
+
+  useEffect(() => {
+    if (!drawing || !containerRef.current) {
+      return;
+    }
+    const shownIds = new Set(shownNodes.map((node) => node.id));
+    const graph = cytoscape({
+      container: containerRef.current,
+      elements: [
+        ...shownNodes.map((node) => ({
+          data: { id: `n${node.id}`, label: node.title, degree: node.degree, color: colorOf.get(node.community) ?? NO_COMMUNITY_COLOR },
+          position: { x: node.x, y: node.y },
+        })),
+        ...drawing.edges
+          .filter((edge) => shownIds.has(edge.source) && shownIds.has(edge.target))
+          .map((edge, index) => ({ data: { id: `e${index}`, source: `n${edge.source}`, target: `n${edge.target}` } })),
+      ],
+      layout: { name: "preset", fit: true, padding: 30 },
+      style: [
+        {
+          selector: "node",
+          style: {
+            "background-color": "data(color)",
+            width: "mapData(degree, 1, 100, 6, 30)",
+            height: "mapData(degree, 1, 100, 6, 30)",
+            label: "data(label)",
+            "font-size": 9,
+            color: "#1e293b",
+            "min-zoomed-font-size": 9,
+            "text-valign": "bottom",
+            "text-margin-y": 2,
+          },
+        },
+        { selector: "edge", style: { width: 0.8, "line-color": "#1e3a8a", "curve-style": "haystack", opacity: 0.45 } },
+        { selector: ".faded", style: { opacity: 0.12 } },
+        { selector: "node.focus", style: { "border-width": 3, "border-color": "#0f172a" } },
+        { selector: "edge.focus", style: { "line-color": "#334155", width: 1.4, opacity: 1 } },
+      ],
+      textureOnViewport: true,
+      hideEdgesOnViewport: true,
+      minZoom: 0.05,
+      maxZoom: 4,
+    });
+    const byId = new Map(shownNodes.map((node) => [`n${node.id}`, node]));
+    // A click on a node lights it and its neighbours; a click on the background lights everything again.
+    graph.on("tap", "node", (event) => {
+      const node = event.target;
+      graph.elements().removeClass("focus").addClass("faded");
+      node.closedNeighborhood().removeClass("faded").addClass("focus");
+      setSelected(byId.get(node.id()) ?? null);
+    });
+    graph.on("tap", (event) => {
+      if (event.target === graph) {
+        graph.elements().removeClass("faded focus");
+        setSelected(null);
+      }
+    });
+    graphRef.current = graph;
+    return () => {
+      graph.destroy();
+      graphRef.current = null;
+    };
+  }, [drawing, showAll, communityFilter]);
+
+  return (
+    <div className="graphrag-graph-overlay" role="dialog" aria-label="Microsoft GraphRAG graph">
+      <div className="graphrag-graph-window">
+        <div className="graphrag-graph-header">
+          <strong>Microsoft GraphRAG graph</strong>
+          <span className="graphrag-graph-count">
+            {drawing ? `${shownNodes.length} of ${drawing.nodes.length} entities (nodes)` : "Loading..."}
+          </span>
+          <div className="graphrag-graph-controls">
+            <button
+              type="button"
+              className={`graphrag-graph-toggle${!showAll && communityFilter === null ? " graphrag-graph-toggle-on" : ""}`}
+              onClick={() => {
+                setShowAll(false);
+                setCommunityFilter(null);
+              }}
+            >
+              Top {GRAPH_TOP_NODES}
+            </button>
+            <button
+              type="button"
+              className={`graphrag-graph-toggle${showAll && communityFilter === null ? " graphrag-graph-toggle-on" : ""}`}
+              onClick={() => {
+                setShowAll(true);
+                setCommunityFilter(null);
+              }}
+            >
+              All
+            </button>
+          </div>
+          <button type="button" className="graphrag-graph-close" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </div>
+        <div className="graphrag-graph-body">
+          <div className="graphrag-graph-legend">
+            <p className="graphrag-graph-legend-title">Communities (level 0) — click one to show only it</p>
+            <ul>
+              {(drawing?.communities ?? []).map((community) => (
+                <li key={community.community}>
+                  <button
+                    type="button"
+                    className={communityFilter === community.community ? "graphrag-graph-legend-on" : ""}
+                    onClick={() => setCommunityFilter(communityFilter === community.community ? null : community.community)}
+                  >
+                    <span className="graphrag-graph-swatch" style={{ background: colorOf.get(community.community) }} />
+                    {community.title} <em>({community.size})</em>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {selected ? (
+              <div className="graphrag-graph-selected">
+                <strong>{selected.title}</strong>
+                <span>Type: {selected.type}</span>
+                <span>Relationships: {selected.degree}</span>
+                <span>Community: {titleOf.get(selected.community) ?? "-"}</span>
+              </div>
+            ) : (
+              <p className="graphrag-graph-hint">Click a node to light it and its neighbours. Scroll to zoom.</p>
+            )}
+          </div>
+          <div className="graphrag-graph-canvas" ref={containerRef}>
+            {error ? <p className="reference-error">{error}</p> : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The "MS Graph" button in the app's own graph view (main.tsx): it opens the same window as Show graph, so Microsoft
+// GraphRAG's graph can be reached from there without the graph view knowing anything about it.
+export function MsGraphButton({ className }: { className: string }) {
+  const [isOpen, setIsOpen] = useState(false);
+  return (
+    <>
+      <button
+        className={className}
+        type="button"
+        title="Open Microsoft GraphRAG's graph (a separate system) in a window"
+        onClick={() => setIsOpen(true)}
+      >
+        MS Graph
+      </button>
+      {isOpen ? createPortal(<GraphRagGraphWindow onClose={() => setIsOpen(false)} />, document.body) : null}
+    </>
+  );
+}
+
 function GraphRagEntitiesPanel() {
+  const [isGraphOpen, setIsGraphOpen] = useState(false);
   const [data, setData] = useState<{ entities: GraphRagEntity[]; relationships: GraphRagRelationship[] } | null>(null);
   const [error, setError] = useState("");
   const [entitySearch, setEntitySearch] = useState("");
@@ -685,6 +909,13 @@ function GraphRagEntitiesPanel() {
         The graph the index built: every entity (node) the model extracted from the text units, and the relationships
         between them. An entity's relationships are its number of connections in the graph.
       </p>
+      <div className="reference-actions">
+        <button className="knowledge-build-button" type="button" onClick={() => setIsGraphOpen(true)}>
+          Show graph
+        </button>
+      </div>
+      {/* Rendered in the page body, so no panel around the tab can clip the window. */}
+      {isGraphOpen ? createPortal(<GraphRagGraphWindow onClose={() => setIsGraphOpen(false)} />, document.body) : null}
       {error ? <p className="reference-error">{error}</p> : null}
       {!data && !error ? <p className="reference-empty">Loading the graph...</p> : null}
 
@@ -994,6 +1225,17 @@ const graphRagQueryMethods: Array<{ id: GraphRagQueryMethod; label: string; desc
   },
 ];
 
+// The context tables a search returns, named and explained; a table not listed here keeps its own name.
+const CONTEXT_TABLE_NAMES: Record<string, { title: string; meaning: string }> = {
+  entities: { title: "Entities (nodes)", meaning: "the nodes chosen for the question" },
+  relationships: { title: "Relationships (edges)", meaning: "the edges to and between those nodes" },
+  reports: { title: "Community reports", meaning: "summaries of the communities those nodes belong to" },
+  sources: {
+    title: "Text units (original text)",
+    meaning: "the pieces of the input documents the nodes were extracted from",
+  },
+};
+
 function GraphRagQueryPanel() {
   const [question, setQuestion] = useState("");
   const [method, setMethod] = useState<GraphRagQueryMethod>("local");
@@ -1109,8 +1351,9 @@ function GraphRagQueryPanel() {
             Object.entries(result.context).map(([name, table], index, all) => (
               <div key={name}>
                 <p className="reference-description reference-counts-heading">
-                  {name} ({table.total_rows}
-                  {table.total_rows > table.rows.length ? `, first ${table.rows.length} shown` : ""}):
+                  {CONTEXT_TABLE_NAMES[name]?.title ?? name} ({table.total_rows}
+                  {table.total_rows > table.rows.length ? `, first ${table.rows.length} shown` : ""})
+                  {CONTEXT_TABLE_NAMES[name] ? `: ${CONTEXT_TABLE_NAMES[name].meaning}` : ":"}
                 </p>
                 <div className={`reference-table-wrapper${index === all.length - 1 ? " layer-last-table" : ""}`}>
                   <table className="reference-table">

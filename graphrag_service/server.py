@@ -19,7 +19,8 @@ Endpoints:
 - GET /entities: every entity and relationship in the index.
 - GET /communities: the community hierarchy (level, parent, children, report title and rating).
 - GET /communities/<id>: one community's report (summary, rating, findings) and its entities.
-These three only read the index files in output/.
+- GET /graph: the graph to draw: every entity with a fixed position and its level 0 community, and every relationship.
+These four only read the index files in output/ (the graph's positions are computed once and kept in a file there).
 - POST /query {"method": "global" | "local" | "drift" | "basic", "question": "..."}: answers a question with
   Microsoft's own search (the functions `graphrag query` runs), and returns the answer and what it was built from.
   This calls OpenAI and costs money.
@@ -467,6 +468,103 @@ def community_report(community_id: int) -> dict:
     }
 
 
+# --- The graph to draw ---------------------------------------------------------------------------------------------
+# Drawing hundreds of nodes is slow when the browser has to find their places itself (a force layout that moves every
+# node until it settles). Here the places are computed once, in the service, and kept in a file next to the index:
+# the browser only puts each node where it is told. Nodes of the same level 0 community are laid out together, as one
+# cluster, and the clusters are placed side by side, largest first, so the communities can be seen in the picture.
+# The file is computed again when the index is rebuilt (stats.json changes).
+
+GRAPH_LAYOUT_FILE = OUTPUT_DIR / "app_graph_layout.json"
+GRAPH_LAYOUT_VERSION = 1
+# Size of a cluster: its radius grows with the square root of its number of nodes, so area follows node count.
+CLUSTER_RADIUS_PER_SQRT_NODE = 42
+CLUSTER_GAP = 60
+CLUSTERS_ROW_WIDTH = 2400
+_graph_lock = threading.Lock()
+
+
+def _compute_graph() -> dict:
+    import math
+
+    import networkx as nx
+
+    entities = _read_output("entities", ["id", "human_readable_id", "title", "type", "degree"])
+    relationships = _read_output("relationships", ["source", "target", "weight"])
+    communities = _read_output("communities", ["community", "level", "entity_ids"])
+    reports = _read_output("community_reports", ["community", "title"]).set_index("community")
+
+    node_by_title = {row.title: int(row.human_readable_id) for row in entities.itertuples()}
+    community_of: dict[str, int] = {}
+    level0 = communities[communities["level"] == 0]
+    for row in level0.itertuples():
+        for entity_id in row.entity_ids:
+            community_of[entity_id] = int(row.community)
+
+    edges = [
+        {"source": node_by_title[row.source], "target": node_by_title[row.target], "weight": float(row.weight)}
+        for row in relationships.itertuples()
+        if row.source in node_by_title and row.target in node_by_title
+    ]
+
+    # One cluster per level 0 community; entities outside every community (Leiden works on the connected graph) are
+    # put in a cluster of their own.
+    members: dict[int, list] = {}
+    for row in entities.itertuples():
+        members.setdefault(community_of.get(row.id, -1), []).append(row)
+
+    positions: dict[int, tuple[float, float]] = {}
+    clusters = sorted(members.items(), key=lambda item: -len(item[1]))
+    cursor_x = cursor_y = row_height = 0.0
+    cluster_info = []
+    for community, rows in clusters:
+        ids = [int(row.human_readable_id) for row in rows]
+        radius = CLUSTER_RADIUS_PER_SQRT_NODE * math.sqrt(len(ids))
+        graph = nx.Graph()
+        graph.add_nodes_from(ids)
+        id_set = set(ids)
+        for edge in edges:
+            if edge["source"] in id_set and edge["target"] in id_set:
+                graph.add_edge(edge["source"], edge["target"], weight=edge["weight"])
+        local = nx.spring_layout(graph, seed=42, weight="weight", iterations=200) if len(ids) > 1 else {ids[0]: (0, 0)}
+
+        if cursor_x + 2 * radius > CLUSTERS_ROW_WIDTH and cursor_x > 0:
+            cursor_x, cursor_y, row_height = 0.0, cursor_y + row_height + CLUSTER_GAP, 0.0
+        center_x, center_y = cursor_x + radius, cursor_y + radius
+        for node, (x, y) in local.items():
+            positions[node] = (round(center_x + float(x) * radius, 1), round(center_y + float(y) * radius, 1))
+        cursor_x += 2 * radius + CLUSTER_GAP
+        row_height = max(row_height, 2 * radius)
+        cluster_info.append({
+            "community": community,
+            "title": reports.at[community, "title"] if community in reports.index else "Not in a community",
+            "size": len(ids),
+        })
+
+    nodes = [
+        {"id": int(row.human_readable_id), "title": row.title, "type": row.type, "degree": int(row.degree),
+         "community": community_of.get(row.id, -1),
+         "x": positions[int(row.human_readable_id)][0], "y": positions[int(row.human_readable_id)][1]}
+        for row in entities.itertuples()
+    ]
+    return {"version": GRAPH_LAYOUT_VERSION, "index_built_at": STATS_FILE.stat().st_mtime,
+            "communities": cluster_info, "nodes": nodes, "edges": edges}
+
+
+def graph_for_drawing() -> dict:
+    if not STATS_FILE.exists():
+        raise FileNotFoundError("There is no index yet. Build it in the Index (Build) tab.")
+    with _graph_lock:
+        if GRAPH_LAYOUT_FILE.exists():
+            cached = json.loads(GRAPH_LAYOUT_FILE.read_text(encoding="utf-8"))
+            if (cached.get("version") == GRAPH_LAYOUT_VERSION
+                    and cached.get("index_built_at") == STATS_FILE.stat().st_mtime):
+                return cached
+        graph = _compute_graph()
+        GRAPH_LAYOUT_FILE.write_text(json.dumps(graph), encoding="utf-8")
+        return graph
+
+
 # The defaults of `graphrag query` (graphrag/cli/main.py), so a question asked here is answered as on the command line.
 QUERY_COMMUNITY_LEVEL = 2
 QUERY_RESPONSE_TYPE = "Multiple Paragraphs"
@@ -797,6 +895,7 @@ class Handler(BaseHTTPRequestHandler):
             "/index": index_state,
             "/entities": entities_and_relationships,
             "/communities": community_tree,
+            "/graph": graph_for_drawing,
         }
         report_match = re.fullmatch(r"/communities/(\d+)", self.path)
         if self.path not in routes and not report_match:

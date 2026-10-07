@@ -89,6 +89,12 @@ def api_graphrag_communities():
     return jsonify(payload), status_code
 
 
+@graphrag_blueprint.route("/api/graphrag/graph", methods=["GET"])
+def api_graphrag_graph():
+    payload, status_code = service_call("GET", "/graph", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
+
+
 @graphrag_blueprint.route("/api/graphrag/communities/<int:community_id>", methods=["GET"])
 def api_graphrag_community_report(community_id: int):
     payload, status_code = service_call("GET", f"/communities/{community_id}", CONFIG_TIMEOUT_SECONDS)

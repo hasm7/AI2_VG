@@ -1,7 +1,7 @@
 import React, { Fragment, forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import cytoscape, { type Core, type EventObject } from "cytoscape";
-import { MicrosoftGraphRagPanel } from "./MicrosoftGraphRagPanel";
+import { MicrosoftGraphRagPanel, MsGraphButton } from "./MicrosoftGraphRagPanel";
 import "./styles.css";
 
 type GraphNode = {
@@ -2058,6 +2058,9 @@ const GraphView = forwardRef<GraphViewHandle>(function GraphView(_props, ref) {
         >
           {isExpanded ? "Close" : "Expand"}
         </button>
+        <span className="graph-action-divider" aria-hidden="true" />
+        {/* Microsoft GraphRAG's graph, a separate system, in its own window (MicrosoftGraphRagPanel.tsx). */}
+        <MsGraphButton className="graph-action-button" />
         </div>
       </div>
       {/* Chunks of long texts (CHUNK_OF). Kept apart from the layer filters at the top, bottom left. */}
