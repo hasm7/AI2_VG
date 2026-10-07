@@ -587,9 +587,350 @@ function GraphRagIndexBuild() {
   );
 }
 
+type GraphRagEntity = { title: string; type: string; description: string; degree: number; frequency: number };
+type GraphRagRelationship = { source: string; target: string; description: string; weight: number };
+type GraphRagCommunity = {
+  community: number;
+  level: number;
+  parent: number;
+  children: number[];
+  size: number;
+  title: string | null;
+  rating: number | null;
+  // The community's most connected entities, shown under its title.
+  top_entities: Array<{ title: string; type: string }>;
+};
+type GraphRagCommunityReport = {
+  community: number;
+  level: number;
+  title: string;
+  summary: string;
+  rating: number;
+  rating_explanation: string;
+  findings: Array<{ summary: string; explanation: string }>;
+  entities: Array<{ title: string; type: string; degree: number }>;
+  error?: string;
+};
+
+// Long tables are shown in pages of this many rows.
+const GRAPHRAG_PAGE_ROWS = 50;
+
+// A long text is shown shortened; a click shows all of it, and another click shortens it again.
+const SHORT_TEXT_CHARS = 160;
+
+function ExpandableText({ text }: { text: string }) {
+  const [isOpen, setIsOpen] = useState(false);
+  if (text.length <= SHORT_TEXT_CHARS) {
+    return <>{text}</>;
+  }
+  return (
+    <span className="graphrag-expandable" onClick={() => setIsOpen(!isOpen)} title={isOpen ? "Show less" : "Show all"}>
+      {isOpen ? text : `${text.slice(0, SHORT_TEXT_CHARS).trimEnd()}... `}
+      <span className="graphrag-expandable-toggle">{isOpen ? " show less" : "show all"}</span>
+    </span>
+  );
+}
+
+function matchesSearch(search: string, ...fields: string[]) {
+  const needle = search.trim().toLowerCase();
+  return !needle || fields.some((field) => field.toLowerCase().includes(needle));
+}
+
+function GraphRagEntitiesPanel() {
+  const [data, setData] = useState<{ entities: GraphRagEntity[]; relationships: GraphRagRelationship[] } | null>(null);
+  const [error, setError] = useState("");
+  const [entitySearch, setEntitySearch] = useState("");
+  const [entityType, setEntityType] = useState("");
+  const [entityRows, setEntityRows] = useState(GRAPHRAG_PAGE_ROWS);
+  const [relationshipSearch, setRelationshipSearch] = useState("");
+  const [relationshipRows, setRelationshipRows] = useState(GRAPHRAG_PAGE_ROWS);
+
+  useEffect(() => {
+    fetch("/api/graphrag/entities")
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok || payload.error) {
+          throw new Error(payload.error || "Could not read the entities.");
+        }
+        setData(payload);
+      })
+      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Could not read the entities."));
+  }, []);
+
+  const entities = data?.entities ?? [];
+  const relationships = data?.relationships ?? [];
+  const types = [...new Set(entities.map((entity) => entity.type))].sort();
+  const shownEntities = entities.filter(
+    (entity) =>
+      (!entityType || entity.type === entityType) && matchesSearch(entitySearch, entity.title, entity.description),
+  );
+  const shownRelationships = relationships.filter((relationship) =>
+    matchesSearch(relationshipSearch, relationship.source, relationship.target, relationship.description),
+  );
+
+  return (
+    <div className="knowledge-panel graphrag-panel">
+      <p className="reference-description">
+        The graph the index built: every entity (node) the model extracted from the text units, and the relationships
+        between them. An entity's relationships are its number of connections in the graph.
+      </p>
+      {error ? <p className="reference-error">{error}</p> : null}
+      {!data && !error ? <p className="reference-empty">Loading the graph...</p> : null}
+
+      {data ? (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title">
+            Entities (node) <span className="knowledge-section-kind">({entities.length}, most connected first)</span>
+          </h4>
+          <div className="embedding-table-controls">
+            <label>
+              Search
+              <input
+                type="search"
+                value={entitySearch}
+                onChange={(event) => {
+                  setEntitySearch(event.target.value);
+                  setEntityRows(GRAPHRAG_PAGE_ROWS);
+                }}
+              />
+            </label>
+            <label>
+              Type
+              <select
+                value={entityType}
+                onChange={(event) => {
+                  setEntityType(event.target.value);
+                  setEntityRows(GRAPHRAG_PAGE_ROWS);
+                }}
+              >
+                <option value="">All</option>
+                {types.map((type) => (
+                  <option key={type} value={type}>
+                    {type} ({entities.filter((entity) => entity.type === type).length})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span>{shownEntities.length} shown</span>
+          </div>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Entity (node)</th>
+                  <th>Type</th>
+                  <th>Relationships</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownEntities.slice(0, entityRows).map((entity) => (
+                  <tr key={entity.title}>
+                    <td>{entity.title}</td>
+                    <td>{entity.type}</td>
+                    <td>{entity.degree}</td>
+                    <td>
+                      <ExpandableText text={entity.description} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {shownEntities.length > entityRows ? (
+            <button className="knowledge-build-button" type="button" onClick={() => setEntityRows(entityRows + GRAPHRAG_PAGE_ROWS)}>
+              Show {Math.min(GRAPHRAG_PAGE_ROWS, shownEntities.length - entityRows)} more
+            </button>
+          ) : null}
+
+          <h4 className="knowledge-card-title knowledge-section-title graphrag-index-title">
+            Relationships <span className="knowledge-section-kind">({relationships.length}, strongest first)</span>
+          </h4>
+          <div className="embedding-table-controls">
+            <label>
+              Search
+              <input
+                type="search"
+                value={relationshipSearch}
+                onChange={(event) => {
+                  setRelationshipSearch(event.target.value);
+                  setRelationshipRows(GRAPHRAG_PAGE_ROWS);
+                }}
+              />
+            </label>
+            <span>{shownRelationships.length} shown</span>
+          </div>
+          <div className="reference-table-wrapper layer-last-table">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Source (start node)</th>
+                  <th>Target (end node)</th>
+                  <th>Weight</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shownRelationships.slice(0, relationshipRows).map((relationship, index) => (
+                  <tr key={`${relationship.source}-${relationship.target}-${index}`}>
+                    <td>{relationship.source}</td>
+                    <td>{relationship.target}</td>
+                    <td>{relationship.weight}</td>
+                    <td>
+                      <ExpandableText text={relationship.description} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {shownRelationships.length > relationshipRows ? (
+            <button
+              className="knowledge-build-button layer-last-table"
+              type="button"
+              onClick={() => setRelationshipRows(relationshipRows + GRAPHRAG_PAGE_ROWS)}
+            >
+              Show {Math.min(GRAPHRAG_PAGE_ROWS, shownRelationships.length - relationshipRows)} more
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function GraphRagCommunityNode({
+  community,
+  byId,
+  depth,
+}: {
+  community: GraphRagCommunity;
+  byId: Map<number, GraphRagCommunity>;
+  depth: number;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [report, setReport] = useState<GraphRagCommunityReport | null>(null);
+  const [error, setError] = useState("");
+
+  const toggle = () => {
+    const opening = !isOpen;
+    setIsOpen(opening);
+    if (opening && !report) {
+      fetch(`/api/graphrag/communities/${community.community}`)
+        .then(async (response) => {
+          const payload = (await response.json()) as GraphRagCommunityReport;
+          if (!response.ok || payload.error) {
+            throw new Error(payload.error || "Could not read the report.");
+          }
+          setReport(payload);
+        })
+        .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Could not read the report."));
+    }
+  };
+
+  const children = community.children
+    .map((child) => byId.get(child))
+    .filter((child): child is GraphRagCommunity => Boolean(child))
+    .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+
+  return (
+    <li className="graphrag-community" style={{ marginLeft: depth * 18 }}>
+      <button className="graphrag-community-row" type="button" onClick={toggle}>
+        <span className="graphrag-community-arrow">{isOpen ? "▾" : "▸"}</span>
+        <span className="graphrag-community-text">
+          <span className="graphrag-community-title">{community.title ?? `Community ${community.community}`}</span>
+          <span className="graphrag-community-entities">
+            {community.top_entities.map((entity) => `${entity.title} (${entity.type.toLowerCase()})`).join(" · ")}
+          </span>
+        </span>
+        <span className="graphrag-community-meta">
+          level {community.level} · {community.size} entities · rating {community.rating ?? "-"}
+          {children.length > 0 ? ` · ${children.length} sub-communities` : ""}
+        </span>
+      </button>
+      {isOpen ? (
+        <div className="graphrag-community-report">
+          {error ? <p className="reference-error">{error}</p> : null}
+          {!report && !error ? <p className="reference-empty">Loading the report...</p> : null}
+          {report ? (
+            <>
+              <p className="reference-description">{report.summary}</p>
+              <p className="reference-description">
+                <strong>Rating {report.rating}:</strong> {report.rating_explanation}
+              </p>
+              <p className="reference-description reference-counts-heading">Findings:</p>
+              <ul className="reference-description">
+                {report.findings.map((finding, index) => (
+                  <li key={index}>
+                    <strong>{finding.summary}.</strong> {finding.explanation}
+                  </li>
+                ))}
+              </ul>
+              <p className="reference-description">
+                <strong>Entities:</strong> {report.entities.map((entity) => entity.title).join(", ")}
+              </p>
+            </>
+          ) : null}
+          {children.length > 0 ? (
+            <ul className="graphrag-community-list">
+              {children.map((child) => (
+                <GraphRagCommunityNode key={child.community} community={child} byId={byId} depth={1} />
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+function GraphRagCommunitiesPanel() {
+  const [communities, setCommunities] = useState<GraphRagCommunity[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/graphrag/communities")
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok || payload.error) {
+          throw new Error(payload.error || "Could not read the communities.");
+        }
+        setCommunities(payload.communities);
+      })
+      .catch((loadError) =>
+        setError(loadError instanceof Error ? loadError.message : "Could not read the communities."),
+      );
+  }, []);
+
+  const byId = new Map((communities ?? []).map((community) => [community.community, community]));
+  const topLevel = (communities ?? [])
+    .filter((community) => community.level === 0)
+    .sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
+
+  return (
+    <div className="knowledge-panel graphrag-panel">
+      <p className="reference-description">
+        Communities found by the Leiden algorithm, broadest first (level 0). Click one to read its community report and
+        open its sub-communities.
+        <br />
+        <em>Entities</em> = the nodes it holds · <em>Rating</em> = importance 0–10, judged by the model ·{" "}
+        <em>Sub-communities</em> = the smaller communities it was split into.
+      </p>
+      {error ? <p className="reference-error">{error}</p> : null}
+      {!communities && !error ? <p className="reference-empty">Loading the communities...</p> : null}
+      {communities ? (
+        <ul className="graphrag-community-list layer-last-table">
+          {topLevel.map((community) => (
+            <GraphRagCommunityNode key={community.community} community={community} byId={byId} depth={0} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 export function MicrosoftGraphRagPanel() {
   const [activeInnerTab, setActiveInnerTab] = useState<MicrosoftGraphRagTab>("input");
-  const activeTab = microsoftGraphRagTabs.find((tab) => tab.id === activeInnerTab) ?? microsoftGraphRagTabs[0];
 
   return (
     <div className="build-graph-layers">
@@ -613,11 +954,10 @@ export function MicrosoftGraphRagPanel() {
           <GraphRagInputPanel />
         ) : activeInnerTab === "index" ? (
           <GraphRagIndexPanel />
+        ) : activeInnerTab === "entities" ? (
+          <GraphRagEntitiesPanel />
         ) : (
-          <div className="knowledge-panel graphrag-panel">
-            <p className="reference-description">{activeTab.description}</p>
-            <p className="reference-empty">Not built yet.</p>
-          </div>
+          <GraphRagCommunitiesPanel />
         )}
       </div>
     </div>

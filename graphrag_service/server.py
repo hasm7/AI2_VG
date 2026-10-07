@@ -16,6 +16,10 @@ Endpoints:
 - GET /config: `settings.yaml` loaded and validated by GraphRAG's own loader, summarised (never the key).
 - GET /index: the index in `output/` (when it was built, from which input, what it holds) and the running build.
 - POST /index: starts `graphrag index` (Microsoft's own indexing command) in the background; one build at a time.
+- GET /entities: every entity and relationship in the index.
+- GET /communities: the community hierarchy (level, parent, children, report title and rating).
+- GET /communities/<id>: one community's report (summary, rating, findings) and its entities.
+These three only read the index files in output/.
 """
 
 import hashlib
@@ -312,6 +316,88 @@ def index_state() -> dict:
     return {"workflows": INDEX_WORKFLOWS, "index": built, "run": run, "changes": changes, "up_to_date": not changes}
 
 
+def _read_output(name: str, columns: list[str] | None = None):
+    import pandas as pd  # imported on first use
+
+    path = OUTPUT_DIR / f"{name}.parquet"
+    if not path.exists():
+        raise FileNotFoundError("There is no index yet. Build it in the Index (Build) tab.")
+    return pd.read_parquet(path, columns=columns)
+
+
+def entities_and_relationships() -> dict:
+    entities = _read_output("entities", ["title", "type", "description", "degree", "frequency"])
+    relationships = _read_output("relationships", ["source", "target", "description", "weight"])
+    return {
+        "entities": [
+            {"title": row.title, "type": row.type, "description": row.description or "",
+             "degree": int(row.degree), "frequency": int(row.frequency)}
+            for row in entities.sort_values("degree", ascending=False).itertuples()
+        ],
+        "relationships": [
+            {"source": row.source, "target": row.target, "description": row.description or "",
+             "weight": float(row.weight)}
+            for row in relationships.sort_values("weight", ascending=False).itertuples()
+        ],
+    }
+
+
+# How many of a community's most connected entities are listed under its title in the tree.
+TOP_ENTITIES_PER_COMMUNITY = 5
+
+
+def community_tree() -> dict:
+    communities = _read_output("communities", ["community", "level", "parent", "children", "size", "entity_ids"])
+    reports = _read_output("community_reports", ["community", "title", "rank"]).set_index("community")
+    entities = _read_output("entities", ["id", "title", "type", "degree"]).set_index("id")
+
+    def top_entities(entity_ids) -> list[dict]:
+        members = entities.loc[[entity_id for entity_id in entity_ids if entity_id in entities.index]]
+        return [{"title": row.title, "type": row.type}
+                for row in members.sort_values("degree", ascending=False).head(TOP_ENTITIES_PER_COMMUNITY).itertuples()]
+
+    return {
+        "communities": [
+            {
+                "community": int(row.community),
+                "level": int(row.level),
+                "parent": int(row.parent),
+                "children": [int(child) for child in row.children],
+                "size": int(row.size),
+                "title": reports.at[row.community, "title"] if row.community in reports.index else None,
+                "rating": float(reports.at[row.community, "rank"]) if row.community in reports.index else None,
+                "top_entities": top_entities(row.entity_ids),
+            }
+            for row in communities.sort_values(["level", "community"]).itertuples()
+        ],
+    }
+
+
+def community_report(community_id: int) -> dict:
+    reports = _read_output("community_reports")
+    match = reports[reports["community"] == community_id]
+    if match.empty:
+        raise FileNotFoundError(f"No report for community {community_id}.")
+    report = match.iloc[0]
+
+    communities = _read_output("communities", ["community", "entity_ids"])
+    entity_ids = set(communities[communities["community"] == community_id].iloc[0]["entity_ids"])
+    entities = _read_output("entities", ["id", "title", "type", "degree"])
+    members = entities[entities["id"].isin(entity_ids)].sort_values("degree", ascending=False)
+    return {
+        "community": community_id,
+        "level": int(report["level"]),
+        "title": report["title"],
+        "summary": report["summary"],
+        "rating": float(report["rank"]),
+        "rating_explanation": report["rating_explanation"],
+        "findings": [{"summary": finding["summary"], "explanation": finding["explanation"]}
+                     for finding in report["findings"]],
+        "entities": [{"title": row.title, "type": row.type, "degree": int(row.degree)}
+                     for row in members.itertuples()],
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -322,12 +408,24 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 - name required by BaseHTTPRequestHandler
-        routes = {"/status": status, "/config": config_summary, "/index": index_state}
-        if self.path not in routes:
+        routes = {
+            "/status": status,
+            "/config": config_summary,
+            "/index": index_state,
+            "/entities": entities_and_relationships,
+            "/communities": community_tree,
+        }
+        report_match = re.fullmatch(r"/communities/(\d+)", self.path)
+        if self.path not in routes and not report_match:
             self._send_json(404, {"error": f"Unknown path: {self.path}"})
             return
         try:
-            self._send_json(200, routes[self.path]())
+            if report_match:
+                self._send_json(200, community_report(int(report_match.group(1))))
+            else:
+                self._send_json(200, routes[self.path]())
+        except FileNotFoundError as error:
+            self._send_json(404, {"error": str(error)})
         except Exception as error:  # noqa: BLE001 - report any failure to the caller
             self._send_json(500, {"error": str(error)})
 

@@ -73,6 +73,24 @@ def api_graphrag_index_start():
     return jsonify(payload), status_code
 
 
+@graphrag_blueprint.route("/api/graphrag/entities", methods=["GET"])
+def api_graphrag_entities():
+    payload, status_code = service_call("GET", "/entities", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
+
+
+@graphrag_blueprint.route("/api/graphrag/communities", methods=["GET"])
+def api_graphrag_communities():
+    payload, status_code = service_call("GET", "/communities", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
+
+
+@graphrag_blueprint.route("/api/graphrag/communities/<int:community_id>", methods=["GET"])
+def api_graphrag_community_report(community_id: int):
+    payload, status_code = service_call("GET", f"/communities/{community_id}", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
+
+
 @graphrag_blueprint.route("/api/graphrag/input", methods=["GET"])
 def api_graphrag_input():
     try:

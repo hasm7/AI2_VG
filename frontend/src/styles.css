@@ -582,6 +582,90 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* A long description in the GraphRAG tables, shortened until it is clicked. */
+.graphrag-expandable {
+  cursor: pointer;
+}
+
+.graphrag-expandable-toggle {
+  color: #1d4ed8;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Search fields above the GraphRAG entity and relationship tables. */
+.graphrag-panel .embedding-table-controls input {
+  margin-left: 4px;
+  font: inherit;
+  padding: 2px 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #1e293b;
+}
+
+/* Communities & reports: the community hierarchy as a tree; a click opens a community's report and children. */
+.graphrag-community-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.graphrag-community {
+  margin-top: 4px;
+}
+
+.graphrag-community-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.graphrag-community-row:hover {
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+.graphrag-community-arrow {
+  color: #1d4ed8;
+}
+
+.graphrag-community-text {
+  display: grid;
+  gap: 2px;
+}
+
+.graphrag-community-title {
+  font-weight: 700;
+}
+
+.graphrag-community-entities {
+  color: #475569;
+  font-size: 11px;
+}
+
+.graphrag-community-meta {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.graphrag-community-report {
+  display: grid;
+  gap: 8px;
+  padding: 8px 4px 4px 22px;
+}
+
 /* An empty line above the Configuration and Index headings in the Index (Build) tab of Microsoft GraphRAG. */
 .knowledge-panel > .graphrag-index-title {
   margin-top: 36px;
