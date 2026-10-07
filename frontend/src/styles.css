@@ -1169,6 +1169,49 @@ main {
   color: #1d4ed8;
 }
 
+/* Below the corner buttons: who answers (the Microsoft button) and, while Microsoft GraphRAG answers, its search
+   method. */
+.chat-mode-corner {
+  position: absolute;
+  top: 30px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* On, it is filled: it changes who answers, so it must be seen at once (the other toggles only change the view). */
+.chat-microsoft-button.chat-microsoft-button-on,
+.chat-microsoft-button.chat-microsoft-button-on:hover:not(:disabled) {
+  border-color: #1d4ed8;
+  background: #1d4ed8;
+  color: #ffffff;
+}
+
+.chat-method-select {
+  height: 18px;
+  border: 1px solid #1d4ed8;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #1d4ed8;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 2px;
+}
+
+/* With the method choice beside the MS GraphRAG button the corner is wider: long lines wrap before it. */
+.chat-input-row .ai-chat-input.ai-chat-input-microsoft {
+  padding-right: 76px;
+}
+
+/* Under an answer from Microsoft GraphRAG: which search and what it cost. */
+.chat-microsoft-info {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 11px;
+}
+
 .ai-send-button {
   justify-self: start;
   height: 36px;

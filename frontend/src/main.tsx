@@ -523,6 +523,19 @@ type ChatMessage = {
   error?: string;
   // Read back from the tab's storage after a reload: shown at once, not typed out again.
   restored?: boolean;
+  // An answer from Microsoft GraphRAG: which search and what it cost (shown under the answer).
+  microsoftInfo?: string;
+};
+
+// The chat answers either with the app's own graph agent or with Microsoft GraphRAG's search (graphrag_service).
+type ChatMode = "agent" | "microsoft";
+type MicrosoftSearchMethod = "local" | "global" | "drift" | "basic";
+
+const MICROSOFT_SEARCH_LABELS: Record<MicrosoftSearchMethod, string> = {
+  local: "Local",
+  global: "Global",
+  drift: "DRIFT",
+  basic: "Basic",
 };
 
 type ChatSseEvent =
@@ -4596,6 +4609,8 @@ const CHAT_STORAGE_KEYS = {
   input: "chat.input",
   soundOn: "chat.soundOn",
   referencesShown: "chat.referencesShown",
+  mode: "chat.mode",
+  microsoftMethod: "chat.microsoftMethod",
   lastRun: "agent.lastRun",
   sessionCosts: "agent.sessionCosts",
   usedLayers: "agent.usedLayers",
@@ -5215,6 +5230,12 @@ function ChatPanel({
   const [areReferencesShown, setAreReferencesShown] = useState(() =>
     readStored(CHAT_STORAGE_KEYS.referencesShown, false),
   );
+  // Who answers: the app's own agent (the default) or Microsoft GraphRAG, and with which of its searches.
+  const [chatMode, setChatMode] = useState<ChatMode>(() => readStored<ChatMode>(CHAT_STORAGE_KEYS.mode, "agent"));
+  const [microsoftMethod, setMicrosoftMethod] = useState<MicrosoftSearchMethod>(() =>
+    readStored<MicrosoftSearchMethod>(CHAT_STORAGE_KEYS.microsoftMethod, "local"),
+  );
+  const isMicrosoft = chatMode === "microsoft";
   // Fact citations under an answer: hidden until "Show facts" is clicked for that answer (there can be many).
   const [factsShownFor, setFactsShownFor] = useState<Set<string>>(() => new Set());
   const toggleFacts = (messageId: string) =>
@@ -5234,6 +5255,8 @@ function ChatPanel({
   useEffect(() => writeStored(CHAT_STORAGE_KEYS.input, input), [input]);
   useEffect(() => writeStored(CHAT_STORAGE_KEYS.soundOn, isSoundOn), [isSoundOn]);
   useEffect(() => writeStored(CHAT_STORAGE_KEYS.referencesShown, areReferencesShown), [areReferencesShown]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.mode, chatMode), [chatMode]);
+  useEffect(() => writeStored(CHAT_STORAGE_KEYS.microsoftMethod, microsoftMethod), [microsoftMethod]);
 
   useEffect(() => {
     // Also when the tab is shown again: a hidden element has no layout, so its scroll position may be lost.
@@ -5271,6 +5294,44 @@ function ChatPanel({
         previous.map((entry) => (entry.id === assistantMessageId ? { ...entry, ...update } : entry)),
       );
     };
+
+    if (isMicrosoft) {
+      // Microsoft GraphRAG answers each question on its own (its search keeps no conversation), and nothing here
+      // touches the agent's last run (Configure AI agent) or the layers of the app's own graph.
+      const label = MICROSOFT_SEARCH_LABELS[microsoftMethod];
+      setStatus(`Microsoft GraphRAG (${label} search) is searching...`);
+      try {
+        const response = await fetch("/api/graphrag/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ method: microsoftMethod, question: message }),
+        });
+        const data = (await response.json().catch(() => ({}))) as {
+          error?: string;
+          answer?: string;
+          seconds?: number;
+          usage?: { cost_usd: number; model_calls: number };
+        };
+        if (!response.ok || data.error) {
+          throw new Error(data.error || `Microsoft GraphRAG could not answer (${response.status}).`);
+        }
+        const cost = data.usage
+          ? ` · ${data.usage.cost_usd.toFixed(4)} USD · ${data.usage.model_calls} model call${data.usage.model_calls === 1 ? "" : "s"}`
+          : "";
+        updateAssistant({
+          content: data.answer ?? "",
+          microsoftInfo: `Microsoft GraphRAG · ${label} search · ${data.seconds ?? "-"} s${cost}`,
+        });
+      } catch (askError) {
+        const messageText = askError instanceof Error ? askError.message : "Microsoft GraphRAG could not answer.";
+        setError(messageText);
+        updateAssistant({ error: messageText });
+      } finally {
+        setStatus("");
+        setIsStreaming(false);
+      }
+      return;
+    }
 
     try {
       const response = await fetch("/api/ai/chat", {
@@ -5355,6 +5416,22 @@ function ChatPanel({
     onNewChat?.();
   };
 
+  // Switches between the app's own agent and Microsoft GraphRAG. The two are never mixed in one conversation (the
+  // agent remembers the conversation, Microsoft's search does not), so a switch starts a new chat, as New does.
+  const switchChatMode = () => {
+    if (isStreaming) {
+      return;
+    }
+    setChatMode(isMicrosoft ? "agent" : "microsoft");
+    if (messages.length > 0) {
+      setThreadId(newThreadId());
+      setMessages([]);
+      setStatus("");
+      setError("");
+      onNewChat?.();
+    }
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -5373,8 +5450,20 @@ function ChatPanel({
         {messages.length === 0 ? (
           <div className="chat-welcome">
             <ThinkingOrbit welcome />
-            <p className="chat-welcome-title">Ask a question about the graph</p>
-            <p className="chat-welcome-subtitle">or just say hello</p>
+            {isMicrosoft ? (
+              <>
+                <p className="chat-welcome-title">Ask Microsoft GraphRAG</p>
+                <p className="chat-welcome-subtitle">
+                  {MICROSOFT_SEARCH_LABELS[microsoftMethod]} search · each question is answered on its own, without
+                  memory of earlier ones
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="chat-welcome-title">Ask a question about the graph</p>
+                <p className="chat-welcome-subtitle">or just say hello</p>
+              </>
+            )}
           </div>
         ) : (
           messages.map((entry) => (
@@ -5416,6 +5505,7 @@ function ChatPanel({
                   entry.content
                 )}
               </div>
+              {entry.microsoftInfo ? <p className="chat-microsoft-info">{entry.microsoftInfo}</p> : null}
               {entry.citations && entry.citations.length > 0 ? (
                 <div className="chat-citations">
                   {/* Node citations first (they can be clicked), then facts behind a toggle; each group keeps the
@@ -5474,8 +5564,9 @@ function ChatPanel({
       <div className="chat-input-area">
       <div className="chat-input-row">
         <textarea
-          className="ai-chat-input"
+          className={`ai-chat-input${isMicrosoft ? " ai-chat-input-microsoft" : ""}`}
           aria-label="Message to AI"
+          placeholder={isMicrosoft ? `Asking Microsoft GraphRAG (${MICROSOFT_SEARCH_LABELS[microsoftMethod]}) …` : undefined}
           value={input}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={handleKeyDown}
@@ -5532,6 +5623,40 @@ function ChatPanel({
             title="Start a new chat"
           >
             New
+          </button>
+        </div>
+        {/* Below New: who answers. "MS GraphRAG" (Microsoft's GraphRAG) is filled blue while it answers, with its
+            search method beside it. */}
+        <div className="chat-mode-corner">
+          {isMicrosoft ? (
+            <select
+              className="chat-method-select"
+              aria-label="Microsoft GraphRAG search method"
+              title="Microsoft GraphRAG search method"
+              value={microsoftMethod}
+              disabled={isStreaming}
+              onChange={(event) => setMicrosoftMethod(event.target.value as MicrosoftSearchMethod)}
+            >
+              {(Object.keys(MICROSOFT_SEARCH_LABELS) as MicrosoftSearchMethod[]).map((method) => (
+                <option key={method} value={method}>
+                  {MICROSOFT_SEARCH_LABELS[method]}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <button
+            className={`chat-corner-button chat-microsoft-button${isMicrosoft ? " chat-microsoft-button-on" : ""}`}
+            type="button"
+            aria-pressed={isMicrosoft}
+            disabled={isStreaming}
+            onClick={switchChatMode}
+            title={
+              isMicrosoft
+                ? "Microsoft GraphRAG answers. Click to go back to the app's own agent (starts a new chat)."
+                : "Let Microsoft GraphRAG answer instead of the app's own agent (starts a new chat)."
+            }
+          >
+            MS GraphRAG
           </button>
         </div>
       </div>
