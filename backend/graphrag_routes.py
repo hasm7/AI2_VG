@@ -20,6 +20,8 @@ GRAPHRAG_SERVICE_URL = os.getenv("GRAPHRAG_SERVICE_URL", "http://127.0.0.1:8100"
 SERVICE_TIMEOUT_SECONDS = 3
 # The first config request imports the graphrag library in the service, which takes several seconds.
 CONFIG_TIMEOUT_SECONDS = 60
+# A question: global and DRIFT search make many model calls and can take minutes.
+QUERY_TIMEOUT_SECONDS = 600
 
 graphrag_blueprint = Blueprint("graphrag", __name__)
 
@@ -29,9 +31,11 @@ def service_get(path: str, timeout: float = SERVICE_TIMEOUT_SECONDS) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
-def service_call(method: str, path: str, timeout: float) -> tuple[dict, int]:
+def service_call(method: str, path: str, timeout: float, body: dict | None = None) -> tuple[dict, int]:
     """Any method; the service's own status code and error message are passed on to the frontend."""
-    call = urllib.request.Request(f"{GRAPHRAG_SERVICE_URL}{path}", method=method)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    call = urllib.request.Request(f"{GRAPHRAG_SERVICE_URL}{path}", data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(call, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8")), response.status
@@ -88,6 +92,20 @@ def api_graphrag_communities():
 @graphrag_blueprint.route("/api/graphrag/communities/<int:community_id>", methods=["GET"])
 def api_graphrag_community_report(community_id: int):
     payload, status_code = service_call("GET", f"/communities/{community_id}", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
+
+
+# Asks GraphRAG a question (calls OpenAI, costs money); body {"method": "global"|"local"|"drift"|"basic", "question"}.
+@graphrag_blueprint.route("/api/graphrag/query", methods=["POST", "OPTIONS"])
+def api_graphrag_query():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    body = request.get_json(silent=True) or {}
+    payload, status_code = service_call(
+        "POST", "/query", QUERY_TIMEOUT_SECONDS,
+        body={"method": body.get("method"), "question": body.get("question")},
+    )
     return jsonify(payload), status_code
 
 

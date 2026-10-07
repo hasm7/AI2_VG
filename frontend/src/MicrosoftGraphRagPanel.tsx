@@ -4,7 +4,7 @@ import { Fragment, useEffect, useState } from "react";
 // `graphrag` library in its own Python environment (the GraphRAG service), and none of it touches the graph layers or
 // the AI agent.
 
-type MicrosoftGraphRagTab = "input" | "index" | "entities" | "communities";
+type MicrosoftGraphRagTab = "input" | "index" | "entities" | "communities" | "query";
 
 const microsoftGraphRagTabs: Array<{ id: MicrosoftGraphRagTab; label: string; description: string }> = [
   {
@@ -26,8 +26,13 @@ const microsoftGraphRagTabs: Array<{ id: MicrosoftGraphRagTab; label: string; de
   },
   {
     id: "communities",
-    label: "Communities & reports",
+    label: "Communities & community reports",
     description: "The hierarchical Leiden communities and the community report written for each of them.",
+  },
+  {
+    id: "query",
+    label: "Query (Search)",
+    description: "Ask GraphRAG a question with global, local, DRIFT or basic search.",
   },
 ];
 
@@ -68,6 +73,8 @@ type GraphRagConfig = {
   error?: string;
   completion_model?: string;
   reasoning_effort?: string | null;
+  // The model each search method uses (global, local, drift, basic).
+  search_models?: Record<string, string>;
   embedding_model?: string;
   input?: { type: string; base_dir: string; id_column: string; title_column: string; text_column: string };
   chunking?: { type: string; size: number; overlap: number; encoding_model: string; prepend_metadata: string[] | null };
@@ -329,8 +336,12 @@ function GraphRagIndexPanel() {
 
   const rows: Array<[string, string]> = config?.valid
     ? [
-        ["Chat model (extraction, reports, search)", config.completion_model ?? "-"],
-        ["Reasoning effort (chat model)", config.reasoning_effort ?? "model default"],
+        ["Indexing model (extraction, summaries, community reports)", config.completion_model ?? "-"],
+        ["Reasoning effort (indexing model)", config.reasoning_effort ?? "model default"],
+        [
+          "Search model (Query tab)",
+          [...new Set(Object.values(config.search_models ?? {}))].join(", ") || "-",
+        ],
         ["Embedding model", config.embedding_model ?? "-"],
         [
           "Input",
@@ -439,9 +450,9 @@ function GraphRagIndexBuild() {
   const startBuild = async () => {
     const confirmed = window.confirm(
       "Build the GraphRAG index?\n\n" +
-        "This runs Microsoft's graphrag index and calls OpenAI, which costs money (a full build of the current " +
-        "data was estimated at about 3-8 USD). Model answers already in the cache are reused for free; only " +
-        "what changed is sent to the model again.\n\nChanged since the last build:\n- " +
+        "This runs Microsoft's graphrag index and calls OpenAI, which costs money: the full build of the current " +
+        "data cost 8.85 USD (measured, with gpt-5.6-terra). Model answers already in the cache are reused for " +
+        "free; only what changed is sent to the model again.\n\nChanged since the last build:\n- " +
         changes.join("\n- "),
     );
     if (!confirmed) {
@@ -929,6 +940,209 @@ function GraphRagCommunitiesPanel() {
   );
 }
 
+type GraphRagQueryMethod = "global" | "local" | "drift" | "basic";
+
+type GraphRagContextTable = { total_rows: number; columns: string[]; rows: Array<Record<string, unknown>> };
+
+type GraphRagQueryResult = {
+  error?: string;
+  method: GraphRagQueryMethod;
+  question: string;
+  answer: string;
+  seconds: number;
+  community_level: number | null;
+  response_type: string;
+  context: Record<string, GraphRagContextTable>;
+  // Every model and embedding call made for this question, priced with litellm's price list.
+  usage: {
+    model_calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    reasoning_tokens: number;
+    embedding_calls: number;
+    embedding_tokens: number;
+    cost_usd: number;
+    complete: boolean;
+  };
+};
+
+const graphRagQueryMethods: Array<{ id: GraphRagQueryMethod; label: string; description: string; cost: string }> = [
+  {
+    id: "global",
+    label: "Global",
+    description: "Reads the community reports to answer questions about the whole dataset (themes, main problems).",
+    cost: "many model calls, about 0.03 USD",
+  },
+  {
+    id: "local",
+    label: "Local",
+    description:
+      "Finds the entities the question is about and answers from their relationships, community reports and text units.",
+    cost: "one model call, under 0.01 USD",
+  },
+  {
+    id: "drift",
+    label: "DRIFT",
+    description: "Starts from the community reports like global search, then follows up with local searches.",
+    cost: "2 starting calls and up to 3 follow-ups, about 0.01-0.03 USD",
+  },
+  {
+    id: "basic",
+    label: "Basic",
+    description: "Plain vector RAG without the graph: answers from the most similar text units.",
+    cost: "one model call, under 0.01 USD",
+  },
+];
+
+function GraphRagQueryPanel() {
+  const [question, setQuestion] = useState("");
+  const [method, setMethod] = useState<GraphRagQueryMethod>("local");
+  const [result, setResult] = useState<GraphRagQueryResult | null>(null);
+  const [error, setError] = useState("");
+  const [isAsking, setIsAsking] = useState(false);
+  const chosen = graphRagQueryMethods.find((entry) => entry.id === method) ?? graphRagQueryMethods[0];
+
+  const ask = async () => {
+    if (!question.trim()) {
+      return;
+    }
+    setError("");
+    setIsAsking(true);
+    try {
+      const response = await fetch("/api/graphrag/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method, question }),
+      });
+      const data = (await response.json()) as GraphRagQueryResult;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "The question could not be answered.");
+      }
+      setResult(data);
+    } catch (askError) {
+      setError(askError instanceof Error ? askError.message : "The question could not be answered.");
+    } finally {
+      setIsAsking(false);
+    }
+  };
+
+  return (
+    <div className="knowledge-panel graphrag-panel">
+      <p className="reference-description">
+        Ask a question and choose how GraphRAG searches the index. It runs Microsoft's own search, with the same
+        defaults as <code>graphrag query</code> (community level 2, an answer in multiple paragraphs). The searches use
+        the cheap model <code>gpt-6-luna</code>; the costs below are estimates, the real cost is shown under each
+        answer. A question is stopped before it can cost more than <strong>0.10 USD</strong>.
+      </p>
+
+      <div className="graphrag-query-methods" role="radiogroup" aria-label="Search method">
+        {graphRagQueryMethods.map((entry) => (
+          <label key={entry.id} className="graphrag-query-method">
+            <input
+              type="radio"
+              name="graphrag-method"
+              value={entry.id}
+              checked={method === entry.id}
+              disabled={isAsking}
+              onChange={() => setMethod(entry.id)}
+            />
+            <span>
+              <strong>{entry.label}:</strong> {entry.description} <em>({entry.cost})</em>
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <textarea
+        className="graphrag-query-input"
+        rows={3}
+        placeholder="For example: Why was the same expense paid twice?"
+        value={question}
+        disabled={isAsking}
+        onChange={(event) => setQuestion(event.target.value)}
+      />
+      <div className="reference-actions">
+        <button
+          className="knowledge-build-button"
+          type="button"
+          disabled={isAsking || !question.trim()}
+          onClick={ask}
+        >
+          {isAsking ? `Searching (${chosen.label})...` : "Ask"}
+        </button>
+        {isAsking ? (
+          <span className="reference-description">Global and DRIFT search can take a minute or two.</span>
+        ) : null}
+      </div>
+
+      {error ? <p className="reference-error">{error}</p> : null}
+
+      {result ? (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title graphrag-index-title">
+            Answer{" "}
+            <span className="knowledge-section-kind">
+              ({graphRagQueryMethods.find((entry) => entry.id === result.method)?.label} search, {result.seconds} s)
+            </span>
+          </h4>
+          <p className="reference-description graphrag-query-question">
+            <strong>Question:</strong> {result.question}
+          </p>
+          <div className="graphrag-query-answer">{result.answer}</div>
+          {result.usage ? (
+            <p className="reference-description">
+              <strong>Cost:</strong> {result.usage.cost_usd.toFixed(4)} USD
+              {result.usage.complete ? "" : " (incomplete: some calls had no price or token count)"} ·{" "}
+              {result.usage.model_calls} model call{result.usage.model_calls === 1 ? "" : "s"} ·{" "}
+              {result.usage.prompt_tokens.toLocaleString()} tokens in · {result.usage.completion_tokens.toLocaleString()}{" "}
+              tokens out (of which {result.usage.reasoning_tokens.toLocaleString()} reasoning) ·{" "}
+              {result.usage.embedding_calls} embedding call{result.usage.embedding_calls === 1 ? "" : "s"}
+            </p>
+          ) : null}
+
+          <h4 className="knowledge-card-title knowledge-section-title graphrag-index-title">
+            What GraphRAG used <span className="knowledge-section-kind">(the context given to the model)</span>
+          </h4>
+          {Object.keys(result.context).length === 0 ? (
+            <p className="reference-empty">No context tables were returned for this search.</p>
+          ) : (
+            Object.entries(result.context).map(([name, table], index, all) => (
+              <div key={name}>
+                <p className="reference-description reference-counts-heading">
+                  {name} ({table.total_rows}
+                  {table.total_rows > table.rows.length ? `, first ${table.rows.length} shown` : ""}):
+                </p>
+                <div className={`reference-table-wrapper${index === all.length - 1 ? " layer-last-table" : ""}`}>
+                  <table className="reference-table">
+                    <thead>
+                      <tr>
+                        {table.columns.map((column) => (
+                          <th key={column}>{column}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {table.rows.map((row, rowIndex) => (
+                        <tr key={rowIndex}>
+                          {table.columns.map((column) => (
+                            <td key={column}>
+                              <ExpandableText text={row[column] == null ? "" : String(row[column])} />
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))
+          )}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function MicrosoftGraphRagPanel() {
   const [activeInnerTab, setActiveInnerTab] = useState<MicrosoftGraphRagTab>("input");
 
@@ -956,8 +1170,10 @@ export function MicrosoftGraphRagPanel() {
           <GraphRagIndexPanel />
         ) : activeInnerTab === "entities" ? (
           <GraphRagEntitiesPanel />
-        ) : (
+        ) : activeInnerTab === "communities" ? (
           <GraphRagCommunitiesPanel />
+        ) : (
+          <GraphRagQueryPanel />
         )}
       </div>
     </div>

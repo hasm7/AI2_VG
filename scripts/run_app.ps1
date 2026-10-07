@@ -23,14 +23,15 @@ if (-not (Test-Path (Join-Path $Frontend "package.json"))) {
 function Wait-ForBackend {
     param(
         [string] $Url,
-        [int] $TimeoutSeconds = 20
+        # The backend needs about 15 s when the GraphRAG service warms up at the same time (they share the CPU).
+        [int] $TimeoutSeconds = 60
     )
 
     $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
     while ((Get-Date) -lt $Deadline) {
         try {
-            $Response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
+            $Response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 5
             if ($Response.StatusCode -ge 200 -and $Response.StatusCode -lt 500) {
                 return
             }

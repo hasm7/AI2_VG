@@ -20,8 +20,12 @@ Endpoints:
 - GET /communities: the community hierarchy (level, parent, children, report title and rating).
 - GET /communities/<id>: one community's report (summary, rating, findings) and its entities.
 These three only read the index files in output/.
+- POST /query {"method": "global" | "local" | "drift" | "basic", "question": "..."}: answers a question with
+  Microsoft's own search (the functions `graphrag query` runs), and returns the answer and what it was built from.
+  This calls OpenAI and costs money.
 """
 
+import contextvars
 import hashlib
 import json
 import os
@@ -36,6 +40,12 @@ from importlib.metadata import version
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# `graphrag query`'s functions print the answer; on a Windows console without UTF-8 a character such as ’ would
+# raise UnicodeEncodeError after the (paid) answer has arrived.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -101,10 +111,17 @@ def config_summary() -> dict:
         return f"{entry.model_provider}/{entry.model}" if entry else f"(missing: {model_id})"
 
     completion = config.completion_models.get(config.extract_graph.completion_model_id)
+    search_models = {
+        "global": model(config.completion_models, config.global_search.completion_model_id),
+        "local": model(config.completion_models, config.local_search.completion_model_id),
+        "drift": model(config.completion_models, config.drift_search.completion_model_id),
+        "basic": model(config.completion_models, config.basic_search.completion_model_id),
+    }
     return {
         "valid": True,
         "completion_model": model(config.completion_models, config.extract_graph.completion_model_id),
         "reasoning_effort": (completion.call_args or {}).get("reasoning_effort") if completion else None,
+        "search_models": search_models,
         "embedding_model": model(config.embedding_models, config.embed_text.embedding_model_id),
         "input": {
             "type": config.input.type,
@@ -141,18 +158,69 @@ def file_hash(path: Path) -> str | None:
 
 
 def config_files() -> list[Path]:
-    """Everything besides the input that decides what the index holds: settings.yaml and every prompt file."""
+    """settings.yaml and every prompt file; used only for an index built outside the app (compared by file time)."""
     prompts = sorted(path for folder in PROMPT_DIRS if folder.exists() for path in folder.glob("*.txt"))
     return [SETTINGS_FILE, *prompts]
 
 
 def config_hash() -> str:
-    digest = hashlib.sha256()
-    for path in config_files():
-        if path.exists():
-            digest.update(str(path.relative_to(GRAPHRAG_PROJECT_DIR)).encode("utf-8"))
-            digest.update(path.read_bytes())
-    return digest.hexdigest()
+    """The fingerprint of exactly what the indexing pipeline reads, taken from GraphRAG's own loaded settings: the
+    input, chunking, graph extraction, description summaries, claims, Leiden clustering, community reports and
+    embeddings settings, the models those steps use (without the key), and the prompt files they name. Search
+    settings (global, local, DRIFT, basic and their model) are left out: changing them never makes the index stale."""
+    from graphrag.config.load_config import load_config  # imported on first use
+
+    config = load_config(GRAPHRAG_PROJECT_DIR)
+    sections = ["input", "chunking", "extract_graph", "summarize_descriptions", "extract_claims", "cluster_graph",
+                "community_reports", "embed_text"]
+    fingerprint = {name: getattr(config, name).model_dump(mode="json") for name in sections}
+
+    def model_settings(models: dict, model_id: str) -> dict:
+        settings = models[model_id].model_dump(mode="json")
+        settings.pop("api_key", None)
+        return settings
+
+    completion_ids = {config.extract_graph.completion_model_id, config.summarize_descriptions.completion_model_id,
+                      config.community_reports.completion_model_id}
+    if config.extract_claims.enabled:
+        completion_ids.add(config.extract_claims.completion_model_id)
+    fingerprint["completion_models"] = {model_id: model_settings(config.completion_models, model_id)
+                                        for model_id in sorted(completion_ids)}
+    fingerprint["embedding_model"] = model_settings(config.embedding_models, config.embed_text.embedding_model_id)
+
+    prompt_paths = [config.extract_graph.prompt, config.summarize_descriptions.prompt,
+                    config.community_reports.graph_prompt, config.community_reports.text_prompt]
+    if config.extract_claims.enabled:
+        prompt_paths.append(config.extract_claims.prompt)
+    fingerprint["prompts"] = {
+        str(path): hashlib.sha256((GRAPHRAG_PROJECT_DIR / path).read_bytes()).hexdigest()
+        for path in sorted({str(path) for path in prompt_paths if path})
+        if (GRAPHRAG_PROJECT_DIR / path).exists()
+    }
+    return hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def adopt_existing_index() -> None:
+    """An index built outside the app has no record of what it was built from. When neither the input nor any
+    setting or prompt file has changed since it was built (compared by file time), the current fingerprints are the
+    ones it was built from: record them once, so that from then on the index is compared like one built here."""
+    if INDEX_RUN_FILE.exists() or not STATS_FILE.exists():
+        return
+    built_at = STATS_FILE.stat().st_mtime
+    if INPUT_FILE.exists() and INPUT_FILE.stat().st_mtime > built_at:
+        return
+    if any(path.exists() and path.stat().st_mtime > built_at for path in config_files()):
+        return
+    built_iso = datetime.fromtimestamp(built_at, tz=timezone.utc).isoformat()
+    INDEX_RUN_FILE.write_text(json.dumps({
+        "status": "finished",
+        "input_hash": file_hash(INPUT_FILE),
+        "config_hash": config_hash(),
+        "started_at": None,
+        "finished_at": built_iso,
+        "recorded_from_existing_build": True,
+    }, indent=2), encoding="utf-8")
+    print("Recorded the existing index (built outside the app) with its input and settings fingerprints.", flush=True)
 
 
 def index_changes() -> list[str]:
@@ -297,9 +365,10 @@ def index_state() -> dict:
     if STATS_FILE.exists():
         stats = json.loads(STATS_FILE.read_text(encoding="utf-8"))
         built_at = datetime.fromtimestamp(STATS_FILE.stat().st_mtime, tz=timezone.utc)
+        record = json.loads(INDEX_RUN_FILE.read_text(encoding="utf-8")) if INDEX_RUN_FILE.exists() else {}
         built = {
             "built_at": built_at.isoformat(),
-            "built_by_app": INDEX_RUN_FILE.exists(),
+            "built_by_app": bool(record) and not record.get("recorded_from_existing_build"),
             "total_runtime_seconds": round(stats.get("total_runtime", 0)),
             "workflow_seconds": {name: round(values.get("overall", 0), 1)
                                  for name, values in stats.get("workflows", {}).items()},
@@ -398,6 +467,320 @@ def community_report(community_id: int) -> dict:
     }
 
 
+# The defaults of `graphrag query` (graphrag/cli/main.py), so a question asked here is answered as on the command line.
+QUERY_COMMUNITY_LEVEL = 2
+QUERY_RESPONSE_TYPE = "Multiple Paragraphs"
+QUERY_METHODS = ("global", "local", "drift", "basic")
+MAX_QUESTION_CHARS = 2000
+# What is shown of the context a search used: at most this many rows per table, each text cut to this length.
+CONTEXT_ROWS = 30
+CONTEXT_TEXT_CHARS = 400
+CONTEXT_COLUMNS = ["id", "title", "entity", "source", "target", "description", "text", "content", "rank", "weight",
+                   "occurrence weight", "number of relationships", "in_context"]
+
+
+class QueryInputError(ValueError):
+    pass
+
+
+class QueryRunningError(RuntimeError):
+    pass
+
+
+class BudgetExceededError(RuntimeError):
+    """Raised when a question would pass its cost limit. The name is on graphrag_llm's list of exceptions that are
+    never retried (graphrag_llm/retry/exceptions_to_skip.py), so the search stops at once instead of retrying."""
+
+
+# The most one question may cost. Before every model call the service prices the call's input (counted locally with
+# the tokenizer, no model call) and refuses the call when what was spent plus what is already reserved plus this call
+# would pass the limit. Calls sent at the same time (global search) each reserve their share first, so they cannot
+# all slip under the limit together. Output tokens are only known afterwards; they are added when the answer comes.
+QUERY_COST_LIMIT_USD = 0.10
+
+
+# --- What a question costs -------------------------------------------------------------------------------------------
+# Microsoft's search calls the model through litellm (graphrag_llm: litellm.acompletion / litellm.aembedding /
+# litellm.embedding, looked up on the module at every call). The service wraps those functions once and adds up the
+# tokens of every call made while a question is answered, priced with litellm's own price list. A streamed answer only
+# carries its token counts when asked for (stream_options include_usage); the extra chunk with the counts has no
+# choices and is not passed on to Microsoft's code. Counting must never make a question fail: any error in it only
+# marks the cost as incomplete.
+
+_query_usage: contextvars.ContextVar = contextvars.ContextVar("graphrag_query_usage", default=None)
+_usage_counter_installed = False
+
+
+def _add_usage(model: str, prompt_tokens: int, completion_tokens: int, reasoning_tokens: int, embedding: bool) -> None:
+    usage = _query_usage.get()
+    if usage is None:
+        return
+    try:
+        import litellm
+
+        name = model.split("/", 1)[-1]
+        prompt_cost, completion_cost = litellm.cost_per_token(
+            model=name, custom_llm_provider="openai", prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        )
+        cost = prompt_cost + completion_cost
+    except Exception:  # noqa: BLE001 - an unknown price leaves the cost incomplete, not the question failed
+        cost = None
+    with usage["lock"]:
+        if embedding:
+            usage["embedding_calls"] += 1
+            usage["embedding_tokens"] += prompt_tokens
+        else:
+            usage["model_calls"] += 1
+            usage["prompt_tokens"] += prompt_tokens
+            usage["completion_tokens"] += completion_tokens
+            usage["reasoning_tokens"] += reasoning_tokens
+        if cost is None:
+            usage["complete"] = False
+        else:
+            usage["cost_usd"] += cost
+
+
+def _reserve_input_cost(model: str, kwargs: dict, embedding: bool) -> float:
+    """Prices a call's input before it is sent and reserves it; raises BudgetExceededError when the question's limit would
+    be passed. Returns the reserved amount, to be released when the call has been counted."""
+    usage = _query_usage.get()
+    if usage is None:
+        return 0.0
+    import litellm
+
+    name = model.split("/", 1)[-1]
+    try:
+        if embedding:
+            inputs = kwargs.get("input") or []
+            text = " ".join(inputs) if isinstance(inputs, list) else str(inputs)
+            tokens = litellm.token_counter(model=name, text=text)
+        else:
+            tokens = litellm.token_counter(model=name, messages=kwargs.get("messages") or [])
+        reserved = litellm.cost_per_token(model=name, custom_llm_provider="openai", prompt_tokens=tokens,
+                                          completion_tokens=0)[0]
+    except Exception:  # noqa: BLE001 - an input that cannot be priced is not reserved; the limit still counts the rest
+        reserved = 0.0
+    with usage["lock"]:
+        if usage["cost_usd"] + usage["reserved_usd"] + reserved > QUERY_COST_LIMIT_USD:
+            usage["limit_reached"] = True
+            raise BudgetExceededError(
+                f"Stopped: the question reached the cost limit of {QUERY_COST_LIMIT_USD:.2f} USD per question."
+            )
+        usage["reserved_usd"] += reserved
+    return reserved
+
+
+NO_CREDITS_MESSAGE = (
+    "OpenAI: no credits remaining. Add credits at https://platform.openai.com/settings/organization/billing/ "
+    "and ask again."
+)
+
+
+def _stop_if_out_of_credits(error: Exception) -> None:
+    """OpenAI reports an empty account as a rate limit error (429, insufficient_quota), which graphrag retries up to
+    seven times with waits of up to 128 seconds. That error never passes by waiting, so it is turned into
+    BudgetExceededError, which graphrag does not retry: the question stops at once with a clear message. Ordinary
+    rate limits (too many calls right now) are left alone and still retried."""
+    text = str(error)
+    if type(error).__name__ == "RateLimitError" and ("insufficient_quota" in text or "credit_balance_exhausted" in text):
+        usage = _query_usage.get()
+        if usage is not None:
+            usage["no_credits"] = True
+        raise BudgetExceededError(NO_CREDITS_MESSAGE) from error
+
+
+def _release_reserved(reserved: float) -> None:
+    usage = _query_usage.get()
+    if usage is not None and reserved:
+        with usage["lock"]:
+            usage["reserved_usd"] = max(0.0, usage["reserved_usd"] - reserved)
+
+
+def _record_response(model: str, response, embedding: bool = False) -> None:
+    try:
+        tokens = getattr(response, "usage", None)
+        if tokens is None:
+            usage = _query_usage.get()
+            if usage is not None:
+                usage["complete"] = False
+            return
+        details = getattr(tokens, "completion_tokens_details", None)
+        _add_usage(model, int(getattr(tokens, "prompt_tokens", 0) or 0),
+                   int(getattr(tokens, "completion_tokens", 0) or 0),
+                   int(getattr(details, "reasoning_tokens", 0) or 0) if details else 0, embedding)
+    except Exception:  # noqa: BLE001
+        usage = _query_usage.get()
+        if usage is not None:
+            usage["complete"] = False
+
+
+def install_usage_counter() -> None:
+    global _usage_counter_installed
+    if _usage_counter_installed:
+        return
+    import litellm
+
+    original_acompletion = litellm.acompletion
+    original_aembedding = litellm.aembedding
+    original_embedding = litellm.embedding
+
+    async def counting_acompletion(*args, **kwargs):
+        model = str(kwargs.get("model", ""))
+        reserved = _reserve_input_cost(model, kwargs, embedding=False)
+        if not kwargs.get("stream"):
+            try:
+                response = await original_acompletion(*args, **kwargs)
+                _record_response(model, response)
+            except Exception as error:
+                _stop_if_out_of_credits(error)
+                raise
+            finally:
+                _release_reserved(reserved)
+            return response
+
+        kwargs.setdefault("stream_options", {"include_usage": True})
+        try:
+            stream = await original_acompletion(*args, **kwargs)
+        except BaseException as error:
+            _release_reserved(reserved)
+            if isinstance(error, Exception):
+                _stop_if_out_of_credits(error)
+            raise
+
+        async def counted_stream():
+            try:
+                async for chunk in stream:
+                    if getattr(chunk, "usage", None) is not None:
+                        _record_response(model, chunk)
+                        if not getattr(chunk, "choices", None):
+                            continue  # the chunk that only carries the counts
+                    yield chunk
+            finally:
+                _release_reserved(reserved)
+
+        return counted_stream()
+
+    async def counting_aembedding(*args, **kwargs):
+        model = str(kwargs.get("model", ""))
+        reserved = _reserve_input_cost(model, kwargs, embedding=True)
+        try:
+            response = await original_aembedding(*args, **kwargs)
+            _record_response(model, response, embedding=True)
+        except Exception as error:
+            _stop_if_out_of_credits(error)
+            raise
+        finally:
+            _release_reserved(reserved)
+        return response
+
+    def counting_embedding(*args, **kwargs):
+        model = str(kwargs.get("model", ""))
+        reserved = _reserve_input_cost(model, kwargs, embedding=True)
+        try:
+            response = original_embedding(*args, **kwargs)
+            _record_response(model, response, embedding=True)
+        except Exception as error:
+            _stop_if_out_of_credits(error)
+            raise
+        finally:
+            _release_reserved(reserved)
+        return response
+
+    litellm.acompletion = counting_acompletion
+    litellm.aembedding = counting_aembedding
+    litellm.embedding = counting_embedding
+    _usage_counter_installed = True
+
+
+# One question at a time, so that the cost of one question is never mixed with another's.
+_query_lock = threading.Lock()
+
+
+def _context_tables(context) -> dict:
+    """The tables a search put in front of the model (reports, entities, relationships, sources), made JSON-safe."""
+    import pandas as pd  # imported on first use
+
+    if isinstance(context, pd.DataFrame):
+        context = {"context": context}
+    if not isinstance(context, dict):
+        return {}
+
+    tables = {}
+    for name, table in context.items():
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            continue
+        columns = [column for column in CONTEXT_COLUMNS if column in table.columns]
+        rows = []
+        for record in table[columns].head(CONTEXT_ROWS).to_dict(orient="records"):
+            rows.append({key: (value[:CONTEXT_TEXT_CHARS] + "..." if isinstance(value, str) and
+                               len(value) > CONTEXT_TEXT_CHARS else value if isinstance(value, (str, int, float, bool))
+                               or value is None else str(value))
+                         for key, value in record.items()})
+        tables[name] = {"total_rows": int(len(table)), "columns": columns, "rows": rows}
+    return tables
+
+
+def run_query(body: dict) -> dict:
+    method = body.get("method")
+    question = (body.get("question") or "").strip()
+    if method not in QUERY_METHODS:
+        raise QueryInputError(f"Unknown method: {method}. Use one of {', '.join(QUERY_METHODS)}.")
+    if not question:
+        raise QueryInputError("The question is empty.")
+    if len(question) > MAX_QUESTION_CHARS:
+        raise QueryInputError(f"The question is longer than {MAX_QUESTION_CHARS} characters.")
+    if not STATS_FILE.exists():
+        raise FileNotFoundError("There is no index yet. Build it in the Index (Build) tab.")
+
+    from graphrag.cli import query as graphrag_query  # Microsoft's own `graphrag query` functions
+
+    if not _query_lock.acquire(blocking=False):
+        raise QueryRunningError("A question is already being answered. Try again when it is done.")
+    usage = {"lock": threading.Lock(), "model_calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+             "reasoning_tokens": 0, "embedding_calls": 0, "embedding_tokens": 0, "cost_usd": 0.0, "complete": True,
+             "reserved_usd": 0.0, "limit_reached": False, "no_credits": False}
+    token = _query_usage.set(usage)
+    try:
+        install_usage_counter()
+        common = {"data_dir": None, "root_dir": GRAPHRAG_PROJECT_DIR, "response_type": QUERY_RESPONSE_TYPE,
+                  "streaming": False, "query": question, "verbose": False}
+        started = datetime.now(timezone.utc)
+        if method == "global":
+            response, context = graphrag_query.run_global_search(
+                community_level=QUERY_COMMUNITY_LEVEL, dynamic_community_selection=False, **common)
+        elif method == "local":
+            response, context = graphrag_query.run_local_search(community_level=QUERY_COMMUNITY_LEVEL, **common)
+        elif method == "drift":
+            response, context = graphrag_query.run_drift_search(community_level=QUERY_COMMUNITY_LEVEL, **common)
+        else:
+            response, context = graphrag_query.run_basic_search(**common)
+        seconds = (datetime.now(timezone.utc) - started).total_seconds()
+    finally:
+        _query_usage.reset(token)
+        _query_lock.release()
+        # Stopped by an empty OpenAI account or by the cost limit (the search may also have caught the refusal and
+        # answered without that part): the question is reported as stopped, never as a full answer.
+        if usage["no_credits"]:
+            raise BudgetExceededError(NO_CREDITS_MESSAGE)
+        if usage["limit_reached"]:
+            raise BudgetExceededError(
+                f"Stopped: the question reached the cost limit of {QUERY_COST_LIMIT_USD:.2f} USD per question "
+                f"({usage['cost_usd']:.4f} USD spent, {usage['model_calls']} model calls). No answer is shown."
+            )
+
+    return {
+        "usage": {key: (round(value, 6) if key == "cost_usd" else value)
+                  for key, value in usage.items() if key != "lock"},
+        "method": method,
+        "question": question,
+        "answer": response if isinstance(response, str) else json.dumps(response, ensure_ascii=False, default=str),
+        "seconds": round(seconds, 1),
+        "community_level": QUERY_COMMUNITY_LEVEL if method != "basic" else None,
+        "response_type": QUERY_RESPONSE_TYPE,
+        "context": _context_tables(context),
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -430,6 +813,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(error)})
 
     def do_POST(self) -> None:  # noqa: N802 - name required by BaseHTTPRequestHandler
+        if self.path == "/query":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length).decode("utf-8") or "{}") if length else {}
+                self._send_json(200, run_query(body))
+            except (QueryInputError, json.JSONDecodeError) as error:
+                self._send_json(400, {"error": str(error)})
+            except QueryRunningError as error:
+                self._send_json(409, {"error": str(error)})
+            except BudgetExceededError as error:
+                self._send_json(402, {"error": str(error)})
+            except FileNotFoundError as error:
+                self._send_json(404, {"error": str(error)})
+            except Exception as error:  # noqa: BLE001 - report any failure to the caller
+                self._send_json(500, {"error": f"{type(error).__name__}: {error}"})
+            return
         if self.path != "/index":
             self._send_json(404, {"error": f"Unknown path: {self.path}"})
             return
@@ -446,7 +845,35 @@ class Handler(BaseHTTPRequestHandler):
         print(f"graphrag-service: {format % args}", flush=True)
 
 
+def warm_up() -> None:
+    """Loads, in the background at start, what the first question would otherwise wait for: Microsoft's search code,
+    the settings, the index tables and the tokenizer. No model is called, so it costs nothing."""
+    started = datetime.now(timezone.utc)
+    try:
+        adopt_existing_index()
+    except Exception as error:  # noqa: BLE001 - the index is then compared by file time, as before
+        print(f"Could not record the existing index: {error}", flush=True)
+    try:
+        import tiktoken
+        from graphrag.cli import query as graphrag_query
+        from graphrag.config.load_config import load_config
+
+        config = load_config(GRAPHRAG_PROJECT_DIR)
+        if STATS_FILE.exists():
+            graphrag_query._resolve_output_files(
+                config=config,
+                output_list=["entities", "communities", "community_reports", "text_units", "relationships"],
+            )
+        tiktoken.get_encoding(config.chunking.encoding_model or "o200k_base")
+        install_usage_counter()
+        seconds = (datetime.now(timezone.utc) - started).total_seconds()
+        print(f"GraphRAG warm-up done in {seconds:.1f} s.", flush=True)
+    except Exception as error:  # noqa: BLE001 - the service works without the warm-up
+        print(f"GraphRAG warm-up skipped: {error}", flush=True)
+
+
 def main() -> None:
+    threading.Thread(target=warm_up, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Microsoft GraphRAG service (graphrag {version('graphrag')}, Python {platform.python_version()}) "
           f"on http://{HOST}:{PORT}", flush=True)

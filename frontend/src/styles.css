@@ -582,6 +582,47 @@ main {
   overflow-wrap: anywhere;
 }
 
+/* Query (Search): the method choice, the question box and the answer. */
+.graphrag-query-methods {
+  display: grid;
+  gap: 6px;
+}
+
+.graphrag-query-method {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: #334155;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.graphrag-query-method em {
+  color: #64748b;
+}
+
+.graphrag-query-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.graphrag-query-answer {
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 /* A long description in the GraphRAG tables, shortened until it is clicked. */
 .graphrag-expandable {
   cursor: pointer;
