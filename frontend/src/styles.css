@@ -558,6 +558,35 @@ main {
   margin-bottom: 1.5em;
 }
 
+/* The Microsoft GraphRAG tabs: every part takes the height it needs and the tab scrolls as one page. The layer panels'
+   grid gives its fourth child the space that is left (1fr), which squeezed the Configuration table to a few pixels. */
+.knowledge-panel.graphrag-panel {
+  grid-template-rows: none;
+  grid-auto-rows: max-content;
+  align-content: start;
+  /* Only the tab around it scrolls: with its own height and scroll bar there were two scroll bars side by side
+     (the service status line sits above this panel inside the same tab). */
+  height: auto;
+  overflow: visible;
+}
+
+/* The tables there show all their rows, so they need no scroll bar of their own; the tab scrolls instead. */
+.graphrag-panel .reference-table-wrapper {
+  overflow: visible;
+}
+
+/* Without a scroll bar a table must fit its frame: long cells wrap, or the table would stick out past the frame
+   and the frame would show as a second box behind it. */
+.graphrag-panel .reference-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* An empty line above the Configuration and Index headings in the Index (Build) tab of Microsoft GraphRAG. */
+.knowledge-panel > .graphrag-index-title {
+  margin-top: 36px;
+}
+
 .center-panel > .center-tab-panel {
   margin-top: 0;
   border-radius: 12px;

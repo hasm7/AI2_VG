@@ -18,13 +18,27 @@ from topic_event_extraction import postgres_database_url
 
 GRAPHRAG_SERVICE_URL = os.getenv("GRAPHRAG_SERVICE_URL", "http://127.0.0.1:8100")
 SERVICE_TIMEOUT_SECONDS = 3
+# The first config request imports the graphrag library in the service, which takes several seconds.
+CONFIG_TIMEOUT_SECONDS = 60
 
 graphrag_blueprint = Blueprint("graphrag", __name__)
 
 
-def service_get(path: str) -> dict:
-    with urllib.request.urlopen(f"{GRAPHRAG_SERVICE_URL}{path}", timeout=SERVICE_TIMEOUT_SECONDS) as response:
+def service_get(path: str, timeout: float = SERVICE_TIMEOUT_SECONDS) -> dict:
+    with urllib.request.urlopen(f"{GRAPHRAG_SERVICE_URL}{path}", timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def service_call(method: str, path: str, timeout: float) -> tuple[dict, int]:
+    """Any method; the service's own status code and error message are passed on to the frontend."""
+    call = urllib.request.Request(f"{GRAPHRAG_SERVICE_URL}{path}", method=method)
+    try:
+        with urllib.request.urlopen(call, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8")), response.status
+    except urllib.error.HTTPError as error:
+        return json.loads(error.read().decode("utf-8") or "{}"), error.code
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+        return {"error": f"GraphRAG service not reachable: {error}"}, 503
 
 
 @graphrag_blueprint.route("/api/graphrag/status", methods=["GET"])
@@ -33,6 +47,30 @@ def api_graphrag_status():
         return jsonify({"running": True, **service_get("/status")})
     except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
         return jsonify({"running": False, "url": GRAPHRAG_SERVICE_URL, "error": str(error)})
+
+
+@graphrag_blueprint.route("/api/graphrag/config", methods=["GET"])
+def api_graphrag_config():
+    try:
+        return jsonify(service_get("/config", timeout=CONFIG_TIMEOUT_SECONDS))
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+        return jsonify({"valid": False, "error": f"GraphRAG service not reachable: {error}"}), 503
+
+
+@graphrag_blueprint.route("/api/graphrag/index", methods=["GET"])
+def api_graphrag_index():
+    payload, status_code = service_call("GET", "/index", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
+
+
+# Starts `graphrag index` in the service and returns at once; the frontend follows the build with GET.
+@graphrag_blueprint.route("/api/graphrag/index", methods=["POST", "OPTIONS"])
+def api_graphrag_index_start():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    payload, status_code = service_call("POST", "/index", CONFIG_TIMEOUT_SECONDS)
+    return jsonify(payload), status_code
 
 
 @graphrag_blueprint.route("/api/graphrag/input", methods=["GET"])

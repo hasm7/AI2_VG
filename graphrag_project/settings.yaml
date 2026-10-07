@@ -1,0 +1,157 @@
+### This config file contains required core defaults that must be set, along with a handful of common optional settings.
+### For a full list of available settings, see https://microsoft.github.io/graphrag/config/yaml/
+
+### LLM settings ###
+## There are a number of settings to tune the threading and token limits for LLM calls - check the docs.
+
+completion_models:
+  default_completion_model:
+    model_provider: openai
+    model: gpt-5.6-terra
+    auth_method: api_key # or azure_managed_identity
+    api_key: ${OPENAI_API_KEY} # from the project's .env, loaded by graphrag_service/server.py
+    # The same model and reasoning effort as the app's Knowledge layer (layer 2), so that the two graphs differ by
+    # method, not by settings. Set explicitly: a later change would invalidate every cached model call.
+    call_args:
+      reasoning_effort: medium
+    retry:
+      type: exponential_backoff
+
+embedding_models:
+  default_embedding_model:
+    model_provider: openai
+    model: text-embedding-3-large
+    auth_method: api_key
+    api_key: ${OPENAI_API_KEY}
+    retry:
+      type: exponential_backoff
+
+### Document processing settings ###
+
+input:
+  type: jsonl # [csv, text, json, jsonl]
+  # input/documents.jsonl, written by the Input tab (backend/graphrag_input.py): one document per line.
+  id_column: id
+  title_column: title
+  text_column: text
+
+chunking:
+  type: tokens
+  size: 1200
+  overlap: 100
+  encoding_model: o200k_base
+  # The document title first in every text unit, so that the later units of a long document know where they come from.
+  prepend_metadata: [title]
+
+### Storage settings ###
+## If blob storage is specified in the following four sections,
+## connection_string and container_name must be provided
+
+input_storage:
+  type: file # [file, blob, cosmosdb]
+  base_dir: "input"
+
+output_storage:
+  type: file # [file, blob, cosmosdb]
+  base_dir: "output"
+
+reporting:
+  type: file # [file, blob]
+  base_dir: "logs"
+
+cache:
+  type: json # [json, memory, sqlite, none]
+  storage:
+    type: file # [file, blob, cosmosdb]
+    base_dir: "cache"
+  # database_name: "cache.db" # Only used when type is sqlite
+    
+vector_store:
+  type: lancedb
+  db_uri: output/lancedb # forward slash: the same file works on Windows and on the Linux server
+
+### Workflow settings ###
+
+embed_text:
+  embedding_model_id: default_embedding_model
+
+extract_graph:
+  completion_model_id: default_completion_model
+  # Microsoft's original prompt. The one from `graphrag prompt-tune` (prompts_tuned/extract_graph.txt) is not used:
+  # in graphrag 3.2.0 its examples pair each text with the output for another text (one message builder is reused
+  # for every example in prompt_tune/generator/entity_relationship.py).
+  prompt: "prompts/extract_graph.txt"
+  # The entity types `graphrag prompt-tune` discovered in the input (25), with overlapping types merged, as its own
+  # instruction asks ("Do not generate redundant or overlapping entity types"):
+  #   organization         <- organization, customer organization
+  #   software component   <- software product, software component, source-code repository
+  #   pull request         <- pull request, code review
+  #   requirement          <- requirement, regulation, approval policy
+  #   document             <- architecture decision record, technical design document, test artifact
+  #   business concept     <- business process, expense, receipt image, financial record, user-access role
+  # Left out: professional role (part of a person's description) and communication channel (a Slack channel is named
+  # in almost every thread and would become a hub that the communities form around).
+  entity_types: [person, organization, software component, external integration, issue, pull request, release, requirement, document, meeting, business concept]
+  max_gleanings: 1
+
+summarize_descriptions:
+  completion_model_id: default_completion_model
+  # Microsoft's original prompt. The one from `graphrag prompt-tune` drops the length limit ({max_length}) and adds
+  # "Enrich it as much as you can with relevant information from the nearby text", while the model is given no text
+  # beyond the descriptions, which invites additions without evidence.
+  prompt: "prompts/summarize_descriptions.txt"
+  max_length: 500
+
+extract_graph_nlp:
+  text_analyzer:
+    extractor_type: regex_english # [regex_english, syntactic_parser, cfg]
+
+cluster_graph:
+  max_cluster_size: 10
+
+extract_claims:
+  enabled: false
+  completion_model_id: default_completion_model
+  prompt: "prompts/extract_claims.txt"
+  description: "Any claims or facts that could be relevant to information discovery."
+  max_gleanings: 1
+
+community_reports:
+  completion_model_id: default_completion_model
+  # From `graphrag prompt-tune`: a persona and a report rating scale for this domain. Microsoft's line
+  # "Limit the total report length to {max_report_length} words." is put back in it, at the same two places as in the
+  # original prompt (prompt-tune drops it, and max_length below would otherwise never reach the model).
+  graph_prompt: "prompts_tuned/community_report_graph.txt"
+  text_prompt: "prompts/community_report_text.txt"
+  max_length: 2000
+  max_input_length: 8000
+
+snapshots:
+  graphml: false
+  embeddings: false
+
+### Query settings ###
+## The prompt locations are required here, but each search method has a number of optional knobs that can be tuned.
+## See the config docs: https://microsoft.github.io/graphrag/config/yaml/#query
+
+local_search:
+  completion_model_id: default_completion_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/local_search_system_prompt.txt"
+
+global_search:
+  completion_model_id: default_completion_model
+  map_prompt: "prompts/global_search_map_system_prompt.txt"
+  reduce_prompt: "prompts/global_search_reduce_system_prompt.txt"
+  knowledge_prompt: "prompts/global_search_knowledge_system_prompt.txt"
+
+drift_search:
+  completion_model_id: default_completion_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/drift_search_system_prompt.txt"
+  reduce_prompt: "prompts/drift_search_reduce_prompt.txt"
+
+basic_search:
+  completion_model_id: default_completion_model
+  embedding_model_id: default_embedding_model
+  prompt: "prompts/basic_search_system_prompt.txt"

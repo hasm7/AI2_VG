@@ -1,0 +1,327 @@
+
+-Goal-
+Given a text document that is potentially relevant to this activity and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
+
+-Steps-
+1. Identify all entities. For each identified entity, extract the following information:
+- entity_name: Name of the entity, capitalized
+- entity_type: One of the following types: [person, organization, customer organization, professional role, software product, software component, source-code repository, pull request, code review, issue, release, requirement, architecture decision record, technical design document, communication channel, meeting, test artifact, external integration, regulation, business process, expense, receipt image, financial record, approval policy, user-access role]
+- entity_description: Comprehensive description of the entity's attributes and activities
+Format each entity as ("entity"<|><entity_name><|><entity_type><|><entity_description>)
+
+2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other.
+For each pair of related entities, extract the following information:
+- source_entity: name of the source entity, as identified in step 1
+- target_entity: name of the target entity, as identified in step 1
+- relationship_description: explanation as to why you think the source entity and the target entity are related to each other
+- relationship_strength: an integer score between 1 to 10, indicating strength of the relationship between the source entity and target entity
+Format each relationship as ("relationship"<|><source_entity><|><target_entity><|><relationship_description><|><relationship_strength>)
+
+3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **##** as the list delimiter.
+
+4. If you have to translate into English, just translate the descriptions, nothing else!
+
+5. When finished, output <|COMPLETE|>.
+
+-Examples-
+######################
+
+Example 1:
+
+entity_types: [person, organization, customer organization, professional role, software product, software component, source-code repository, pull request, code review, issue, release, requirement, architecture decision record, technical design document, communication channel, meeting, test artifact, external integration, regulation, business process, expense, receipt image, financial record, approval policy, user-access role]
+text:
+Pull request kvitta-api#31: KV-5: approval limits per manager
+Source: code host (kvitta-github)
+Opened: 2026-02-25T10:00:00+01:00 by Emma Chen, final state: merged
+
+[kvitta-api#31 v1] 2026-02-25T10:00:00+01:00, state: open, head commit f6a0bc99
+Title: KV-5: approval limits per manager
+Description: Implements the API part of KV-5. Each manager has an approval limit, 5 000 SEK by default. The approval rules route expenses above the limit to the head of finance. The web portal part is kvitta-web#9.
+Code changes:
+- app/approval/limits.py (added)
+  Before: Any manager could approve any amount.
+  After: Approval limit per manager, 5 000 SEK by default, stored as a float.
+  Diff:
+    @@ -0,0 +1,36 @@
+    +DEFAULT_LIMIT = 5000.0
+    +
+    +def limit_for(manager):
+    +    return manager.approval_limit or DEFAULT_LIMIT
+- app/approval/rules.py (modified)
+  Before: Every expense was sent to the manager of the employee.
+  After: Expenses above the manager limit are routed to the head of finance.
+  Diff:
+    @@ -18,4 +18,7 @@
+     def approver_for(expense):
+    +    manager = expense.employee.manager
+    +    if expense.amount > limits.limit_for(manager):
+    +        return head_of_finance()
+         return manager
+
+[kvitta-api#31 v2] 2026-03-02T11:00:00+01:00, state: open, head commit 07b1cdaa
+Title: KV-5: approval limits per manager
+Description: Implements the API part of KV-5. Each manager has an approval limit, 5 000 SEK by default. The approval rules route expenses above the limit to the head of finance. The web portal part is kvitta-web#9.
+Code changes:
+- app/approval/limits.py (modified)
+  Before: Limits were stored as floats, so 5000.00 could compare wrongly.
+  After: Limits and amounts use Decimal, so the limit compares exactly.
+  Diff:
+    @@ -1,4 +1,4 @@
+    -DEFAULT_LIMIT = 5000.0
+    +DEFAULT_LIMIT = Decimal("5000.00")
+- tests/approval/test_limits.py (added)
+  Before: No tests for approval limits.
+  After: Tests for amounts just below, at and above the limit, and for a custom limit.
+  Diff:
+    @@ -0,0 +1,41 @@
+    +def test_exactly_at_limit_stays_with_manager():
+    +    assert approver_for(expense(Decimal("5000.00"))) == manager
+
+[kvitta-api#31 v3] 2026-03-04T16:00:00+01:00, state: open, head commit 18c2debb
+Title: KV-5: approval limits per manager
+Description: Implements the API part of KV-5. Each manager has an approval limit, 5 000 SEK by default. The approval rules route expenses above the limit to the head of finance. The web portal part is kvitta-web#9.
+Code changes:
+- app/approval/rules.py (modified)
+  Before: A routed expense did not say why it was routed.
+  After: A routed expense records the reason, for example: above the approval limit of 5 000 SEK.
+  Diff:
+    @@ -21,3 +21,4 @@
+         if expense.amount > limits.limit_for(manager):
+    +        expense.routing_reason = f"above approval limit {{limits.limit_for(manager)}} SEK"
+             return head_of_finance()
+
+[kvitta-api#31 v4] 2026-03-05T15:00:00+01:00, state: merged, head commit 18c2debb
+Title: KV-5: approval limits per manager
+Description: Implements the API part of KV-5. Each manager has an approval limit, 5 000 SEK by default. The approval rules route expenses above the limit to the head of finance. The web portal part is kvitta-web#9.
+
+Reviews:
+[review-015] 2026-02-26T10:00:00+01:00 Ahmed Karimi, changes_requested, on version 1:
+Good structure for a first feature. Two things before I approve: money must never be a float, and there are no tests yet.
+
+[review-016] 2026-02-26T10:05:00+01:00 Ahmed Karimi, comment, on version 1, app/approval/limits.py line 1 (after):
+Use Decimal here. With floats, an expense of exactly 5 000 SEK can end up on the wrong side of the limit.
+
+[review-017] 2026-03-02T11:05:00+01:00 Emma Chen, comment, on version 2, app/approval/limits.py line 1 (after), reply to review-016:
+Changed to Decimal and added tests for amounts just below, at and above the limit.
+
+[review-018] 2026-03-04T16:30:00+01:00 Nina Petrova, comment, on version 3:
+Tested with 4 900, 5 000 and 5 100 SEK and with a custom limit. Everything is routed
+------------------------
+output:
+("entity"<|>KVITTA<|>software product<|>Kvitta is the expense-management software product whose 1.0 release is scheduled for March 23, 2026.)  
+##  
+("entity"<|>KVITTA 1.0 (KV-9)<|>release<|>Kvitta 1.0 is the release tracked as KV-9, scheduled for March 23, 2026. Its release blockers were resolved and the go/no-go decision was GO for the following Monday.)  
+##  
+("entity"<|>KVITTA 1.1<|>release<|>Kvitta 1.1 is the subsequent planned release to which the Visma export and still-open KV-12 were deferred.)  
+##  
+("entity"<|>KV-10<|>issue<|>KV-10 is the issue tracking the deferred Visma export work for Kvitta 1.1.)  
+##  
+("entity"<|>KV-7<|>issue<|>KV-7 is the issue for the proper Fortnox fix. It was a release blocker for Kvitta 1.0 and was resolved before the go/no-go decision.)  
+##  
+("entity"<|>KV-8<|>issue<|>KV-8 is the issue concerning a duplicate payout. It was a release blocker for Kvitta 1.0 and was resolved before the go/no-go decision.)  
+##  
+("entity"<|>KV-12<|>issue<|>KV-12 is an issue that remained open and was retained for Kvitta 1.1.)  
+##  
+("entity"<|>VISMA EXPORT<|>external integration<|>The Visma export is an external-integration capability that was deferred from Kvitta 1.0 to Kvitta 1.1.)  
+##  
+("entity"<|>FORTNOX<|>external integration<|>Fortnox is the external integration affected by the fix tracked in KV-7.)  
+##  
+("entity"<|>RELEASE-CHECKLIST<|>test artifact<|>The release checklist is the artifact used to gather and track items required for the Kvitta 1.0 release.)  
+##  
+("entity"<|>REGRESSION RUN<|>test artifact<|>The regression run is release-validation testing that was green when the GO decision for Kvitta 1.0 was announced.)  
+##  
+("entity"<|>RELEASES<|>communication channel<|>The #releases Slack channel is the communication channel where Kvitta release scheduling, release-planning outcomes, blockers, and the go/no-go result were posted.)  
+##  
+("entity"<|>MARIA LINDGREN<|>person<|>Maria Lindgren posted the Kvitta 1.0 release date and tracking identifier, requested additions to the release checklist, and communicated the release-planning outcome.)  
+##  
+("entity"<|>DAVID OKAFOR<|>person<|>David Okafor announced the GO go/no-go result for Kvitta 1.0 after confirming that KV-7 and KV-8 were resolved and the regression run was green.)  
+##  
+("relationship"<|>KVITTA 1.0 (KV-9)<|>KVITTA<|>Kvitta 1.0 is a planned release of the Kvitta software product.<|>10)  
+##  
+("relationship"<|>MARIA LINDGREN<|>RELEASES<|>Maria Lindgren posted release-date and release-planning updates in the #releases Slack channel.<|>8)  
+##  
+("relationship"<|>DAVID OKAFOR<|>RELEASES<|>David Okafor posted the Kvitta 1.0 go/no-go result in the #releases Slack channel.<|>8)  
+##  
+("relationship"<|>KVITTA 1.0 (KV-9)<|>RELEASES<|>The #releases channel contains announcements and decisions concerning the Kvitta 1.0 release.<|>8)  
+##  
+("relationship"<|>RELEASE-CHECKLIST<|>KVITTA 1.0 (KV-9)<|>The release checklist was created to collect what was needed for the Kvitta 1.0 release.<|>9)  
+##  
+("relationship"<|>KV-10<|>VISMA EXPORT<|>KV-10 tracks the Visma export work.<|>10)  
+##  
+("relationship"<|>KV-10<|>KVITTA 1.1<|>The Visma export issue, KV-10, was deferred to Kvitta 1.1.<|>9)  
+##  
+("relationship"<|>KV-7<|>FORTNOX<|>KV-7 tracks the proper fix for the Fortnox integration.<|>10)  
+##  
+("relationship"<|>KV-7<|>KVITTA 1.0 (KV-9)<|>The Fortnox fix in KV-7 was a release blocker for Kvitta 1.0 until it was resolved.<|>10)  
+##  
+("relationship"<|>KV-8<|>KVITTA 1.0 (KV-9)<|>The duplicate-payout issue in KV-8 was a release blocker for Kvitta 1.0 until it was resolved.<|>10)  
+##  
+("relationship"<|>REGRESSION RUN<|>KVITTA 1.0 (KV-9)<|>A green regression run was reported as evidence supporting the GO decision for the Kvitta 1.0 release.<|>9)  
+##  
+("relationship"<|>KV-12<|>KVITTA 1.1<|>KV-12 remained open and was assigned to the Kvitta 1.1 release scope.<|>8)  
+<|COMPLETE|>
+#############################
+
+
+Example 2:
+
+entity_types: [person, organization, customer organization, professional role, software product, software component, source-code repository, pull request, code review, issue, release, requirement, architecture decision record, technical design document, communication channel, meeting, test artifact, external integration, regulation, business process, expense, receipt image, financial record, approval policy, user-access role]
+text:
+ now they are kept indefinitely and are visible to anyone with access to the web portal. This needs a
+decision before the release.
+
+## Error handling
+
+If the image cannot be read at all (too dark, too small, not a receipt), the reader returns an empty result with a
+warning, and the app asks the employee to take a new photo or to fill in the fields by hand. The reader never blocks the
+creation of an expense: in the worst case the employee types the fields, exactly as before Kvitta.
+
+If the text recognition engine fails or times out, the expense API retries once and then creates the draft without
+extracted fields. Such failures are counted and alerted on, since a sudden increase usually means a problem with the
+engine rather than with the receipts.
+
+## Performance
+
+Reading a receipt takes about 1.2 seconds on the current API servers, of which almost one second is text recognition.
+The app shows the draft as soon as the result is back, so the employee sees the fields filled in about two seconds after
+taking the photo. The reader is stateless and can run on several API instances at once.
+
+## Testing
+
+The reader is tested at three levels:
+
+- Unit tests per step, with small hand-made images (tests/receipts/test_reader.py, and tests/receipts/test_vat.py for
+  the VAT rules).
+- A regression set of fifty receipts with known correct fields, run on every pull request. A change that makes any of
+  them worse fails the build. Twelve restaurant and hotel receipts were added to the set for the new VAT rates.
+- A quality run on five hundred real receipts from the pilot, anonymised, run before each release. The target is at
+  least 90 % fully correct.
+
+## Worked examples
+
+### A lunch receipt from a café
+
+A typical receipt from a café near the office: the merchant name in large letters at the top, the address and
+organisation number below, three line items, then SUMMA 142,00 and MOMS 25% 28,40. Step 3 groups SUMMA and 142,00 into
+one line and the VAT line with its rate and amount into another. The amount becomes 142.00, the VAT 28.40 at 25 %, and
+the check against the total passes. The date is printed twice, at the top as 2026-02-04 and at the bottom in the card
+slip with a time; the top one wins. All four fields get a confidence above 0.9 and nothing is marked for review.
+
+### A taxi receipt
+
+Taxi receipts are narrow and often printed on thermal paper that fades within weeks. The pilot had many of them from
+late January that were already pale. After the contrast step in image preparation the amount and date read reliably,
+but the merchant line is often a company name followed by a car number, for example TAXI STOCKHOLM BIL 4711. The
+merchant cleanup removes the car number, and the organisation number printed at the bottom identifies the company even
+when the name is abbreviated. Taxi rides have 6 % VAT, which the reader now recognises.
+
+### A restaurant dinner
+
+A dinner receipt from a restaurant prints MOMS 12% on the food and MOMS 25% on the wine. The reader returns two VAT
+lines, one at 12 % and one at 25 %, and checks that they add up to the total within one krona. Before KV-4 this receipt
+was marked for review with the warning unsupported VAT rate, about one receipt in eight in the pilot; with the new VAT
+rules nearly all restaurant receipts are read correctly. If the dinner was with a client, the employee marks it as
+representation in the app, and only the deductible part of the VAT is exported.
+
+### A hotel invoice as PDF
+
+Hotels usually send a PDF invoice by email instead of a paper receipt. The PDF is rendered to an image and read like a
+photo, but the text is sharp, so recognition scores are high. The date that matters is the check-out date, which hotels
+print near the top, while the invoice date at the bottom can be days later. The rule that the topmost date wins gives
+the right answer for all hotel invoices in the pilot. A room at 12 % and a minibar at 25 % give two VAT lines.
+
+## Monitoring after release
+
+Three numbers are tracked per week once the reader runs for all customers:
+
+- The share of receipts where the employee changed at least one field. The pilot baseline is 11 %. A rise of more than
+  two percentage points in a week is investigated.
+- The share of fields marked for review. If it rises while the change rate stays the same, the confidence threshold is
+  probably too cautious.
+- The number of reader failures (empty results). These are alerted on directly, since they usually mean the text
+  recognition engine is broken rather than the receipts being bad.
+
+The numbers are computed from the stored reader results and the change log, so no extra data has to be collected. Any
+change to the reader is compared against these numbers for the week before and the week after it is deployed.
+
+## Open questions
+
+- Retention of images, see the storage section.
+- Whether to read line items in a later version, to support expense policies per category.
+
+## Tracking
+
+KV-1 and KV-4. Related requirement: REQ-VAT.
+
+------------------------
+output:
+("entity"<|>#RELEASES<|>communication channel<|>The Slack channel where release planning, scope decisions, blockers, and the go/no-go outcome for Kvitta 1.0 are communicated.)
+##
+("entity"<|>MARIA LINDGREN<|>person<|>Maria Lindgren announced the planned Kvitta 1.0 release, requested additions to the release checklist, and communicated the release-planning outcome.)
+##
+("entity"<|>DAVID OKAFOR<|>person<|>David Okafor communicated the go/no-go result for the Kvitta 1.0 release and confirmed that release-blocking issues were resolved and regression testing was green.)
+##
+("entity"<|>KVITTA 1.0<|>release<|>The Kvitta 1.0 software release, planned for March 23, 2026, tracked by KV-9 and ultimately approved to proceed on Monday.)
+##
+("entity"<|>KV-9<|>issue<|>The issue tracking the Kvitta 1.0 release planning, release scope, blockers, and final go/no-go decision.)
+##
+("entity"<|>RELEASE-CHECKLIST<|>test artifact<|>The release checklist published for Kvitta 1.0, used to collect missing release requirements and readiness items.)
+##
+("entity"<|>VISMA EXPORT<|>external integration<|>The planned export integration for Visma, which was deferred from Kvitta 1.0 to version 1.1.)
+##
+("entity"<|>KV-10<|>issue<|>The issue tracking the Visma export work deferred to Kvitta 1.1.)
+##
+("entity"<|>FORTNOX<|>external integration<|>The Fortnox integration, for which a proper fix tracked in KV-7 was a blocker for the Kvitta 1.0 release.)
+##
+("entity"<|>KV-7<|>issue<|>The issue tracking the proper Fortnox fix; it was a release blocker for KV-9 and was resolved before the go/no-go decision.)
+##
+("entity"<|>KV-8<|>issue<|>The issue tracking a duplicate payout defect; it was a release blocker for KV-9 and was resolved before the go/no-go decision.)
+##
+("entity"<|>DUPLICATE PAYOUT<|>business process<|>The erroneous payout condition addressed by KV-8, which had to be resolved before Kvitta 1.0 could be released.)
+##
+("entity"<|>REGRESSION RUN<|>test artifact<|>The regression test execution for the release candidate, reported as green before the Kvitta 1.0 go/no-go decision.)
+##
+("entity"<|>KV-12<|>issue<|>An issue that remained open and was deferred to the Kvitta 1.1 release scope.)
+##
+("entity"<|>KVITTA 1.1<|>release<|>The subsequent Kvitta release version that will include the deferred Visma export work and KV-12.)
+##
+("relationship"<|>MARIA LINDGREN<|>#RELEASES<|>Maria Lindgren posted release announcements and release-planning outcomes in the #releases Slack channel.<|>9)
+##
+("relationship"<|>DAVID OKAFOR<|>#RELEASES<|>David Okafor posted the Kvitta 1.0 go/no-go result in the #releases Slack channel.<|>9)
+##
+("relationship"<|>KV-9<|>KVITTA 1.0<|>KV-9 tracks the planned Kvitta 1.0 release and its release decision.<|>10)
+##
+("relationship"<|>RELEASE-CHECKLIST<|>KVITTA 1.0<|>The release checklist is used to establish and track readiness items for Kvitta 1.0.<|>9)
+##
+("relationship"<|>MARIA LINDGREN<|>RELEASE-CHECKLIST<|>Maria Lindgren announced that the release checklist was available and asked contributors to add missing items.<|>8)
+##
+("relationship"<|>VISMA EXPORT<|>KV-10<|>KV-10 tracks the Visma export after it was moved out of the Kvitta 1.0 scope.<|>9)
+##
+("relationship"<|>VISMA EXPORT<|>KVITTA 1.1<|>The Visma export was deferred to the Kvitta 1.1 release.<|>10)
+##
+("relationship"<|>KV-10<|>KVITTA 1.1<|>KV-10 is scheduled for Kvitta 1.1 because it tracks the deferred Visma export.<|>9)
+##
+("relationship"<|>KV-7<|>FORTNOX<|>KV-7 tracks the proper fix for the Fortnox integration.<|>10)
+##
+("relationship"<|>KV-7<|>KV-9<|>The Fortnox fix in KV-7 was a blocker for the KV-9 release decision until it was resolved.<|>9)
+##
+("relationship"<|>KV-8<|>DUPLICATE PAYOUT<|>KV-8 tracks the duplicate payout defect.<|>10)
+##
+("relationship"<|>KV-8<|>KV-9<|>The duplicate payout issue in KV-8 was a blocker for the KV-9 release decision until it was resolved.<|>9)
+##
+("relationship"<|>REGRESSION RUN<|>KV-9<|>A green regression run was part of the evidence supporting the GO decision for KV-9.<|>8)
+##
+("relationship"<|>DAVID OKAFOR<|>KV-9<|>David Okafor reported the GO decision for KV-9 after its blockers were resolved and regression testing passed.<|>9)
+##
+("relationship"<|>KV-12<|>KVITTA 1.1<|>KV-12 remained open and was deferred to the Kvitta 1.1 release.<|>9)
+<|COMPLETE|>
+#############################
+
+
+
+-Real Data-
+######################
+entity_types: [person, organization, customer organization, professional role, software product, software component, source-code repository, pull request, code review, issue, release, requirement, architecture decision record, technical design document, communication channel, meeting, test artifact, external integration, regulation, business process, expense, receipt image, financial record, approval policy, user-access role]
+text: {input_text}
+######################
+output:
