@@ -61,6 +61,12 @@ data/
 backups/
 dumps/
 
+# Microsoft GraphRAG: exported input and everything the index writes (rebuilt from the data)
+graphrag_project/input/
+graphrag_project/output/
+graphrag_project/cache/
+graphrag_project/logs/
+
 # Agent test runs (results change with every run)
 backend/ai_agent/evaluation_last.json
 backend/ai_agent/evaluation_history.json

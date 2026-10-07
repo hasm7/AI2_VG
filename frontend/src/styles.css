@@ -552,6 +552,12 @@ main {
   margin-left: auto;
 }
 
+/* The GraphRAG service status above the content of the Microsoft GraphRAG tab, followed by an empty line. Two classes,
+   so that `.reference-description` and `.reference-error` (margin: 0, later in this file) do not override it. */
+.center-tab-panel > .graphrag-service-line {
+  margin-bottom: 1.5em;
+}
+
 .center-panel > .center-tab-panel {
   margin-top: 0;
   border-radius: 12px;

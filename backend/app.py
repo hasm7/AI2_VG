@@ -38,11 +38,14 @@ from collaboration_layer import (
     build_collaboration_layer,
     PrerequisiteError as CollaborationPrerequisiteError,
 )
+from graphrag_routes import graphrag_blueprint
 
 
 load_dotenv()
 
 app = Flask(__name__)
+# Microsoft GraphRAG, a separate RAG system next to the graph layers (`graphrag_routes.py`).
+app.register_blueprint(graphrag_blueprint)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VIEWER_APP = PROJECT_ROOT / "viewer" / "app.py"

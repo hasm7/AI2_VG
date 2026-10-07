@@ -4,6 +4,9 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $Backend = Join-Path $ProjectRoot "backend\app.py"
 $Frontend = Join-Path $ProjectRoot "frontend"
+# Microsoft GraphRAG runs in its own environment. It is optional: without it the rest of the app starts as usual.
+$GraphRagPython = Join-Path $ProjectRoot ".venv-graphrag\Scripts\python.exe"
+$GraphRagService = Join-Path $ProjectRoot "graphrag_service\server.py"
 
 if (-not (Test-Path $Python)) {
     throw "Project virtual environment not found: $Python"
@@ -41,8 +44,27 @@ function Wait-ForBackend {
 }
 
 $BackendProcess = $null
+$GraphRagProcess = $null
 
 try {
+    if (Test-Path $GraphRagPython) {
+        try {
+            Write-Host "Starting Microsoft GraphRAG service on http://127.0.0.1:8100 ..."
+            $GraphRagProcess = Start-Process `
+                -FilePath $GraphRagPython `
+                -ArgumentList @($GraphRagService) `
+                -WorkingDirectory $ProjectRoot `
+                -PassThru `
+                -WindowStyle Hidden
+        }
+        catch {
+            Write-Host "Microsoft GraphRAG service not started: $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-Host "Microsoft GraphRAG service skipped: $GraphRagPython not found (.\scripts\install_graphrag_deps.ps1)."
+    }
+
     Write-Host "Starting backend on http://127.0.0.1:8000 ..."
     $BackendProcess = Start-Process `
         -FilePath $Python `
@@ -64,5 +86,11 @@ finally {
     if ($BackendProcess -and -not $BackendProcess.HasExited) {
         Write-Host "Stopping backend ..."
         Stop-Process -Id $BackendProcess.Id -Force
+    }
+
+    if ($GraphRagProcess -and -not $GraphRagProcess.HasExited) {
+        Write-Host "Stopping Microsoft GraphRAG service ..."
+        # The venv's python.exe starts the real interpreter as a child process, which holds the port: stop the tree.
+        & taskkill.exe /T /F /PID $GraphRagProcess.Id | Out-Null
     }
 }
