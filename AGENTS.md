@@ -72,10 +72,21 @@ Start the parts in this order (details in `README.md`):
 ```
 
 Then, in `frontend`: `npm.cmd run dev -- --host 127.0.0.1` (React on port 5173), or
-start backend and frontend together with `.\scripts\run_app.ps1`.
+start backend and frontend together with `.\scripts\run_app.ps1`, which also starts the
+Microsoft GraphRAG service (port 8100) when `.venv-graphrag` exists. The service alone:
+`.\scripts\run_graphrag_service.ps1`.
 
 After editing backend code, restart the backend (prompts and module constants are
-read at start). `backend/ai_agent/settings.json` is read per question.
+read at start). `backend/ai_agent/settings.json` is read per question. After editing
+`graphrag_service/server.py`, restart the GraphRAG service; `graphrag_project/settings.yaml`
+is read per question and per build.
+
+## Microsoft GraphRAG
+
+A second RAG system next to the graph layers and the agent: `docs/GRAPHRAG_HANDOFF.md`.
+It never reads or writes Neo4j. Building its index and asking it questions (Query tab,
+chat in MS GraphRAG mode, evaluation runs) call OpenAI and cost money: only the user
+starts or approves them. Every step runs from its tab in the app, not from the command line.
 
 ## Database
 

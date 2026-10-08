@@ -74,6 +74,6 @@ The index is built locally (the Index tab, with the cache), not on the server. E
 | Status | `docker compose ps` |
 | Logs | `docker compose logs -f backend` (or `nginx`, `neo4j`, `graphrag`) |
 | Stop / start | `docker compose stop` / `docker compose start` |
-| Update the code | copy the new code, then `docker compose up -d --build` |
+| Update the code | copy the new code with LF line endings (`git -c core.autocrlf=false archive`, see `DEPLOY_HANDOFF.md`), then `docker compose up -d --build`; note the commit in `DEPLOYED_VERSION` |
 | Neo4j Browser | `ssh -L 7474:localhost:7474 -L 7687:localhost:7687 <user>@<ip>`, then http://localhost:7474 |
 | Back up Neo4j | `docker compose stop neo4j`, then `docker compose run --rm -v "$PWD/dumps:/dumps" neo4j neo4j-admin database dump neo4j --to-path=/dumps` |

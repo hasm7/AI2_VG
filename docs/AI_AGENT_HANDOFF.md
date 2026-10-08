@@ -197,6 +197,14 @@ the node citations are chips that find and ring the node in the graph panel; the
 button turns a quiet typing blip on or off. While the AI works, the right panel's knowledge graphic glows and signals
 run along its lines; afterwards the layers the answer drew on stay lit.
 
+**MS GraphRAG mode.** The `MS GraphRAG` button below `New` lets Microsoft GraphRAG answer instead of this agent
+(`docs/GRAPHRAG_HANDOFF.md`): it is filled blue while on, with the search method (Local, Global, DRIFT, Basic; Local
+first) in a small list beside it, and the input box reads `Asking Microsoft GraphRAG (<method>) …`. A switch starts a
+new chat, as `New` does: this agent keeps the conversation and GraphRAG's search answers every question on its own, so
+the two are never mixed. A question then goes to `POST /api/graphrag/query`, not to this agent; the answer shows the
+search, the time and the cost, and does not change the last run in `Configure AI agent` or the lit layers. Mode and
+method are kept in `sessionStorage` (`chat.mode`, `chat.microsoftMethod`). The agent's own path is unchanged.
+
 **Configure AI agent** (`ConfigureAgentPanel`): the flow drawn from the compiled graph (the last question's path in
 amber with time and cost per node), node details, the state table (`Show state`), entry points of the last question,
 the last run, the conversation's cost per question, the settings form, and the test questions (`Run test questions`

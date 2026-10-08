@@ -10,6 +10,9 @@ it.
 Related: `docs/SQL_DATA_HANDOFF.md`, `docs/GRAPH_DATA_HANDOFF.md`, one `docs/*_LAYER_HANDOFF.md` per layer,
 `docs/AI_AGENT_HANDOFF.md`.
 
+Microsoft GraphRAG has a pipeline of its own (PostgreSQL to 70 documents to `graphrag index`), apart from this one: it
+never reads or writes Neo4j, and none of the stages here depends on it (`docs/GRAPHRAG_HANDOFF.md`).
+
 ## 1. The flow
 
 ```text

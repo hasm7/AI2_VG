@@ -4,8 +4,12 @@ A graph-based memory system for a software team. Simulated source material (mail
 documents and pull requests) is stored in PostgreSQL, imported into Neo4j, enriched by seven graph layers, and made
 searchable for an AI agent that answers questions in a chat with cited sources.
 
+Next to it runs a second RAG system on the same source data: **Microsoft GraphRAG** (Microsoft's own `graphrag`
+library), so the two can be compared in the same app.
+
 ```text
 Sources -> PostgreSQL (source of truth) -> Import into Neo4j -> 7 graph layers -> AI agent + graph view
+                                        -> 70 documents -> Microsoft GraphRAG index -> global/local/DRIFT/basic search
 ```
 
 ## What it can answer
@@ -72,17 +76,40 @@ The `Chat with AI` tab runs a LangGraph agent:
 5. The **answer** is streamed back with citations to the source records; the facts can be shown under each answer.
 
 The answer's evidence is highlighted in the graph view. Models, limits and reasoning effort are set in the
-`Configure AI agent` tab, which also runs the test questions and shows the agent flow.
+`Configure AI agent` tab, which also runs the test questions and shows the agent flow. The `MS GraphRAG` button in the
+chat lets Microsoft GraphRAG answer instead (section 5).
 
 ### 4. The graph view
 
 The left panel draws the graph with filters per layer (References, Knowledge, Architecture, Causes, Collaboration,
-Algorithms, Embeddings). Click a node to see its properties; adjust the spacing with the `Distance` slider.
+Algorithms, Embeddings). Click a node to see its properties; adjust the spacing with the `Distance` slider. The
+`MS Graph` button opens Microsoft GraphRAG's graph in a window of its own.
+
+### 5. Microsoft GraphRAG (a second RAG system)
+
+The `Microsoft GraphRAG` tab (right end of the top tab row) runs Microsoft's `graphrag` 3.2.0 on the same sources,
+apart from Neo4j and the agent:
+
+```text
+Config -> Documents -> Text units -> Graph -> Communities -> Community reports -> Embeddings
+```
+
+- **Input (Import):** the six sources from PostgreSQL as 70 documents.
+- **Index (Build):** the model extracts entities and relationships from the text (829 and 2 199), hierarchical
+  Leiden groups them into communities (225 in 4 levels), the model writes a report per community, and everything is
+  embedded. The build is locked while nothing has changed.
+- **Entities & relationships**, **Communities & community reports:** the index, with the graph in a window.
+- **Query (Search):** Microsoft's global, local, DRIFT and basic search, with the cost of every question and a limit
+  of 0.10 USD per question.
+- **Evaluation (Compare):** the agent's 27 test questions answered by every search and compared with the agent.
+
+GraphRAG runs in its own Python environment as a small service (port 8100) that the backend calls. Everything about it
+is in `docs/GRAPHRAG_HANDOFF.md`.
 
 ## Setup (first time)
 
 Requirements: PostgreSQL 18, Neo4j (2026.x, installed through Neo4j Desktop), Node.js, and the project Python virtual
-environment in `.venv`.
+environment in `.venv`. Microsoft GraphRAG also needs Python 3.13 (its own environment, `.venv-graphrag`).
 
 1. **Python dependencies** (always through the script, which uses `.venv`):
 
@@ -119,6 +146,14 @@ environment in `.venv`.
 5. **Build the graph**: start the app (below), open the SQL viewer with `Open SQL Viewer`, import the six sources,
    then build the seven layers in order in the `Build graph layers` tab.
 
+6. **Microsoft GraphRAG** (optional): create its environment (Python 3.13, about 1 GB of packages; never touches
+   `.venv`), then in the app export the input in `Input (Import)` and build the index in `Index (Build)` (a full build
+   of the Kvitta data costs about 9 USD in OpenAI calls):
+
+   ```powershell
+   .\scripts\install_graphrag_deps.ps1
+   ```
+
 ## Starting the program
 
 Start the three parts in this order.
@@ -144,14 +179,19 @@ npm.cmd run dev -- --host 127.0.0.1
 
 Then open **http://127.0.0.1:5173**.
 
-Steps 2 and 3 can also be started together:
+Steps 2 and 3 can also be started together, with the Microsoft GraphRAG service (port 8100) when `.venv-graphrag`
+exists; stopping the frontend stops all three:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\run_app.ps1
 ```
 
+The GraphRAG service alone: `.\scripts\run_graphrag_service.ps1`. The rest of the app works without it.
+
 The SQL viewer (port 5000) opens from the app's `Open SQL Viewer` button, or with `.\scripts\run_viewer.ps1`.
 Stop Neo4j with `.\scripts\stop_neo4j.ps1`. `npm.cmd run build` in `frontend` builds the frontend for a server.
+
+The app also runs on a server with Docker Compose (`docker-compose.yml`, `deploy/README.md`).
 
 ## Documentation
 
@@ -166,20 +206,27 @@ Stop Neo4j with `.\scripts\stop_neo4j.ps1`. `npm.cmd run build` in `frontend` bu
 | `docs/PIPELINE_AND_LINKS_HANDOFF.md` | Build order, staleness, how everything links |
 | `docs/*_LAYER_HANDOFF.md`, `docs/GRAPH_ALGORITHMS_HANDOFF.md` | One document per layer |
 | `docs/AI_AGENT_HANDOFF.md` | The chat agent: flow, specialists, facts, settings, test questions |
+| `docs/GRAPHRAG_HANDOFF.md` | Microsoft GraphRAG: pipeline, index, settings and why, searches, cost limit, tabs, evaluation |
 | `docs/SCALING_HANDOFF.md` | How to grow to much larger data |
+| `deploy/README.md`, `DEPLOY_HANDOFF.md` | Running the app on the server: Docker Compose, data, login, updates |
 
 ## Project structure
 
 ```text
-backend/            Flask API (port 8000), graph layers, AI agent (backend/ai_agent/)
-frontend/           React + Vite app (port 5173)
-viewer/             SQL viewer and SQL-to-Neo4j import (port 5000)
-scripts/            setup and start scripts
-data/               example data (kvitta_seed.sql)
-kvitta/             the Kvitta scenario, in Swedish
-docs/               documentation
-backups/            earlier datasets
-draft/              early planning sketches
-AGENTS.md           rules for coding agents
-requirements.txt    Python dependencies
+backend/                  Flask API (port 8000), graph layers, AI agent (backend/ai_agent/), GraphRAG input/routes/evaluation
+frontend/                 React + Vite app (port 5173); the GraphRAG tabs in src/MicrosoftGraphRagPanel.tsx
+viewer/                   SQL viewer and SQL-to-Neo4j import (port 5000)
+graphrag_service/         Microsoft GraphRAG service (port 8100, runs in .venv-graphrag) and its Dockerfile
+graphrag_project/         GraphRAG settings and prompts; input/, output/ (the index), cache/, logs/ are not in git
+scripts/                  setup and start scripts
+deploy/                   server setup (Nginx, .env example, README)
+data/                     example data (kvitta_seed.sql)
+kvitta/                   the Kvitta scenario, in Swedish
+docs/                     documentation
+backups/                  earlier datasets
+draft/                    early planning sketches
+AGENTS.md                 rules for coding agents
+requirements.txt          Python dependencies of the app (.venv)
+requirements-graphrag.txt Python dependencies of Microsoft GraphRAG (.venv-graphrag)
+docker-compose.yml        the server's containers
 ```

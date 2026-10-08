@@ -412,6 +412,9 @@ row holds `Chunks` and `Entry points` on the left and the SQL viewer button and 
   turning. Turning is a CSS rotation of the canvas, so it costs almost nothing.
 - **Citations from the chat** ring and centre the cited node and hold the graph still until the pointer has been in
   the graph box and left it.
+- **MS Graph** (in the `Window` group, after `Expand`): opens Microsoft GraphRAG's graph in a window over the app
+  (`MsGraphButton` from `frontend/src/MicrosoftGraphRagPanel.tsx`, `docs/GRAPHRAG_HANDOFF.md`). It is a separate
+  graph, not in Neo4j; nothing else in the panel depends on it.
 - Every node and every relationship of the chosen filter is sent to the browser and drawn. For much larger data see
   `docs/SCALING_HANDOFF.md`. Change the panel carefully and in isolation.
 
