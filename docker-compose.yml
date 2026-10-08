@@ -46,14 +46,35 @@ services:
       # The SQL viewer listens on all interfaces inside the container; the browser opens it through Nginx.
       VIEWER_HOST: 0.0.0.0
       VIEWER_PUBLIC_URL: http://viewer.${SERVER_NAME}/
+      # Microsoft GraphRAG, the separate RAG system, on the internal network (the graphrag service below).
+      GRAPHRAG_SERVICE_URL: http://graphrag:8100
     volumes:
       # The agent's settings and test runs, kept on the server so they survive a rebuild.
       - ./state/settings.json:/app/backend/ai_agent/settings.json
       - ./state/evaluation_last.json:/app/backend/ai_agent/evaluation_last.json
       - ./state/evaluation_history.json:/app/backend/ai_agent/evaluation_history.json
+      # Microsoft GraphRAG: the Input (Import) tab writes the input documents here, and the GraphRAG evaluation keeps
+      # its results on the server.
+      - ./graphrag_project:/app/graphrag_project
+      - ./state/graphrag_evaluation_last.json:/app/backend/graphrag_evaluation_last.json
     depends_on:
       - neo4j
       - postgres
+
+  # Microsoft GraphRAG service (graphrag_service/server.py): reads the index and answers with Microsoft's searches.
+  # Reached only by the backend; no published port. The rest of the app works without it.
+  graphrag:
+    build:
+      context: .
+      dockerfile: graphrag_service/Dockerfile
+    restart: unless-stopped
+    # OPENAI_API_KEY for the searches (settings.yaml names it).
+    env_file: .env
+    environment:
+      GRAPHRAG_SERVICE_HOST: 0.0.0.0
+    volumes:
+      # Settings, prompts, input and the index (output/), kept on the server so the index survives a rebuild.
+      - ./graphrag_project:/app/graphrag_project
 
   nginx:
     build:

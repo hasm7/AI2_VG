@@ -1,7 +1,7 @@
 # Deploying AI2_VG
 
-The app runs on one VM with Docker Compose: `neo4j`, `postgres`, `backend` (Gunicorn) and `nginx` (the built frontend
-and the login for everything that is not a GET). Only Nginx is public, on port 80 (plain HTTP): the app at
+The app runs on one VM with Docker Compose: `neo4j`, `postgres`, `backend` (Gunicorn), `graphrag` (Microsoft GraphRAG,
+below) and `nginx` (the built frontend and the login for everything that is not a GET). Only Nginx is public, on port 80 (plain HTTP): the app at
 `http://<ip>/`, the SQL viewer at `http://viewer.<SERVER_NAME>/`.
 
 Commands run in the project folder on the server.
@@ -42,12 +42,37 @@ docker compose up -d postgres
 docker compose exec -T postgres pg_restore -U postgres -d hm_data --no-owner < dumps/hm_data.dump
 ```
 
+## Microsoft GraphRAG
+
+The `graphrag` service (`graphrag_service/Dockerfile`, Python 3.13 with `requirements-graphrag.txt`, about 1 GB) answers
+the Microsoft GraphRAG tab and the chat's MS GraphRAG mode. It has no published port: only the backend reaches it, at
+`http://graphrag:8100`. The rest of the app works without it.
+
+Its project folder `graphrag_project/` is mounted into both the `graphrag` and the `backend` container. `settings.yaml`
+and the prompts come with the code; the input and the index are not in git and are copied from the local machine, with
+`tar` so the files keep their times (the Index tab shows the time of the build):
+
+```sh
+# locally, in the project folder
+tar -czf graphrag_data.tar.gz graphrag_project/input graphrag_project/output
+scp -i <key> graphrag_data.tar.gz <user>@<ip>:~/ai2_vg/
+
+# on the server, in ~/ai2_vg
+tar -xzf graphrag_data.tar.gz && rm graphrag_data.tar.gz
+touch state/graphrag_evaluation_last.json   # or copy the local backend/graphrag_evaluation_last.json there
+docker compose up -d --build
+docker compose logs -f graphrag             # wait for "GraphRAG warm-up done"
+```
+
+The index is built locally (the Index tab, with the cache), not on the server. Every GraphRAG request that is not a GET
+(export, build, questions, evaluation runs) needs the login, like the rest of the app.
+
 ## Everyday use
 
 | Task | Command |
 | --- | --- |
 | Status | `docker compose ps` |
-| Logs | `docker compose logs -f backend` (or `nginx`, `neo4j`) |
+| Logs | `docker compose logs -f backend` (or `nginx`, `neo4j`, `graphrag`) |
 | Stop / start | `docker compose stop` / `docker compose start` |
 | Update the code | copy the new code, then `docker compose up -d --build` |
 | Neo4j Browser | `ssh -L 7474:localhost:7474 -L 7687:localhost:7687 <user>@<ip>`, then http://localhost:7474 |

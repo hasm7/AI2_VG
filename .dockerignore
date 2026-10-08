@@ -14,3 +14,7 @@ draft
 **/*.log
 backend/ai_agent/evaluation_last.json
 backend/ai_agent/evaluation_history.json
+# Microsoft GraphRAG: its local environment, and its project folder (mounted on the server, never baked into an image).
+.venv-graphrag
+graphrag_project
+backend/graphrag_evaluation_last.json
