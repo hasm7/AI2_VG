@@ -737,6 +737,36 @@ main {
   background-size: 28px 28px;
 }
 
+/* Evaluation (Compare): the answers of every system to one question, side by side. */
+.graphrag-evaluation-answers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.graphrag-evaluation-answer {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.graphrag-evaluation-meta {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.graphrag-evaluation-text {
+  margin: 0;
+  color: #1e293b;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 /* Query (Search): the method choice, the question box and the answer. */
 .graphrag-query-methods {
   display: grid;

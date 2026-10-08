@@ -70,6 +70,7 @@ graphrag_project/logs/
 # Agent test runs (results change with every run)
 backend/ai_agent/evaluation_last.json
 backend/ai_agent/evaluation_history.json
+backend/graphrag_evaluation_last.json
 
 # Neo4j local files
 neo4j/data/

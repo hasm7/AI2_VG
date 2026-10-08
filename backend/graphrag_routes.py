@@ -13,6 +13,7 @@ import urllib.request
 
 from flask import Blueprint, jsonify, request
 
+import graphrag_evaluation
 from graphrag_input import ExportRunningError, export_input, input_state
 from topic_event_extraction import postgres_database_url
 
@@ -113,6 +114,34 @@ def api_graphrag_query():
         body={"method": body.get("method"), "question": body.get("question")},
     )
     return jsonify(payload), status_code
+
+
+@graphrag_blueprint.route("/api/graphrag/evaluation", methods=["GET"])
+def api_graphrag_evaluation():
+    try:
+        return jsonify(graphrag_evaluation.state())
+    except Exception as error:  # noqa: BLE001
+        return jsonify({"error": str(error)}), 500
+
+
+# Runs the app's 27 test questions through the chosen Microsoft GraphRAG searches (calls OpenAI, costs money); body
+# {"methods": ["local", "global", "drift", "basic"]}. Returns at once; the frontend follows the run with GET.
+@graphrag_blueprint.route("/api/graphrag/evaluation", methods=["POST", "OPTIONS"])
+def api_graphrag_evaluation_start():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    body = request.get_json(silent=True) or {}
+
+    def ask(method: str, question: str) -> tuple[dict, int]:
+        return service_call("POST", "/query", QUERY_TIMEOUT_SECONDS, body={"method": method, "question": question})
+
+    try:
+        return jsonify(graphrag_evaluation.start(body.get("methods") or [], ask)), 202
+    except graphrag_evaluation.EvaluationRunningError as error:
+        return jsonify({"error": str(error)}), 409
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
 
 
 @graphrag_blueprint.route("/api/graphrag/input", methods=["GET"])

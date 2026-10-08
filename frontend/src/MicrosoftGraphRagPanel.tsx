@@ -6,7 +6,7 @@ import cytoscape, { type Core } from "cytoscape";
 // `graphrag` library in its own Python environment (the GraphRAG service), and none of it touches the graph layers or
 // the AI agent.
 
-type MicrosoftGraphRagTab = "input" | "index" | "entities" | "communities" | "query";
+type MicrosoftGraphRagTab = "input" | "index" | "entities" | "communities" | "query" | "evaluation";
 
 const microsoftGraphRagTabs: Array<{ id: MicrosoftGraphRagTab; label: string; description: string }> = [
   {
@@ -35,6 +35,11 @@ const microsoftGraphRagTabs: Array<{ id: MicrosoftGraphRagTab; label: string; de
     id: "query",
     label: "Query (Search)",
     description: "Ask GraphRAG a question with global, local, DRIFT or basic search.",
+  },
+  {
+    id: "evaluation",
+    label: "Evaluation (Compare)",
+    description: "The app's 27 test questions answered by Microsoft GraphRAG and by the app's own agent.",
   },
 ];
 
@@ -1386,6 +1391,286 @@ function GraphRagQueryPanel() {
   );
 }
 
+type EvaluationResult = {
+  id: string;
+  answer: string;
+  error: string | null;
+  terms: Array<{ expected: string[]; found: boolean }>;
+  terms_ok: boolean;
+  passed: boolean;
+  full_passed?: boolean;
+  cost_usd: number;
+  model_calls: number;
+  seconds: number;
+};
+type EvaluationSystemRun = {
+  run_at: string;
+  passed: number;
+  full_passed?: number;
+  total: number;
+  cost_usd: number;
+  results: EvaluationResult[];
+};
+type EvaluationState = {
+  error?: string;
+  questions: Array<{ id: string; question: string; goal: string; expected_terms: string[][] }>;
+  methods: MicrosoftEvaluationMethod[];
+  estimate_per_question_usd: Record<string, number>;
+  run: { running: boolean; done?: number; total?: number; current?: string | null; error?: string; methods?: string[] };
+  graphrag: Partial<Record<MicrosoftEvaluationMethod, EvaluationSystemRun>>;
+  agent: EvaluationSystemRun | null;
+};
+type MicrosoftEvaluationMethod = "local" | "global" | "drift" | "basic";
+
+const EVALUATION_METHOD_LABELS: Record<MicrosoftEvaluationMethod, string> = {
+  local: "Local",
+  global: "Global",
+  drift: "DRIFT",
+  basic: "Basic",
+};
+const EVALUATION_POLL_MS = 3000;
+
+function GraphRagEvaluationPanel() {
+  const [state, setState] = useState<EvaluationState | null>(null);
+  const [error, setError] = useState("");
+  const [chosen, setChosen] = useState<MicrosoftEvaluationMethod[]>(["local", "basic"]);
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  const load = async () => {
+    try {
+      const response = await fetch("/api/graphrag/evaluation");
+      const data = (await response.json()) as EvaluationState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "Could not read the evaluation.");
+      }
+      setState(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not read the evaluation.");
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const isRunning = Boolean(state?.run.running);
+  useEffect(() => {
+    if (!isRunning) {
+      return;
+    }
+    const timer = window.setInterval(() => void load(), EVALUATION_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [isRunning]);
+
+  const questionCount = state?.questions.length ?? 0;
+  const estimate = chosen.reduce(
+    (sum, method) => sum + (state?.estimate_per_question_usd[method] ?? 0) * questionCount,
+    0,
+  );
+
+  const start = async () => {
+    setError("");
+    try {
+      const response = await fetch("/api/graphrag/evaluation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ methods: chosen }),
+      });
+      const data = (await response.json()) as EvaluationState;
+      if (!response.ok || data.error) {
+        throw new Error(data.error || "The evaluation could not be started.");
+      }
+      setState(data);
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : "The evaluation could not be started.");
+    }
+  };
+
+  const methods = (state?.methods ?? []) as MicrosoftEvaluationMethod[];
+  const runOf = (method: MicrosoftEvaluationMethod) => state?.graphrag[method];
+  const resultOf = (run: EvaluationSystemRun | null | undefined, id: string) => run?.results.find((r) => r.id === id);
+  const mark = (result: EvaluationResult | undefined) => (!result ? "-" : result.passed ? "✅" : "❌");
+  const average = (run: EvaluationSystemRun) =>
+    run.results.length ? (run.results.reduce((sum, r) => sum + r.seconds, 0) / run.results.length).toFixed(1) : "-";
+
+  return (
+    <div className="knowledge-panel graphrag-panel">
+      <p className="reference-description">
+        The app's own {questionCount} test questions (<code>backend/ai_agent/test_questions.json</code>), unchanged,
+        answered by Microsoft GraphRAG's searches. A question passes when the answer holds the expected terms: the
+        same rule the app's own evaluation uses for terms, checked in code, no model judges. The app's own agent is
+        not run again: its latest run from Configure AI agent is scored with the same rule. Its other checks (route,
+        evidence nodes, facts) name nodes of its own graph and cannot be applied to Microsoft GraphRAG.
+      </p>
+
+      <div className="graphrag-query-methods" role="group" aria-label="Methods to run">
+        {methods.map((method) => (
+          <label key={method} className="graphrag-query-method">
+            <input
+              type="checkbox"
+              checked={chosen.includes(method)}
+              disabled={isRunning}
+              onChange={() =>
+                setChosen(chosen.includes(method) ? chosen.filter((m) => m !== method) : [...chosen, method])
+              }
+            />
+            <span>
+              <strong>{EVALUATION_METHOD_LABELS[method]}</strong>{" "}
+              <em>
+                (about {((state?.estimate_per_question_usd[method] ?? 0) * questionCount).toFixed(2)} USD for{" "}
+                {questionCount} questions
+                {runOf(method) ? `; last run ${formatTime(runOf(method)!.run_at)}` : "; not run yet"})
+              </em>
+            </span>
+          </label>
+        ))}
+      </div>
+      <div className="reference-actions">
+        <button
+          className="knowledge-build-button"
+          type="button"
+          disabled={isRunning || chosen.length === 0 || !state}
+          onClick={start}
+        >
+          {isRunning ? "Running evaluation..." : `Run evaluation (about ${estimate.toFixed(2)} USD)`}
+        </button>
+        {isRunning && state ? (
+          <span className="reference-description">
+            {state.run.done ?? 0} of {state.run.total ?? 0} answered · now {state.run.current ?? "-"} · the Query tab
+            waits while this runs
+          </span>
+        ) : null}
+      </div>
+      {error ? <p className="reference-error">{error}</p> : null}
+      {state?.run.error ? <p className="reference-error">The last run stopped: {state.run.error}</p> : null}
+
+      {state ? (
+        <>
+          <h4 className="knowledge-card-title knowledge-section-title graphrag-index-title">Summary</h4>
+          <div className="reference-table-wrapper">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>System</th>
+                  <th>Passed (expected terms)</th>
+                  <th>Cost</th>
+                  <th>Average time</th>
+                  <th>Run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {state.agent ? (
+                  <tr>
+                    <td>
+                      <strong>App's own agent</strong>
+                    </td>
+                    <td>
+                      {state.agent.passed} / {state.agent.total}{" "}
+                      <em>(full check incl. evidence and facts: {state.agent.full_passed} / {state.agent.total})</em>
+                    </td>
+                    <td>{state.agent.cost_usd.toFixed(4)} USD</td>
+                    <td>{average(state.agent)} s</td>
+                    <td>{formatTime(state.agent.run_at)}</td>
+                  </tr>
+                ) : null}
+                {methods.map((method) => {
+                  const run = runOf(method);
+                  return (
+                    <tr key={method}>
+                      <td>MS GraphRAG · {EVALUATION_METHOD_LABELS[method]}</td>
+                      <td>{run ? `${run.passed} / ${run.total}` : "not run"}</td>
+                      <td>{run ? `${run.cost_usd.toFixed(4)} USD` : "-"}</td>
+                      <td>{run ? `${average(run)} s` : "-"}</td>
+                      <td>{run ? formatTime(run.run_at) : "-"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <h4 className="knowledge-card-title knowledge-section-title graphrag-index-title">
+            Per question <span className="knowledge-section-kind">(click a row to read the answers side by side)</span>
+          </h4>
+          <div className="reference-table-wrapper layer-last-table">
+            <table className="reference-table">
+              <thead>
+                <tr>
+                  <th>Id</th>
+                  <th>Question</th>
+                  <th>
+                    Answer must include <span className="knowledge-section-kind">( + = all of them, / = any of them )</span>
+                  </th>
+                  <th>Own agent</th>
+                  {methods.map((method) => (
+                    <th key={method}>{EVALUATION_METHOD_LABELS[method]}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {state.questions.map((question) => (
+                  <Fragment key={question.id}>
+                    <tr
+                      style={{ cursor: "pointer" }}
+                      onClick={() => setOpenId(openId === question.id ? null : question.id)}
+                    >
+                      <td>{question.id}</td>
+                      <td>{question.question}</td>
+                      <td>
+                        {question.expected_terms.length
+                          ? question.expected_terms.map((group) => group.join(" / ")).join(" + ")
+                          : "-"}
+                      </td>
+                      <td>{mark(resultOf(state.agent, question.id))}</td>
+                      {methods.map((method) => (
+                        <td key={method}>{mark(resultOf(runOf(method), question.id))}</td>
+                      ))}
+                    </tr>
+                    {openId === question.id ? (
+                      <tr>
+                        <td colSpan={4 + methods.length}>
+                          <div className="graphrag-evaluation-answers">
+                            {[
+                              { name: "App's own agent", result: resultOf(state.agent, question.id) },
+                              ...methods.map((method) => ({
+                                name: `MS GraphRAG · ${EVALUATION_METHOD_LABELS[method]}`,
+                                result: resultOf(runOf(method), question.id),
+                              })),
+                            ]
+                              .filter((entry) => entry.result)
+                              .map((entry) => (
+                                <div key={entry.name} className="graphrag-evaluation-answer">
+                                  <strong>
+                                    {entry.name} {mark(entry.result)}
+                                  </strong>
+                                  <span className="graphrag-evaluation-meta">
+                                    {entry.result!.terms
+                                      .map((group) => `${group.found ? "✓" : "✗"} ${group.expected.join(" / ")}`)
+                                      .join("   ")}{" "}
+                                    · {entry.result!.cost_usd.toFixed(4)} USD · {entry.result!.seconds} s
+                                  </span>
+                                  {entry.result!.error ? (
+                                    <p className="reference-error">{entry.result!.error}</p>
+                                  ) : (
+                                    <p className="graphrag-evaluation-text">{entry.result!.answer}</p>
+                                  )}
+                                </div>
+                              ))}
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function MicrosoftGraphRagPanel() {
   const [activeInnerTab, setActiveInnerTab] = useState<MicrosoftGraphRagTab>("input");
 
@@ -1415,8 +1700,10 @@ export function MicrosoftGraphRagPanel() {
           <GraphRagEntitiesPanel />
         ) : activeInnerTab === "communities" ? (
           <GraphRagCommunitiesPanel />
-        ) : (
+        ) : activeInnerTab === "query" ? (
           <GraphRagQueryPanel />
+        ) : (
+          <GraphRagEvaluationPanel />
         )}
       </div>
     </div>
