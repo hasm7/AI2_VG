@@ -164,11 +164,18 @@ def config_files() -> list[Path]:
     return [SETTINGS_FILE, *prompts]
 
 
-def config_hash() -> str:
+# Version 2 reads the prompt files with every line ending as LF. Version 1 (records without a version) hashed their
+# bytes as they lay on disk, so the same prompts gave one fingerprint on Windows (CRLF, as `graphrag init` writes them
+# there) and another on the server (LF, as they come from git).
+FINGERPRINT_VERSION = 2
+
+
+def config_hash(normalize_line_endings: bool = True) -> str:
     """The fingerprint of exactly what the indexing pipeline reads, taken from GraphRAG's own loaded settings: the
     input, chunking, graph extraction, description summaries, claims, Leiden clustering, community reports and
     embeddings settings, the models those steps use (without the key), and the prompt files they name. Search
-    settings (global, local, DRIFT, basic and their model) are left out: changing them never makes the index stale."""
+    settings (global, local, DRIFT, basic and their model) are left out: changing them never makes the index stale.
+    Line endings are not content: the prompts are read with CRLF as LF (version 1 did not, see FINGERPRINT_VERSION)."""
     from graphrag.config.load_config import load_config  # imported on first use
 
     config = load_config(GRAPHRAG_PROJECT_DIR)
@@ -193,12 +200,30 @@ def config_hash() -> str:
                     config.community_reports.graph_prompt, config.community_reports.text_prompt]
     if config.extract_claims.enabled:
         prompt_paths.append(config.extract_claims.prompt)
+    def prompt_bytes(path: Path) -> bytes:
+        data = path.read_bytes()
+        return data.replace(b"\r\n", b"\n") if normalize_line_endings else data
+
     fingerprint["prompts"] = {
-        str(path): hashlib.sha256((GRAPHRAG_PROJECT_DIR / path).read_bytes()).hexdigest()
+        str(path): hashlib.sha256(prompt_bytes(GRAPHRAG_PROJECT_DIR / path)).hexdigest()
         for path in sorted({str(path) for path in prompt_paths if path})
         if (GRAPHRAG_PROJECT_DIR / path).exists()
     }
     return hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _upgrade_record(record: dict) -> dict:
+    """A record from version 1 is moved to the current fingerprint when it still matches the settings computed the
+    version 1 way: nothing has changed since the build, only the way it is fingerprinted. Otherwise it is left as it
+    is (and the settings count as changed)."""
+    if record.get("fingerprint_version") == FINGERPRINT_VERSION:
+        return record
+    if config_hash(normalize_line_endings=False) != record.get("config_hash"):
+        return record
+    upgraded = {**record, "config_hash": config_hash(), "fingerprint_version": FINGERPRINT_VERSION}
+    INDEX_RUN_FILE.write_text(json.dumps(upgraded, indent=2), encoding="utf-8")
+    print("Moved the index record to fingerprint version 2 (line endings ignored).", flush=True)
+    return upgraded
 
 
 def adopt_existing_index() -> None:
@@ -217,6 +242,7 @@ def adopt_existing_index() -> None:
         "status": "finished",
         "input_hash": file_hash(INPUT_FILE),
         "config_hash": config_hash(),
+        "fingerprint_version": FINGERPRINT_VERSION,
         "started_at": None,
         "finished_at": built_iso,
         "recorded_from_existing_build": True,
@@ -234,6 +260,7 @@ def index_changes() -> list[str]:
         # Started from the app: the fingerprints of the input and the settings it was built from are recorded.
         if record.get("status") != "finished":
             return ["The last build did not finish."]
+        record = _upgrade_record(record)
         changes = []
         if file_hash(INPUT_FILE) != record.get("input_hash"):
             changes.append("The input documents have changed since the last build.")
@@ -296,6 +323,7 @@ def _write_run_record(status_value: str) -> None:
         "status": status_value,
         "input_hash": _index_run["input_hash"],
         "config_hash": _index_run["config_hash"],
+        "fingerprint_version": FINGERPRINT_VERSION,
         "started_at": _index_run["started_at"],
         "finished_at": _index_run.get("finished_at"),
     }, indent=2), encoding="utf-8")
