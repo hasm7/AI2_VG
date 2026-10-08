@@ -1593,12 +1593,12 @@ function GraphRagEvaluationPanel() {
             Per question <span className="knowledge-section-kind">(click a row to read the answers side by side)</span>
           </h4>
           <div className="reference-table-wrapper layer-last-table">
-            <table className="reference-table">
+            <table className="reference-table graphrag-evaluation-table">
               <thead>
                 <tr>
-                  <th>Id</th>
-                  <th>Question</th>
-                  <th>
+                  <th className="graphrag-evaluation-id">Id</th>
+                  <th className="graphrag-evaluation-question">Question</th>
+                  <th className="graphrag-evaluation-terms">
                     Answer must include <span className="knowledge-section-kind">( + = all of them, / = any of them )</span>
                   </th>
                   <th>Own agent</th>
@@ -1614,9 +1614,9 @@ function GraphRagEvaluationPanel() {
                       style={{ cursor: "pointer" }}
                       onClick={() => setOpenId(openId === question.id ? null : question.id)}
                     >
-                      <td>{question.id}</td>
-                      <td>{question.question}</td>
-                      <td>
+                      <td className="graphrag-evaluation-id">{question.id}</td>
+                      <td className="graphrag-evaluation-question">{question.question}</td>
+                      <td className="graphrag-evaluation-terms">
                         {question.expected_terms.length
                           ? question.expected_terms.map((group) => group.join(" / ")).join(" + ")
                           : "-"}

@@ -737,6 +737,33 @@ main {
   background-size: 28px 28px;
 }
 
+/* Evaluation (Compare): the question id ("q01") never wraps (the GraphRAG tables otherwise break long words). */
+.graphrag-panel .reference-table .graphrag-evaluation-id {
+  width: 44px;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+/* Evaluation (Compare), Per question: the table keeps to the width of the page (no sideways scrolling); the question
+   gets a little more room and the expected terms as much less; headers may wrap, so every one is seen in full. */
+.graphrag-panel .reference-table.graphrag-evaluation-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.graphrag-panel .graphrag-evaluation-table th {
+  white-space: normal;
+  vertical-align: bottom;
+}
+
+.graphrag-panel .reference-table .graphrag-evaluation-question {
+  width: 36%;
+}
+
+.graphrag-panel .reference-table .graphrag-evaluation-terms {
+  width: 20%;
+}
+
 /* Evaluation (Compare): the answers of every system to one question, side by side. */
 .graphrag-evaluation-answers {
   display: grid;
